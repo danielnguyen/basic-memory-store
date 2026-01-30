@@ -1,0 +1,43 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: pg-test
+    environment:
+      POSTGRES_USER: memory_user
+      POSTGRES_PASSWORD: pass
+      POSTGRES_DB: memory_db
+    ports:
+      - "15432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memory_user -d memory_db"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant-test
+    ports:
+      - "16333:6333"
+      - "16334:6334"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:6333/readyz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  litellm:
+    image: ghcr.io/berriai/litellm:v1.81.0-stable
+    platform: linux/amd64
+    container_name: litellm-test
+    env_file:
+      - .env
+    command: ["litellm", "--port", "4000", "--host", "0.0.0.0"]
+    ports:
+      - "4000:4000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:4000/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+

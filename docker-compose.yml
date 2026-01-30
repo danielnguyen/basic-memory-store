@@ -1,0 +1,74 @@
+services:
+  memory-db-postgres:
+    image: "postgres:16-alpine"
+    container_name: "memory-postgres"
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=memory_user
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=memory_db
+    volumes:
+      - "${_VOLUME_MEMORYGW}/postgres_data:/var/lib/postgresql/data"
+      - "${_VOLUME_MEMORYGW}/schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro"
+    ports:
+      - "15432:5432"
+
+  memory-db-qdrant:
+    image: "qdrant/qdrant:latest-unprivileged"
+    container_name: "memory-qdrant"
+    restart: unless-stopped
+    user: "1000:1000"
+    volumes:
+      - "${_VOLUME_MEMORYGW}/qdrant_data:/qdrant/storage:rw"
+    ports:
+      - "16333:6333"
+
+  litellm:
+    image: "ghcr.io/berriai/litellm:latest"
+    container_name: "memory-litellm"
+    restart: unless-stopped
+    environment:
+      # LiteLLM reads OPENAI_API_KEY for OpenAI provider passthrough
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      # Optional: set default model routing in a config file later
+    ports:
+      - "14000:4000"
+    command: ["--host", "0.0.0.0", "--port", "4000"]
+
+  memory-api:
+    build:
+      context: ./memory_api
+      dockerfile: Dockerfile
+    container_name: "memory-api"
+    restart: unless-stopped
+    user: "1000:1000"
+    depends_on:
+      - memory-db-postgres
+      - memory-db-qdrant
+      - litellm
+    environment:
+      - MEMORY_API_KEY=${MEMORY_API_KEY}
+
+      # Postgres (internal DNS)
+      - PG_DSN=postgresql://memory_user:${POSTGRES_PASSWORD}@memory-db-postgres:5432/memory_db
+
+      # Qdrant (internal DNS)
+      - QDRANT_URL=http://memory-db-qdrant:6333
+      - QDRANT_COLLECTION=messages
+
+      # LiteLLM (internal DNS)
+      - LITELLM_BASE_URL=http://litellm:4000
+      - LITELLM_API_KEY=${LITELLM_API_KEY}
+
+      # Models (these are LiteLLM model strings)
+      - CHAT_MODEL=gpt-4o-mini
+      - EMBED_MODEL=text-embedding-3-small
+
+      # Context
+      - RECENT_TURNS=10
+      - RETRIEVAL_K=8
+      - MAX_CONTEXT_CHARS=12000
+    volumes:
+      - "${_VOLUME_MEMORYGW}/app_data:/app/data:rw"
+    ports:
+      - "11500:8000"
