@@ -1,0 +1,34 @@
+model_list:
+  # OpenAI (reasoning)
+  - model_name: chat_voice_openai
+    litellm_params:
+      model: openai/o4-mini
+      api_key: os.environ/OPENAI_API_KEY
+
+  - model_name: chat_deep_openai
+    litellm_params:
+      model: openai/o3
+      api_key: os.environ/OPENAI_API_KEY
+
+  # Local via remote Ollama @ 192.168.1.206
+  - model_name: chat_local_best
+    litellm_params:
+      model: ollama/qwen3:14b
+      api_base: http://192.168.1.206:11434
+
+  - model_name: chat_local_fast
+    litellm_params:
+      model: ollama/llama3.1:8b-instruct-q8_0
+      api_base: http://192.168.1.206:11434
+
+  # (Optional) Local vision model if you want it later
+  - model_name: chat_local_vision
+    litellm_params:
+      model: ollama/qwen3-vl:8b
+      api_base: http://192.168.1.206:11434
+
+  # Embeddings (keep stable; reindex if you change this)
+  - model_name: embed
+    litellm_params:
+      model: openai/text-embedding-3-small
+      api_key: os.environ/OPENAI_API_KEY

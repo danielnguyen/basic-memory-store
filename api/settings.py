@@ -51,6 +51,32 @@ class Settings(BaseSettings):
     chat_model: str = Field(default="gpt-4o-mini", alias="CHAT_MODEL")
     embed_model: str = Field(default="text-embedding-3-small", alias="EMBED_MODEL")
 
+
+    chat_temperature: float | None = Field(
+        default=None,
+        alias="CHAT_TEMPERATURE",
+        description="Optional temperature for chat completions. If unset, the field is omitted (recommended for O-series).",
+    )
+
+    # --- Indexing policy ---
+    index_user_questions: bool = Field(
+        default=False,
+        alias="INDEX_USER_QUESTIONS",
+        description="If false, user messages ending in '?' are not embedded/indexed (reduces query-echo in retrieval).",
+    )
+    index_assistant_messages: bool = Field(
+        default=False,
+        alias="INDEX_ASSISTANT_MESSAGES",
+        description="If true, assistant messages are embedded/indexed (can improve recall but may add noise).",
+    )
+    min_index_chars: int = Field(
+        default=12,
+        alias="MIN_INDEX_CHARS",
+        ge=1,
+        le=1000,
+        description="Minimum character length required to embed/index a message (reduces low-signal noise like 'ok', 'ping').",
+    )
+
     # --- Context / Retrieval tuning ---
     recent_turns: int = Field(default=10, alias="RECENT_TURNS", ge=0, le=100)
     retrieval_k: int = Field(default=8, alias="RETRIEVAL_K", ge=1, le=50)

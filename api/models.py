@@ -106,6 +106,12 @@ class RetrieveRequest(BaseModel):
         description="If set, restrict retrieval to a conversation.",
     )
 
+    exclude_message_ids: Optional[List[str]] = Field(
+        default=None,
+        description="Optional list of message_ids to exclude from results (e.g., the query message itself).",
+        examples=[["550e8400-e29b-41d4-a716-446655440000"]],
+    )
+
 
 class RetrieveHit(BaseModel):
     message_id: str
@@ -132,9 +138,25 @@ class ChatRequest(BaseModel):
     client_id: Optional[str] = Field(default=None, examples=["car"])
     messages: List[MessageIn] = Field(..., description="New messages to process (usually one user message).")
     retrieval: Optional[RetrievalOptions] = Field(default=None)
+    debug: bool = Field(
+        default=False,
+        description="If true, include retrieval diagnostics in the response."
+    )
 
 
 class ChatResponse(BaseModel):
     conversation_id: str
     answer: str
     retrieved_count: int
+    debug: Optional[RetrievalDebug] = None
+
+
+# ---- Debug ----
+class RetrievalDebugHit(BaseModel):
+    message_id: str
+    score: float
+
+class RetrievalDebug(BaseModel):
+    scope_used: RetrievalScope
+    fallback_used: bool
+    hits: List[RetrievalDebugHit]

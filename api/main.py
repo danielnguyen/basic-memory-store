@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import logging
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Security
+from fastapi import Depends, FastAPI, HTTPException, Security, Request
 from fastapi.responses import JSONResponse
 from fastapi.security.api_key import APIKeyHeader
 
@@ -53,14 +53,42 @@ app = FastAPI(
         "persistAuthorization": True,
         "displayRequestDuration": True,
     },
-    dependencies=[Depends(require_api_key)],
 )
+
+
+@app.middleware("http")
+async def attach_request_id(request: Request, call_next):
+    """Attach/propagate a request id for log correlation and client debugging."""
+    rid = request.headers.get("X-Request-ID") or str(uuid4())
+    request.state.request_id = rid
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = rid
+    return response
+
 
 
 # --- Core clients/stores ---
 pg = PostgresStore(settings.pg_dsn)
 litellm = LiteLLMClient(settings.litellm_base_url, settings.litellm_api_key)
 qdrant = QdrantStore(settings.qdrant_url, settings.qdrant_collection, litellm, settings.embed_model)
+
+
+def should_index_message(role: str, content: str) -> bool:
+    """Heuristic indexing policy to reduce retrieval noise."""
+    if not content or not content.strip():
+        return False
+
+    if len(content.strip()) < settings.min_index_chars:
+        return False
+
+    if role == "assistant" and not settings.index_assistant_messages:
+        return False
+
+    if role == "user" and (not settings.index_user_questions) and content.strip().endswith("?"):
+        return False
+
+    return True
+
 
 
 @app.on_event("startup")
@@ -102,6 +130,7 @@ async def readyz():
     "/v1/conversations",
     response_model=ConversationCreateResponse,
     tags=["conversations"],
+    dependencies=[Depends(require_api_key)],
     summary="Create a new conversation",
 )
 async def create_conversation(body: ConversationCreateRequest):
@@ -112,6 +141,7 @@ async def create_conversation(body: ConversationCreateRequest):
     "/v1/conversations",
     response_model=ConversationListResponse,
     tags=["conversations"],
+    dependencies=[Depends(require_api_key)],
     summary="List conversations (most recent first)",
 )
 async def list_conversations(owner_id: str, client_id: str | None = None, limit: int = 20, cursor: str | None = None):
@@ -131,6 +161,7 @@ async def list_conversations(owner_id: str, client_id: str | None = None, limit:
     "/v1/conversations/resolve",
     response_model=ConversationResolveResponse,
     tags=["conversations"],
+    dependencies=[Depends(require_api_key)],
     summary="Resolve rolling conversation for a client (reuse if recently active)",
 )
 async def resolve_conversation(body: ConversationResolveRequest):
@@ -151,6 +182,7 @@ async def resolve_conversation(body: ConversationResolveRequest):
     "/v1/conversations/{conversation_id}/messages",
     response_model=MessageCreateResponse,
     tags=["messages"],
+    dependencies=[Depends(require_api_key)],
     summary="Append a message (and index it for retrieval when applicable)",
 )
 async def add_message(conversation_id: str, body: MessageCreateRequest):
@@ -165,7 +197,7 @@ async def add_message(conversation_id: str, body: MessageCreateRequest):
         metadata=body.metadata,
     )
 
-    if body.role in ("user", "assistant"):
+    if body.role in ("user", "assistant") and should_index_message(body.role, body.content):
         try:
             await qdrant.upsert_message_vector(
                 message_id=mid,
@@ -176,8 +208,10 @@ async def add_message(conversation_id: str, body: MessageCreateRequest):
                 client_id=body.client_id,
             )
         except Exception:
-            logging.exception("qdrant upsert failed (non-fatal)", extra={"message_id": str(mid)})
-
+            logging.exception(
+                "qdrant upsert failed (non-fatal)",
+                extra={"message_id": str(mid)},
+            )
 
     return MessageCreateResponse(message_id=str(mid))
 
@@ -190,9 +224,10 @@ async def add_message(conversation_id: str, body: MessageCreateRequest):
     "/v1/retrieve",
     response_model=RetrieveResponse,
     tags=["retrieve"],
+    dependencies=[Depends(require_api_key)],
     summary="Retrieve relevant past messages",
 )
-async def retrieve(body: RetrieveRequest):
+async def retrieve(body: RetrieveRequest, request: Request):
     hits = await qdrant.search(
         owner_id=body.owner_id,
         query=body.query,
@@ -200,6 +235,7 @@ async def retrieve(body: RetrieveRequest):
         min_score=body.min_score,
         conversation_id=body.conversation_id,
         client_id=body.client_id,
+        exclude_message_ids=body.exclude_message_ids,
     )
 
     ids = [UUID(h.message_id) for h in hits]
@@ -230,14 +266,15 @@ async def retrieve(body: RetrieveRequest):
     "/v1/chat",
     response_model=ChatResponse,
     tags=["chat"],
+    dependencies=[Depends(require_api_key)],
     summary="Chat with retrieval-augmented memory",
 )
-async def chat(body: ChatRequest):
+async def chat(body: ChatRequest, request: Request):
     owner_id = body.owner_id
     client_id = body.client_id
 
     created_new = False
-    
+
     # Create conversation implicitly if not provided
     if not body.conversation_id:
         conversation_id = str(await pg.create_conversation(owner_id=owner_id, client_id=client_id, title=None))
@@ -250,7 +287,7 @@ async def chat(body: ChatRequest):
     except ValueError:
         raise HTTPException(status_code=400, detail="conversation_id must be a UUID")
 
-    if not created_new and  not await pg.conversation_exists(cid):
+    if not created_new and not await pg.conversation_exists(cid):
         raise HTTPException(status_code=404, detail="conversation_id not found")
 
     inserted_user_message_ids: set[str] = set()
@@ -270,18 +307,24 @@ async def chat(body: ChatRequest):
             metadata=None,
         )
         inserted_user_message_ids.add(str(mid))
-        try:
-            await qdrant.upsert_message_vector(
-                message_id=mid,
-                owner_id=owner_id,
-                conversation_id=cid,
-                role="user",
-                content=m.content,
-                client_id=client_id,
-            )
-        except Exception:
-            logging.exception("qdrant upsert failed for user message (non-fatal)", extra={"message_id": str(mid)})
-
+        if should_index_message("user", m.content):
+            try:
+                await qdrant.upsert_message_vector(
+                    message_id=mid,
+                    owner_id=owner_id,
+                    conversation_id=cid,
+                    role="user",
+                    content=m.content,
+                    client_id=client_id,
+                )
+            except Exception:
+                logging.exception(
+                    "qdrant upsert failed for user message (non-fatal)",
+                    extra={
+                        "message_id": str(mid),
+                        "request_id": getattr(request.state, "request_id", None),
+                    },
+                )
 
     if not last_user_text:
         raise HTTPException(status_code=400, detail="At least one user message is required.")
@@ -291,8 +334,10 @@ async def chat(body: ChatRequest):
     k = opts.k
     min_score = opts.min_score
 
-    # If the client explicitly requested scope != conversation, respect it (no fallback).
-    # Otherwise, do: conversation → fallback to owner if weak/empty.
+    # Debug tracking (only returned if body.debug is true)
+    scope_used = opts.scope
+    fallback_used = False
+
     def _scope_filters(scope: str) -> tuple[str | None, str | None]:
         if scope == "conversation":
             return str(cid), None
@@ -310,16 +355,15 @@ async def chat(body: ChatRequest):
             min_score=min_score_,
             conversation_id=conv_filter,
             client_id=client_filter,
+            exclude_message_ids=list(inserted_user_message_ids) if inserted_user_message_ids else None,
         )
 
     # Pass 1
-    retrieval_hits = []
     try:
         retrieval_hits = await _run_search(opts.scope, min_score)
     except Exception:
         logging.exception("qdrant search failed (non-fatal)")
         retrieval_hits = []
-
 
     # Fallback heuristic:
     # - Only when scope was "conversation"
@@ -328,17 +372,17 @@ async def chat(body: ChatRequest):
         owner_min_score = min(1.0, min_score + 0.05)
         try:
             retrieval_hits = await _run_search("owner", owner_min_score)
+            fallback_used = True
+            scope_used = "owner"
         except Exception:
             logging.exception("qdrant owner-scope fallback search failed (non-fatal)")
             retrieval_hits = []
-
 
     # Drop self-matches (the message(s) we just inserted this request)
     filtered_hits = [h for h in retrieval_hits if h.message_id not in inserted_user_message_ids]
 
     retrieval_ids = [UUID(h.message_id) for h in filtered_hits]
     retrieved = await pg.get_message_snippets_by_ids(retrieval_ids)
-
 
     # Recent context window (conversation-local)
     recent = await pg.get_recent_messages(conversation_id=cid, limit=settings.recent_turns)
@@ -362,9 +406,17 @@ async def chat(body: ChatRequest):
 
     # Call LiteLLM
     try:
-        answer = await litellm.chat(model=settings.chat_model, messages=prompt_messages, temperature=0.2)
+        answer = await litellm.chat(
+            model=settings.chat_model,
+            messages=prompt_messages,
+            temperature=settings.chat_temperature,
+            request_id=getattr(request.state, "request_id", None),
+        )
     except Exception as e:
-        logging.exception("LiteLLM chat call failed")
+        logging.exception(
+            "LiteLLM chat call failed",
+            extra={"request_id": getattr(request.state, "request_id", None)},
+        )
         raise HTTPException(status_code=502, detail=str(e))
 
     # Persist assistant message + vector
@@ -376,25 +428,37 @@ async def chat(body: ChatRequest):
         client_id=client_id,
         metadata=None,
     )
-    try:
-        await qdrant.upsert_message_vector(
-            message_id=amid,
-            owner_id=owner_id,
-            conversation_id=cid,
-            role="assistant",
-            content=answer,
-            client_id=client_id,
-        )
-    except Exception:
-        logging.exception("qdrant upsert failed for assistant message (non-fatal)", extra={"message_id": str(amid)})
+    if should_index_message("assistant", answer):
+        try:
+            await qdrant.upsert_message_vector(
+                message_id=amid,
+                owner_id=owner_id,
+                conversation_id=cid,
+                role="assistant",
+                content=answer,
+                client_id=client_id,
+            )
+        except Exception:
+            logging.exception(
+                "qdrant upsert failed for assistant message (non-fatal)",
+                extra={
+                    "message_id": str(amid),
+                    "request_id": getattr(request.state, "request_id", None),
+                },
+            )
 
+    # Build response (optionally include debug info without requiring schema changes elsewhere)
+    resp = ChatResponse(
+        conversation_id=str(cid),
+        answer=answer,
+        retrieved_count=len(retrieved),
+    ).model_dump()
 
+    if getattr(body, "debug", False):
+        resp["debug"] = {
+            "scope_used": scope_used,
+            "fallback_used": fallback_used,
+            "hits": [{"message_id": h.message_id, "score": h.score} for h in filtered_hits],
+        }
 
-    return JSONResponse(
-        ChatResponse(
-            conversation_id=str(cid),
-            answer=answer,
-            retrieved_count=len(retrieved),
-        ).model_dump()
-    )
-
+    return JSONResponse(resp)

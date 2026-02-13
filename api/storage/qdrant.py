@@ -113,6 +113,7 @@ class QdrantStore:
         conversation_id: UUID | str | None = None,
         client_id: str | None = None,
         min_score: float = 0.25,
+        exclude_message_ids: list[str] | None = None,
     ) -> list[RetrievalHit]:
 
         qvec = (await self.embedder.embed_texts(self.embed_model, [query]))[0]
@@ -128,7 +129,14 @@ class QdrantStore:
         if conversation_id is not None:
             must.append(FieldCondition(key="conversation_id", match=MatchValue(value=str(conversation_id))))
 
-        qfilter = Filter(must=must)
+        must_not = []
+
+        if exclude_message_ids:
+            # Exclude exact message ids (common case: query message or freshly inserted ids)
+            for mid in exclude_message_ids:
+                must_not.append(FieldCondition(key="message_id", match=MatchValue(value=str(mid))))
+
+        qfilter = Filter(must=must, must_not=must_not or None)
 
         res = self.client.search(
             collection_name=self.collection,

@@ -22,16 +22,18 @@ class LiteLLMClient:
     api_key: Optional[str] = None
     timeout_s: float = 30.0
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, request_id: str | None = None) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+        if request_id:
+            headers["X-Request-ID"] = request_id
         return headers
 
     def _url(self, path: str) -> str:
         return self.base_url.rstrip("/") + path
 
-    async def embeddings(self, model: str, texts: list[str]) -> list[list[float]]:
+    async def embeddings(self, model: str, texts: list[str], request_id: str | None = None) -> list[list[float]]:
         """
         OpenAI-compatible embeddings call via LiteLLM.
         Returns embeddings in the same order as input.
@@ -43,8 +45,12 @@ class LiteLLMClient:
         payload: dict[str, Any] = {"model": model, "input": texts}
 
         async with httpx.AsyncClient(timeout=self.timeout_s) as client:
-            r = await client.post(url, headers=self._headers(), json=payload)
-            r.raise_for_status()
+            r = await client.post(url, headers=self._headers(request_id), json=payload)
+            try:
+                r.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                # Include provider error body for easier debugging
+                raise RuntimeError(f"LiteLLM embeddings failed: {e.response.status_code} {e.response.text}") from e
             data = r.json()
 
         items = data.get("data")
@@ -80,8 +86,9 @@ class LiteLLMClient:
         self,
         model: str,
         messages: Sequence[dict[str, Any]],
-        temperature: float = 0.2,
+        temperature: float | None = None,
         max_tokens: Optional[int] = None,
+        request_id: str | None = None,
     ) -> str:
         """
         OpenAI-compatible chat completions call via LiteLLM.
@@ -89,7 +96,7 @@ class LiteLLMClient:
         Assumes:
           POST {base_url}/v1/chat/completions
         Payload:
-          {"model": "...", "messages": [...], "temperature": 0.2, "max_tokens": ...}
+          {"model": "...", "messages": [...], "temperature": 1, "max_tokens": ...}
 
         Returns:
           assistant message content (string)
@@ -97,15 +104,20 @@ class LiteLLMClient:
         url = self._url("/v1/chat/completions")
         payload: dict[str, Any] = {
             "model": model,
-            "messages": list(messages),
-            "temperature": temperature,
+            "messages": list(messages)
         }
+        if temperature is not None:
+            payload["temperature"] = temperature
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
 
         async with httpx.AsyncClient(timeout=self.timeout_s) as client:
-            r = await client.post(url, headers=self._headers(), json=payload)
-            r.raise_for_status()
+            r = await client.post(url, headers=self._headers(request_id), json=payload)
+            try:
+                r.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                # Include provider error body for easier debugging
+                raise RuntimeError(f"LiteLLM chat failed: {e.response.status_code} {e.response.text}") from e
             data = r.json()
 
         # OpenAI-compatible response:
@@ -125,5 +137,5 @@ class LiteLLMEmbedder:
     def __init__(self, litellm: LiteLLMClient) -> None:
         self.litellm = litellm
 
-    async def embed_texts(self, model: str, texts: list[str]) -> list[list[float]]:
-        return await self.litellm.embeddings(model, texts)
+    async def embed_texts(self, model: str, texts: Sequence[str], request_id: str | None = None) -> list[list[float]]:
+        return await self.embeddings(model, list(texts), request_id=request_id)

@@ -99,7 +99,7 @@ POST /v1/chat
 - Persist user message (Postgres)
 - Index message for retrieval (Qdrant, best-effort)
 - Retrieve context scoped to `owner_id + conversation_id`
-- If retrieval is weak/empty, fallback to a broader scope (owner) when configured (see below)
+- If retrieval is weak/empty, fallback to a broader scope (owner) when configured
 - Assemble prompt and call LLM
 - Persist assistant response and index it (best-effort)
 
@@ -159,8 +159,8 @@ When `scope="conversation"` and the results are weak (empty, or fewer than ~half
 
 Notes:
 - This fallback only happens for `scope="conversation"`.
-- If the client explicitly requests `scope="client"` or `scope="owner"`, that request is respected (no fallback).
-- The service drops self-matches (the message(s) inserted in the current request) so `retrieved_count` stays meaningful.
+- If the client explicitly requests `scope="client"` or `scope="owner"`, that request is respected.
+- The service drops self-matches so `retrieved_count` stays meaningful.
 
 ---
 
@@ -173,7 +173,7 @@ Each device:
 
 Recommended defaults:
 - Use `scope="conversation"` for normal turns.
-- Use `scope="owner"` only when the user explicitly asks to “search memory” or when conversation-local retrieval is inadequate.
+- Use `scope="owner"` only when the user explicitly asks to “search memory”.
 
 ---
 

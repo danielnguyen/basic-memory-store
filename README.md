@@ -231,7 +231,7 @@ docker compose up -d --build
 Then test:
 
 ```bash
-MEMORY_API_KEY=change_me BASE=http://127.0.0.1:11500 ./scripts/smoke-test.sh
+MEMORY_API_KEY=change_me BASE=http://127.0.0.1:11440 ./scripts/smoke-test.sh
 ```
 
 ---
