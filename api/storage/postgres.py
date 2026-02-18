@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from psycopg_pool import AsyncConnectionPool
 from psycopg.types.json import Json
@@ -305,6 +305,304 @@ class PostgresStore:
             )
         return out
 
+    async def create_artifact(
+        self,
+        artifact_id: UUID,
+        owner_id: str,
+        filename: str,
+        mime: str,
+        size: int,
+        object_uri: str,
+        client_id: str | None = None,
+        conversation_id: UUID | None = None,
+        source_surface: str | None = None,
+    ) -> dict[str, Any]:
+        q = """
+        INSERT INTO artifacts (
+            id, owner_id, client_id, conversation_id, filename, mime, size, object_uri, source_surface, status
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending')
+        RETURNING id, owner_id, client_id, conversation_id, filename, mime, size, object_uri, source_surface, status, sha256, created_at, completed_at;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    q,
+                    (artifact_id, owner_id, client_id, conversation_id, filename, mime, size, object_uri, source_surface),
+                )
+                (aid, owner, c_id, convo_id, name, kind, byte_size, uri, surface, status, sha256, created_at, completed_at) = await cur.fetchone()
+
+        return {
+            "artifact_id": str(aid),
+            "owner_id": owner,
+            "client_id": c_id,
+            "conversation_id": str(convo_id) if convo_id else None,
+            "filename": name,
+            "mime": kind,
+            "size": int(byte_size),
+            "object_uri": uri,
+            "source_surface": surface,
+            "status": status,
+            "sha256": sha256,
+            "created_at": str(created_at),
+            "completed_at": str(completed_at) if completed_at else None,
+        }
+
+    async def complete_artifact(
+        self,
+        artifact_id: UUID,
+        status: str = "completed",
+        sha256: str | None = None,
+    ) -> dict[str, Any] | None:
+        q = """
+        UPDATE artifacts
+        SET
+          status = %s,
+          sha256 = COALESCE(%s, sha256),
+          completed_at = CASE WHEN %s = 'completed' THEN now() ELSE completed_at END
+        WHERE id = %s
+        RETURNING id, owner_id, client_id, conversation_id, filename, mime, size, object_uri, source_surface, status, sha256, created_at, completed_at;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (status, sha256, status, artifact_id))
+                row = await cur.fetchone()
+
+        if row is None:
+            return None
+
+        (aid, owner, c_id, convo_id, name, kind, byte_size, uri, surface, status_out, sha256_out, created_at, completed_at) = row
+        return {
+            "artifact_id": str(aid),
+            "owner_id": owner,
+            "client_id": c_id,
+            "conversation_id": str(convo_id) if convo_id else None,
+            "filename": name,
+            "mime": kind,
+            "size": int(byte_size),
+            "object_uri": uri,
+            "source_surface": surface,
+            "status": status_out,
+            "sha256": sha256_out,
+            "created_at": str(created_at),
+            "completed_at": str(completed_at) if completed_at else None,
+        }
+
+    async def get_artifact(self, artifact_id: UUID) -> dict[str, Any] | None:
+        q = """
+        SELECT id, owner_id, client_id, conversation_id, filename, mime, size, object_uri, source_surface, status, sha256, created_at, completed_at
+        FROM artifacts
+        WHERE id = %s;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (artifact_id,))
+                row = await cur.fetchone()
+
+        if row is None:
+            return None
+
+        (aid, owner, c_id, convo_id, name, kind, byte_size, uri, surface, status, sha256, created_at, completed_at) = row
+        return {
+            "artifact_id": str(aid),
+            "owner_id": owner,
+            "client_id": c_id,
+            "conversation_id": str(convo_id) if convo_id else None,
+            "filename": name,
+            "mime": kind,
+            "size": int(byte_size),
+            "object_uri": uri,
+            "source_surface": surface,
+            "status": status,
+            "sha256": sha256,
+            "created_at": str(created_at),
+            "completed_at": str(completed_at) if completed_at else None,
+        }
+
+    async def get_recent_message_snippets(self, conversation_id: UUID, limit: int = 10) -> list[dict[str, Any]]:
+        q = """
+        SELECT id, conversation_id, role, content, created_at
+        FROM messages
+        WHERE conversation_id = %s
+        ORDER BY created_at DESC
+        LIMIT %s;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (conversation_id, limit))
+                rows = await cur.fetchall()
+
+        rows.reverse()
+        return [
+            {
+                "message_id": str(mid),
+                "conversation_id": str(cid),
+                "role": role,
+                "content": content,
+                "created_at": str(created_at),
+            }
+            for (mid, cid, role, content, created_at) in rows
+        ]
+
+    async def get_pinned_memories(
+        self,
+        owner_id: str,
+        conversation_id: UUID | None = None,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        params: list[Any] = [owner_id]
+        where = "WHERE owner_id = %s"
+        if conversation_id is not None:
+            where += " AND (conversation_id = %s OR conversation_id IS NULL)"
+            params.append(conversation_id)
+
+        q = f"""
+        SELECT id, content, metadata
+        FROM pinned_memories
+        {where}
+        ORDER BY created_at DESC
+        LIMIT %s;
+        """
+        params.append(limit)
+
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, tuple(params))
+                rows = await cur.fetchall()
+
+        return [
+            {
+                "id": str(pid),
+                "content": content,
+                "metadata": metadata or {},
+            }
+            for (pid, content, metadata) in rows
+        ]
+
+    async def get_policy_overlays(self, owner_id: str, surface: str | None = None) -> list[dict[str, Any]]:
+        q = """
+        SELECT id, policy_json
+        FROM policy_overlays
+        WHERE owner_id = %s
+          AND (surface = %s OR surface IS NULL)
+        ORDER BY created_at DESC
+        LIMIT 5;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (owner_id, surface))
+                rows = await cur.fetchall()
+
+        return [{"id": str(pid), "content": "policy", "metadata": payload or {}} for (pid, payload) in rows]
+
+    async def get_persona_overlays(self, owner_id: str, surface: str | None = None) -> list[dict[str, Any]]:
+        q = """
+        SELECT id, persona_json
+        FROM persona_overlays
+        WHERE owner_id = %s
+          AND (surface = %s OR surface IS NULL)
+        ORDER BY created_at DESC
+        LIMIT 5;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (owner_id, surface))
+                rows = await cur.fetchall()
+
+        return [{"id": str(pid), "content": "persona", "metadata": payload or {}} for (pid, payload) in rows]
+
+    async def write_trace(
+        self,
+        request_id: str,
+        conversation_id: UUID | None,
+        owner_id: str | None,
+        surface: str | None,
+        router_decision: dict[str, Any] | None,
+        retrieval: dict[str, Any] | None,
+        model_calls: dict[str, Any] | None,
+        cost: dict[str, Any] | None,
+        latency_ms: int | None,
+    ) -> str:
+        trace_id = str(uuid4())
+        q = """
+        INSERT INTO traces (
+            trace_id, request_id, conversation_id, owner_id, surface,
+            router_decision_json, retrieval_json, model_calls_json, cost_json, latency_ms
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (request_id) DO UPDATE
+        SET
+          conversation_id = EXCLUDED.conversation_id,
+          owner_id = EXCLUDED.owner_id,
+          surface = EXCLUDED.surface,
+          router_decision_json = EXCLUDED.router_decision_json,
+          retrieval_json = EXCLUDED.retrieval_json,
+          model_calls_json = EXCLUDED.model_calls_json,
+          cost_json = EXCLUDED.cost_json,
+          latency_ms = EXCLUDED.latency_ms
+        RETURNING trace_id;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    q,
+                    (
+                        trace_id,
+                        request_id,
+                        conversation_id,
+                        owner_id,
+                        surface,
+                        Json(router_decision or {}),
+                        Json(retrieval or {}),
+                        Json(model_calls or {}),
+                        Json(cost or {}),
+                        latency_ms,
+                    ),
+                )
+                row = await cur.fetchone()
+        return row[0]
+
+    async def get_trace_by_request_id(self, request_id: str) -> dict[str, Any] | None:
+        q = """
+        SELECT request_id, trace_id, conversation_id, owner_id, surface,
+               router_decision_json, retrieval_json, model_calls_json, cost_json, latency_ms, created_at
+        FROM traces
+        WHERE request_id = %s;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (request_id,))
+                row = await cur.fetchone()
+
+        if row is None:
+            return None
+
+        (
+            req_id,
+            trace_id,
+            convo_id,
+            owner_id,
+            surface,
+            router_json,
+            retrieval_json,
+            model_calls_json,
+            cost_json,
+            latency_ms,
+            created_at,
+        ) = row
+        return {
+            "request_id": req_id,
+            "trace_id": trace_id,
+            "conversation_id": str(convo_id) if convo_id else None,
+            "owner_id": owner_id,
+            "surface": surface,
+            "router_decision": router_json or {},
+            "retrieval": retrieval_json or {},
+            "model_calls": model_calls_json or {},
+            "cost": cost_json or {},
+            "latency_ms": latency_ms,
+            "created_at": str(created_at),
+        }
 
     async def ping(self) -> None:
         async with self.pool.connection() as conn:

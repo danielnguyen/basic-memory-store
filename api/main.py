@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
+import re
+import time
 from uuid import UUID, uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Security, Request
-from fastapi.responses import JSONResponse
+from fastapi import Depends, FastAPI, HTTPException, Security, Request, Response
 from fastapi.security.api_key import APIKeyHeader
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, generate_latest
 
 from settings import get_settings
 from clients.litellm import LiteLLMClient
@@ -14,12 +16,18 @@ from storage.qdrant import QdrantStore, RetrievalHit as QdrantHit
 from prompts.context import assemble_messages, build_context_block
 
 from models import (
+    ArtifactCompleteRequest,
+    ArtifactInitRequest,
+    ArtifactInitResponse,
+    ArtifactResponse,
     ChatRequest,
     ChatResponse,
     ConversationCreateRequest,
     ConversationCreateResponse,
     ConversationListResponse,
     ConversationSummary,
+    OrchestrateChatRequest,
+    OrchestrateChatResponse,
     ConversationResolveRequest,
     ConversationResolveResponse,
     MessageCreateRequest,
@@ -28,6 +36,12 @@ from models import (
     RetrieveResponse,
     RetrieveHit,
     RetrievalOptions,
+    TieredRetrieveRequest,
+    TieredRetrieveResponse,
+    OverlayItem,
+    RetrievalDebug,
+    RetrievalDebugHit,
+    TraceResponse,
 )
 
 
@@ -71,6 +85,11 @@ async def attach_request_id(request: Request, call_next):
 pg = PostgresStore(settings.pg_dsn)
 litellm = LiteLLMClient(settings.litellm_base_url, settings.litellm_api_key)
 qdrant = QdrantStore(settings.qdrant_url, settings.qdrant_collection, litellm, settings.embed_model)
+memory_skipped_qdrant_ids_total = Counter(
+    "memory_skipped_qdrant_ids_total",
+    "Count of non-UUID Qdrant hit ids skipped by the API",
+    ["kind"],
+)
 
 
 def should_index_message(role: str, content: str) -> bool:
@@ -88,6 +107,35 @@ def should_index_message(role: str, content: str) -> bool:
         return False
 
     return True
+
+
+def _sanitize_object_key_component(name: str) -> str:
+    cleaned = name.strip()
+    cleaned = cleaned.replace("\\", "_").replace("/", "_")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = re.sub(r"[^A-Za-z0-9._ ()-]", "_", cleaned)
+    cleaned = cleaned.strip()
+    return cleaned or "artifact"
+
+
+def _safe_uuid_message_ids(hits: list[QdrantHit], *, context: str, kind: str) -> list[UUID]:
+    out: list[UUID] = []
+    for h in hits:
+        try:
+            out.append(UUID(h.message_id))
+        except (TypeError, ValueError):
+            memory_skipped_qdrant_ids_total.labels(kind=kind).inc()
+            logging.warning("Skipping non-UUID retrieval hit id in %s: %r", context, getattr(h, "message_id", None))
+    return out
+
+
+def build_artifact_object_uri(artifact_id: UUID, filename: str) -> str:
+    safe_name = _sanitize_object_key_component(filename)
+    return f"{settings.artifacts_object_prefix.rstrip('/')}/{artifact_id}/{safe_name}"
+
+
+def build_artifact_transfer_url(kind: str, artifact_id: str) -> str:
+    return f"{settings.artifacts_upload_base_url.rstrip('/')}/{kind}/{artifact_id}"
 
 
 
@@ -119,6 +167,11 @@ async def readyz():
         raise HTTPException(status_code=503, detail=f"qdrant not ready: {e}")
 
     return {"ok": True}
+
+
+@app.get("/metrics", tags=["ops"], summary="Prometheus metrics")
+async def metrics():
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 
@@ -217,6 +270,98 @@ async def add_message(conversation_id: str, body: MessageCreateRequest):
 
 
 # -------------------------
+# Artifacts
+# -------------------------
+
+@app.post(
+    "/v1/artifacts/init",
+    response_model=ArtifactInitResponse,
+    tags=["artifacts"],
+    dependencies=[Depends(require_api_key)],
+    summary="Initialize artifact upload and return upload URL",
+)
+async def init_artifact(body: ArtifactInitRequest):
+    try:
+        conversation_id = UUID(body.conversation_id) if body.conversation_id else None
+    except ValueError:
+        raise HTTPException(status_code=400, detail="conversation_id must be a UUID")
+    artifact_id = uuid4()
+    object_uri = build_artifact_object_uri(artifact_id, body.filename)
+
+    row = await pg.create_artifact(
+        artifact_id=artifact_id,
+        owner_id=body.owner_id,
+        client_id=body.client_id,
+        conversation_id=conversation_id,
+        filename=body.filename,
+        mime=body.mime,
+        size=body.size,
+        object_uri=object_uri,
+        source_surface=body.source_surface,
+    )
+
+    return ArtifactInitResponse(
+        artifact_id=row["artifact_id"],
+        upload_url=build_artifact_transfer_url("upload", row["artifact_id"]),
+        upload_url_expires_in_s=settings.artifacts_presign_ttl_s,
+        object_uri=row["object_uri"],
+        status=row["status"],
+    )
+
+
+@app.post(
+    "/v1/artifacts/complete",
+    response_model=ArtifactResponse,
+    tags=["artifacts"],
+    dependencies=[Depends(require_api_key)],
+    summary="Mark artifact upload complete",
+)
+async def complete_artifact(body: ArtifactCompleteRequest):
+    try:
+        artifact_id = UUID(body.artifact_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="artifact_id must be a UUID")
+
+    row = await pg.complete_artifact(
+        artifact_id=artifact_id,
+        status=body.status,
+        sha256=body.sha256,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="artifact_id not found")
+
+    return ArtifactResponse(
+        **row,
+        download_url=build_artifact_transfer_url("download", row["artifact_id"]),
+        download_url_expires_in_s=settings.artifacts_presign_ttl_s,
+    )
+
+
+@app.get(
+    "/v1/artifacts/{artifact_id}",
+    response_model=ArtifactResponse,
+    tags=["artifacts"],
+    dependencies=[Depends(require_api_key)],
+    summary="Get artifact metadata",
+)
+async def get_artifact(artifact_id: str):
+    try:
+        aid = UUID(artifact_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="artifact_id must be a UUID")
+
+    row = await pg.get_artifact(aid)
+    if row is None:
+        raise HTTPException(status_code=404, detail="artifact_id not found")
+
+    return ArtifactResponse(
+        **row,
+        download_url=build_artifact_transfer_url("download", row["artifact_id"]),
+        download_url_expires_in_s=settings.artifacts_presign_ttl_s,
+    )
+
+
+# -------------------------
 # Retrieval
 # -------------------------
 
@@ -238,7 +383,7 @@ async def retrieve(body: RetrieveRequest, request: Request):
         exclude_message_ids=body.exclude_message_ids,
     )
 
-    ids = [UUID(h.message_id) for h in hits]
+    ids = _safe_uuid_message_ids(hits, context="/v1/retrieve", kind="retrieve")
     snippets = await pg.get_message_snippets_by_ids(ids)
 
     score_by_id = {h.message_id: h.score for h in hits}
@@ -258,24 +403,91 @@ async def retrieve(body: RetrieveRequest, request: Request):
     return RetrieveResponse(hits=out)
 
 
+@app.post(
+    "/v1/conversations/{conversation_id}/retrieve",
+    response_model=TieredRetrieveResponse,
+    tags=["retrieve"],
+    dependencies=[Depends(require_api_key)],
+    summary="Tier-aware retrieval for a specific conversation",
+)
+async def retrieve_tiered(conversation_id: str, body: TieredRetrieveRequest):
+    try:
+        cid = UUID(conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="conversation_id must be a UUID")
+
+    if not await pg.conversation_exists(cid):
+        raise HTTPException(status_code=404, detail="conversation_id not found")
+
+    semantic_hits = await qdrant.search(
+        owner_id=body.owner_id,
+        query=body.query,
+        k=body.k,
+        min_score=body.min_score,
+        conversation_id=cid,
+        client_id=body.client_id,
+    )
+    semantic_ids = _safe_uuid_message_ids(
+        semantic_hits,
+        context="/v1/conversations/{id}/retrieve",
+        kind="semantic",
+    )
+    semantic_snips = await pg.get_message_snippets_by_ids(semantic_ids)
+    semantic_score_by_id = {h.message_id: h.score for h in semantic_hits}
+
+    working_snips = await pg.get_recent_message_snippets(conversation_id=cid, limit=body.working_limit)
+    pinned_items = await pg.get_pinned_memories(owner_id=body.owner_id, conversation_id=cid, limit=body.pinned_limit)
+    policy_items = await pg.get_policy_overlays(owner_id=body.owner_id, surface=body.surface)
+    persona_items = await pg.get_persona_overlays(owner_id=body.owner_id, surface=body.surface)
+
+    return TieredRetrieveResponse(
+        conversation_id=str(cid),
+        query=body.query,
+        working=[
+            RetrieveHit(
+                message_id=s["message_id"],
+                conversation_id=s["conversation_id"],
+                role=s["role"],
+                content=s["content"],
+                created_at=s["created_at"],
+                score=None,
+            )
+            for s in working_snips
+        ],
+        semantic=[
+            RetrieveHit(
+                message_id=s["message_id"],
+                conversation_id=s["conversation_id"],
+                role=s["role"],
+                content=s["content"],
+                created_at=s["created_at"],
+                score=semantic_score_by_id.get(s["message_id"]),
+            )
+            for s in semantic_snips
+        ],
+        pinned=[OverlayItem(**item) for item in pinned_items],
+        policy=[OverlayItem(**item) for item in policy_items],
+        persona=[OverlayItem(**item) for item in persona_items],
+    )
+
+
 # -------------------------
 # Chat
 # -------------------------
 
-@app.post(
-    "/v1/chat",
-    response_model=ChatResponse,
-    tags=["chat"],
-    dependencies=[Depends(require_api_key)],
-    summary="Chat with retrieval-augmented memory",
-)
-async def chat(body: ChatRequest, request: Request):
+async def _run_chat(
+    body: ChatRequest,
+    request: Request,
+    *,
+    surface: str | None = None,
+    artifact_ids: list[str] | None = None,
+) -> ChatResponse:
+    request_started = time.perf_counter()
     owner_id = body.owner_id
     client_id = body.client_id
 
     created_new = False
 
-    # Create conversation implicitly if not provided
     if not body.conversation_id:
         conversation_id = str(await pg.create_conversation(owner_id=owner_id, client_id=client_id, title=None))
         created_new = True
@@ -292,7 +504,6 @@ async def chat(body: ChatRequest, request: Request):
 
     inserted_user_message_ids: set[str] = set()
 
-    # Persist incoming user messages first
     last_user_text: str | None = None
     for m in body.messages:
         if m.role != "user":
@@ -329,12 +540,10 @@ async def chat(body: ChatRequest, request: Request):
     if not last_user_text:
         raise HTTPException(status_code=400, detail="At least one user message is required.")
 
-    # Retrieval (two-pass fallback)
     opts = body.retrieval or RetrievalOptions(k=settings.retrieval_k, min_score=0.25, scope="conversation")
     k = opts.k
     min_score = opts.min_score
 
-    # Debug tracking (only returned if body.debug is true)
     scope_used = opts.scope
     fallback_used = False
 
@@ -343,7 +552,6 @@ async def chat(body: ChatRequest, request: Request):
             return str(cid), None
         if scope == "client":
             return None, client_id
-        # "owner"
         return None, None
 
     async def _run_search(scope: str, min_score_: float) -> list[QdrantHit]:
@@ -358,16 +566,12 @@ async def chat(body: ChatRequest, request: Request):
             exclude_message_ids=list(inserted_user_message_ids) if inserted_user_message_ids else None,
         )
 
-    # Pass 1
     try:
         retrieval_hits = await _run_search(opts.scope, min_score)
     except Exception:
         logging.exception("qdrant search failed (non-fatal)")
         retrieval_hits = []
 
-    # Fallback heuristic:
-    # - Only when scope was "conversation"
-    # - If zero hits, or fewer than half of k
     if opts.scope == "conversation" and (len(retrieval_hits) == 0 or len(retrieval_hits) < max(2, k // 2)):
         owner_min_score = min(1.0, min_score + 0.05)
         try:
@@ -378,25 +582,18 @@ async def chat(body: ChatRequest, request: Request):
             logging.exception("qdrant owner-scope fallback search failed (non-fatal)")
             retrieval_hits = []
 
-    # Drop self-matches (the message(s) we just inserted this request)
     filtered_hits = [h for h in retrieval_hits if h.message_id not in inserted_user_message_ids]
-
-    retrieval_ids = [UUID(h.message_id) for h in filtered_hits]
+    retrieval_ids = _safe_uuid_message_ids(filtered_hits, context="/v1/chat", kind="retrieval")
     retrieved = await pg.get_message_snippets_by_ids(retrieval_ids)
-
-    # Recent context window (conversation-local)
     recent = await pg.get_recent_messages(conversation_id=cid, limit=settings.recent_turns)
 
-    # Prompt assembly
     system_preamble = (
         "You are a helpful assistant.\n"
         "- Use the provided context when relevant.\n"
         "- If context conflicts, prefer newer timestamps.\n"
         "- Do not invent facts.\n"
     )
-
     context_block = build_context_block(retrieved=retrieved, max_chars=settings.max_context_chars)
-
     prompt_messages = assemble_messages(
         system_preamble=system_preamble,
         context_block=context_block,
@@ -404,7 +601,7 @@ async def chat(body: ChatRequest, request: Request):
         user_messages=[m.model_dump() for m in body.messages],
     )
 
-    # Call LiteLLM
+    model_started = time.perf_counter()
     try:
         answer = await litellm.chat(
             model=settings.chat_model,
@@ -418,8 +615,8 @@ async def chat(body: ChatRequest, request: Request):
             extra={"request_id": getattr(request.state, "request_id", None)},
         )
         raise HTTPException(status_code=502, detail=str(e))
+    model_latency_ms = int((time.perf_counter() - model_started) * 1000)
 
-    # Persist assistant message + vector
     amid = await pg.add_message(
         conversation_id=cid,
         owner_id=owner_id,
@@ -447,18 +644,103 @@ async def chat(body: ChatRequest, request: Request):
                 },
             )
 
-    # Build response (optionally include debug info without requiring schema changes elsewhere)
+    debug_block: RetrievalDebug | None = None
+    if getattr(body, "debug", False):
+        debug_block = RetrievalDebug(
+            scope_used=scope_used,
+            fallback_used=fallback_used,
+            hits=[RetrievalDebugHit(message_id=h.message_id, score=h.score) for h in filtered_hits],
+        )
+
     resp = ChatResponse(
         conversation_id=str(cid),
         answer=answer,
         retrieved_count=len(retrieved),
-    ).model_dump()
+        debug=debug_block,
+    )
 
-    if getattr(body, "debug", False):
-        resp["debug"] = {
-            "scope_used": scope_used,
-            "fallback_used": fallback_used,
-            "hits": [{"message_id": h.message_id, "score": h.score} for h in filtered_hits],
-        }
+    request_id = getattr(request.state, "request_id", None)
+    if request_id:
+        try:
+            await pg.write_trace(
+                request_id=request_id,
+                conversation_id=cid,
+                owner_id=owner_id,
+                surface=surface,
+                router_decision={
+                    "selected_model": settings.chat_model,
+                    "rule_id": "default-chat-model",
+                    "fallbacks": [],
+                },
+                retrieval={
+                    "query": last_user_text,
+                    "scope_requested": opts.scope,
+                    "scope_used": scope_used,
+                    "fallback_used": fallback_used,
+                    "hits": [{"message_id": h.message_id, "score": h.score} for h in filtered_hits],
+                    "artifacts_used": artifact_ids or [],
+                },
+                model_calls={
+                    "provider": "litellm",
+                    "model": settings.chat_model,
+                    "latency_ms": model_latency_ms,
+                    "error": None,
+                },
+                cost={"estimate_usd": None},
+                latency_ms=int((time.perf_counter() - request_started) * 1000),
+            )
+        except Exception:
+            logging.exception("trace write failed (non-fatal)", extra={"request_id": request_id})
 
-    return JSONResponse(resp)
+    return resp
+
+
+@app.post(
+    "/v1/chat",
+    response_model=ChatResponse,
+    tags=["chat"],
+    dependencies=[Depends(require_api_key)],
+    summary="Chat with retrieval-augmented memory",
+)
+async def chat(body: ChatRequest, request: Request):
+    resp = await _run_chat(body, request)
+    return resp
+
+
+@app.post(
+    "/v1/orchestrate/chat",
+    response_model=OrchestrateChatResponse,
+    tags=["chat"],
+    dependencies=[Depends(require_api_key)],
+    summary="Surface-aware orchestration entrypoint (additive wrapper over /v1/chat)",
+)
+async def orchestrate_chat(body: OrchestrateChatRequest, request: Request):
+    base_req = ChatRequest(
+        owner_id=body.owner_id,
+        conversation_id=body.conversation_id,
+        client_id=body.client_id,
+        messages=body.messages,
+        retrieval=body.retrieval,
+        debug=body.debug,
+    )
+    resp = await _run_chat(
+        base_req,
+        request,
+        surface=body.surface,
+        artifact_ids=body.artifact_ids or [],
+    )
+    return OrchestrateChatResponse(**resp.model_dump(), request_id=getattr(request.state, "request_id", ""))
+
+
+@app.get(
+    "/v1/traces/{request_id}",
+    response_model=TraceResponse,
+    tags=["traces"],
+    dependencies=[Depends(require_api_key)],
+    summary="Get trace by request_id",
+)
+async def get_trace(request_id: str):
+    trace = await pg.get_trace_by_request_id(request_id)
+    if trace is None:
+        raise HTTPException(status_code=404, detail="trace not found")
+    return TraceResponse(**trace)

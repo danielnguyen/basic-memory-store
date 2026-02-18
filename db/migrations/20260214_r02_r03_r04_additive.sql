@@ -1,37 +1,6 @@
--- Basic Memory Store
--- Authoritative Postgres schema
--- All conversational state derives from this schema
--- Vector indices are disposable and rebuildable
+-- Additive migration for R02/R03/R04
+-- Safe to apply on top of existing schema.sql
 
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
-
-CREATE TABLE IF NOT EXISTS conversations (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  owner_id TEXT NOT NULL,
-  client_id TEXT,
-  title TEXT,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS messages (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-  owner_id TEXT NOT NULL,
-  client_id TEXT,
-  role TEXT NOT NULL CHECK (role IN ('user','assistant','system','tool')),
-  content TEXT NOT NULL,
-  metadata JSONB,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_messages_owner_time
-  ON messages(owner_id, created_at DESC);
-
-CREATE INDEX IF NOT EXISTS idx_messages_convo_time
-  ON messages(conversation_id, created_at DESC);
-
--- Artifact metadata (blob storage remains external/object-store)
 CREATE TABLE IF NOT EXISTS artifacts (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   owner_id TEXT NOT NULL,
@@ -55,7 +24,6 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_owner_time
 CREATE INDEX IF NOT EXISTS idx_artifacts_convo_time
   ON artifacts(conversation_id, created_at DESC);
 
--- Explicit linkage between artifacts and message/conversation entities
 CREATE TABLE IF NOT EXISTS artifact_links (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   artifact_id UUID NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
@@ -74,7 +42,6 @@ CREATE INDEX IF NOT EXISTS idx_artifact_links_conversation
 CREATE INDEX IF NOT EXISTS idx_artifact_links_message
   ON artifact_links(message_id, created_at DESC);
 
--- Rebuildable textual derivations of artifacts (captions, OCR text, summaries)
 CREATE TABLE IF NOT EXISTS derived_text (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   artifact_id UUID NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
@@ -88,7 +55,6 @@ CREATE TABLE IF NOT EXISTS derived_text (
 CREATE INDEX IF NOT EXISTS idx_derived_text_artifact_time
   ON derived_text(artifact_id, created_at DESC);
 
--- Embedding pointer metadata. Vector payload remains in Qdrant.
 CREATE TABLE IF NOT EXISTS embeddings (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   ref_type TEXT NOT NULL CHECK (ref_type IN ('message', 'derived_text')),
@@ -101,7 +67,6 @@ CREATE TABLE IF NOT EXISTS embeddings (
 CREATE INDEX IF NOT EXISTS idx_embeddings_ref
   ON embeddings(ref_type, ref_id, created_at DESC);
 
--- End-to-end request traces for retrieval/routing/model-call observability
 CREATE TABLE IF NOT EXISTS traces (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   trace_id TEXT NOT NULL,
@@ -123,7 +88,6 @@ CREATE INDEX IF NOT EXISTS idx_traces_conversation_time
 CREATE INDEX IF NOT EXISTS idx_traces_owner_time
   ON traces(owner_id, created_at DESC);
 
--- Future compatibility hooks for tiering overlays
 CREATE TABLE IF NOT EXISTS pinned_memories (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   owner_id TEXT NOT NULL,

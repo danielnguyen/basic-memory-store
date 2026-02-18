@@ -82,6 +82,25 @@ class Settings(BaseSettings):
     retrieval_k: int = Field(default=8, alias="RETRIEVAL_K", ge=1, le=50)
     max_context_chars: int = Field(default=12000, alias="MAX_CONTEXT_CHARS", ge=1000, le=200000)
 
+    # --- Artifact storage hooks (MVP-friendly; S3/MinIO integration can be added later) ---
+    artifacts_object_prefix: str = Field(
+        default="artifacts",
+        alias="ARTIFACTS_OBJECT_PREFIX",
+        description="Object key prefix used when constructing artifact object_uri values.",
+    )
+    artifacts_upload_base_url: str = Field(
+        default="http://localhost:9000",
+        alias="ARTIFACTS_UPLOAD_BASE_URL",
+        description="Base URL used to construct upload/download URLs for artifact endpoints.",
+    )
+    artifacts_presign_ttl_s: int = Field(
+        default=900,
+        alias="ARTIFACTS_PRESIGN_TTL_S",
+        ge=60,
+        le=86400,
+        description="TTL in seconds for artifact upload/download URL responses.",
+    )
+
     # pydantic-settings v2 config
     model_config = SettingsConfigDict(
         env_file=".env",
