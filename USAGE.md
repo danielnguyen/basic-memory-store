@@ -253,7 +253,9 @@ GET /v1/artifacts/{artifact_id}
 Notes:
 - Existing chat clients do not need to use these endpoints.
 - Object/blob upload is modeled as a presigned-url style flow.
-- `upload_url` and `download_url` are currently placeholder URLs, not real signed URLs yet.
+- With `OBJECT_STORE_ENABLED=true`, `upload_url` and `download_url` are real signed URLs from MinIO/S3.
+- With object-store disabled, these remain placeholder URLs for integration wiring.
+- If PUT signing includes `Content-Type`, clients must upload with the exact same `Content-Type` header.
 
 ---
 

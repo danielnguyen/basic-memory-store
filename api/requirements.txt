@@ -2,6 +2,7 @@ annotated-types==0.7.0
 anyio==4.9.0
 asarPy==1.0.1
 attrs==25.4.0
+boto3==1.40.5
 certifi==2026.1.4
 click==8.3.1
 fastapi==0.115.6

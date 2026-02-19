@@ -100,6 +100,57 @@ class Settings(BaseSettings):
         le=86400,
         description="TTL in seconds for artifact upload/download URL responses.",
     )
+    object_store_enabled: bool = Field(
+        default=False,
+        alias="OBJECT_STORE_ENABLED",
+        description="Enable real S3/MinIO presigned URLs for artifacts.",
+    )
+    object_store_endpoint: str = Field(
+        default="http://127.0.0.1:16335",
+        alias="OBJECT_STORE_ENDPOINT",
+        description="S3-compatible endpoint URL, e.g. http://memory-minio:9000",
+    )
+    object_store_bucket: str = Field(
+        default="memory-artifacts",
+        alias="OBJECT_STORE_BUCKET",
+        description="Object storage bucket name for artifact blobs.",
+    )
+    object_store_access_key: str = Field(
+        default="minioadmin",
+        alias="OBJECT_STORE_ACCESS_KEY",
+        description="Object storage access key.",
+    )
+    object_store_secret_key: str = Field(
+        default="minioadmin",
+        alias="OBJECT_STORE_SECRET_KEY",
+        description="Object storage secret key.",
+    )
+    object_store_region: str = Field(
+        default="us-east-1",
+        alias="OBJECT_STORE_REGION",
+        description="Object storage region used for signing.",
+    )
+    object_store_presign_base_url: str | None = Field(
+        default=None,
+        alias="OBJECT_STORE_PRESIGN_BASE_URL",
+        description="Optional public base URL used to rewrite presigned URL host/port.",
+    )
+    object_store_include_content_type_in_put_signature: bool = Field(
+        default=True,
+        alias="OBJECT_STORE_INCLUDE_CONTENT_TYPE_IN_PUT_SIGNATURE",
+        description="If true, Content-Type is included in presigned PUT signature and must match client upload header.",
+    )
+    artifacts_max_size_bytes: int = Field(
+        default=104857600,
+        alias="ARTIFACTS_MAX_SIZE_BYTES",
+        ge=1,
+        description="Maximum allowed artifact size in bytes.",
+    )
+    artifacts_allowed_mime: str = Field(
+        default="image/png,image/jpeg,image/webp,application/pdf,text/plain,text/markdown,application/json,application/zip",
+        alias="ARTIFACTS_ALLOWED_MIME",
+        description="Comma-separated allowed artifact MIME types.",
+    )
 
     # pydantic-settings v2 config
     model_config = SettingsConfigDict(

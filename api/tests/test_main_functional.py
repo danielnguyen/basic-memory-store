@@ -228,6 +228,9 @@ def client(monkeypatch):
         artifacts_object_prefix="artifacts",
         artifacts_upload_base_url="http://localhost:9000",
         artifacts_presign_ttl_s=900,
+        object_store_enabled=False,
+        artifacts_max_size_bytes=104857600,
+        artifacts_allowed_mime="image/png,image/jpeg,image/webp,application/pdf,text/plain,text/markdown,application/json,application/zip",
         index_user_questions=False,
         index_assistant_messages=True,
         min_index_chars=12,
@@ -376,6 +379,46 @@ def test_artifact_init_complete_and_get(client):
     assert get_body["artifact_id"] == aid
     assert get_body["sha256"] == "abc123"
     assert get_body["object_uri"].endswith("/notes.pdf")
+
+
+def test_artifact_flow_with_object_store_enabled(client, monkeypatch):
+    class FakeObjectStore:
+        def create_presigned_put_url(self, key: str, content_type: str, expires_s: int) -> str:
+            return f"http://minio.local/upload/{key}"
+
+        def create_presigned_get_url(self, key: str, expires_s: int) -> str:
+            return f"http://minio.local/download/{key}"
+
+        def head_object(self, key: str):
+            return types.SimpleNamespace(size=1234, content_type="application/pdf")
+
+    monkeypatch.setattr(main_module.settings, "object_store_enabled", True, raising=False)
+    monkeypatch.setattr(main_module, "object_store", FakeObjectStore(), raising=True)
+
+    r1 = client.post(
+        "/v1/artifacts/init",
+        headers=auth_headers(),
+        json={
+            "owner_id": "daniel",
+            "client_id": "vscode",
+            "filename": "notes.pdf",
+            "mime": "application/pdf",
+            "size": 1234,
+            "source_surface": "vscode",
+        },
+    )
+    assert r1.status_code == 200
+    init_body = r1.json()
+    assert init_body["upload_url"].startswith("http://minio.local/upload/")
+    aid = init_body["artifact_id"]
+
+    r2 = client.post(
+        "/v1/artifacts/complete",
+        headers=auth_headers(),
+        json={"artifact_id": aid, "status": "completed"},
+    )
+    assert r2.status_code == 200
+    assert r2.json()["download_url"].startswith("http://minio.local/download/")
 
 
 def test_artifact_key_sanitization_helper():

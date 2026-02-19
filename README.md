@@ -167,6 +167,7 @@ For development, this repo provides a dev compose file to stand up dependencies 
 - Postgres: `pg-test` → `127.0.0.1:15432`
 - Qdrant: `qdrant-test` → `127.0.0.1:16333`
 - LiteLLM: `litellm-test` → `127.0.0.1:4000`
+- MinIO: `minio-test` → `127.0.0.1:16335`
 
 ### 1) Start dev dependencies + apply schema
 
@@ -190,8 +191,13 @@ export LITELLM_BASE_URL="http://127.0.0.1:4000"
 export EMBED_MODEL="text-embedding-3-small"
 export CHAT_MODEL="gpt-4o-mini"
 export ARTIFACTS_OBJECT_PREFIX="artifacts"
-export ARTIFACTS_UPLOAD_BASE_URL="http://127.0.0.1:9000"
 export ARTIFACTS_PRESIGN_TTL_S="900"
+export OBJECT_STORE_ENABLED="true"
+export OBJECT_STORE_ENDPOINT="http://127.0.0.1:16335"
+export OBJECT_STORE_BUCKET="memory-artifacts"
+export OBJECT_STORE_ACCESS_KEY="minioadmin"
+export OBJECT_STORE_SECRET_KEY="minioadmin"
+export OBJECT_STORE_REGION="us-east-1"
 
 uvicorn main:app --host 0.0.0.0 --port 4321 --reload
 ```
@@ -336,6 +342,8 @@ GET /v1/artifacts/{artifact_id}
 ```
 
 Current status: `upload_url`/`download_url` are placeholder URLs for integration wiring, not real cryptographic presigned URLs yet.
+When `OBJECT_STORE_ENABLED=true`, these are real presigned S3-compatible URLs (MinIO/S3).
+If PUT signing includes `Content-Type`, uploads must send the exact same `Content-Type` header.
 
 ---
 

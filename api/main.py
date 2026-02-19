@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from datetime import datetime, UTC
 from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Security, Request, Response
@@ -13,6 +14,7 @@ from settings import get_settings
 from clients.litellm import LiteLLMClient
 from storage.postgres import PostgresStore
 from storage.qdrant import QdrantStore, RetrievalHit as QdrantHit
+from storage.object_store import ObjectStoreClient
 from prompts.context import assemble_messages, build_context_block
 
 from models import (
@@ -85,6 +87,15 @@ async def attach_request_id(request: Request, call_next):
 pg = PostgresStore(settings.pg_dsn)
 litellm = LiteLLMClient(settings.litellm_base_url, settings.litellm_api_key)
 qdrant = QdrantStore(settings.qdrant_url, settings.qdrant_collection, litellm, settings.embed_model)
+object_store = ObjectStoreClient(
+    endpoint_url=settings.object_store_endpoint,
+    bucket=settings.object_store_bucket,
+    access_key=settings.object_store_access_key,
+    secret_key=settings.object_store_secret_key,
+    region=settings.object_store_region,
+    presign_base_url=settings.object_store_presign_base_url,
+    include_content_type_in_put_signature=settings.object_store_include_content_type_in_put_signature,
+)
 memory_skipped_qdrant_ids_total = Counter(
     "memory_skipped_qdrant_ids_total",
     "Count of non-UUID Qdrant hit ids skipped by the API",
@@ -129,9 +140,11 @@ def _safe_uuid_message_ids(hits: list[QdrantHit], *, context: str, kind: str) ->
     return out
 
 
-def build_artifact_object_uri(artifact_id: UUID, filename: str) -> str:
+def build_artifact_object_uri(owner_id: str, artifact_id: UUID, filename: str) -> str:
+    safe_owner = _sanitize_object_key_component(owner_id)
     safe_name = _sanitize_object_key_component(filename)
-    return f"{settings.artifacts_object_prefix.rstrip('/')}/{artifact_id}/{safe_name}"
+    ts = datetime.now(UTC)
+    return f"{settings.artifacts_object_prefix.rstrip('/')}/{safe_owner}/{ts:%Y/%m}/{artifact_id}/{safe_name}"
 
 
 def build_artifact_transfer_url(kind: str, artifact_id: str) -> str:
@@ -142,6 +155,8 @@ def build_artifact_transfer_url(kind: str, artifact_id: str) -> str:
 @app.on_event("startup")
 async def startup() -> None:
     await pg.open()
+    if settings.object_store_enabled:
+        object_store.ensure_bucket()
 
 
 @app.on_event("shutdown")
@@ -285,8 +300,14 @@ async def init_artifact(body: ArtifactInitRequest):
         conversation_id = UUID(body.conversation_id) if body.conversation_id else None
     except ValueError:
         raise HTTPException(status_code=400, detail="conversation_id must be a UUID")
+    allowed_mime = {item.strip() for item in settings.artifacts_allowed_mime.split(",") if item.strip()}
+    if body.mime not in allowed_mime:
+        raise HTTPException(status_code=422, detail=f"mime '{body.mime}' is not allowed")
+    if body.size > settings.artifacts_max_size_bytes:
+        raise HTTPException(status_code=413, detail="artifact size exceeds configured limit")
+
     artifact_id = uuid4()
-    object_uri = build_artifact_object_uri(artifact_id, body.filename)
+    object_uri = build_artifact_object_uri(body.owner_id, artifact_id, body.filename)
 
     row = await pg.create_artifact(
         artifact_id=artifact_id,
@@ -300,9 +321,21 @@ async def init_artifact(body: ArtifactInitRequest):
         source_surface=body.source_surface,
     )
 
+    upload_url = build_artifact_transfer_url("upload", row["artifact_id"])
+    if settings.object_store_enabled:
+        try:
+            upload_url = object_store.create_presigned_put_url(
+                key=row["object_uri"],
+                content_type=row["mime"],
+                expires_s=settings.artifacts_presign_ttl_s,
+            )
+        except Exception as e:
+            logging.exception("object store init failed", extra={"artifact_id": row["artifact_id"]})
+            raise HTTPException(status_code=503, detail=f"artifact upload unavailable: {e}")
+
     return ArtifactInitResponse(
         artifact_id=row["artifact_id"],
-        upload_url=build_artifact_transfer_url("upload", row["artifact_id"]),
+        upload_url=upload_url,
         upload_url_expires_in_s=settings.artifacts_presign_ttl_s,
         object_uri=row["object_uri"],
         status=row["status"],
@@ -322,6 +355,17 @@ async def complete_artifact(body: ArtifactCompleteRequest):
     except ValueError:
         raise HTTPException(status_code=400, detail="artifact_id must be a UUID")
 
+    existing = await pg.get_artifact(artifact_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="artifact_id not found")
+
+    if body.status == "completed" and settings.object_store_enabled:
+        meta = object_store.head_object(existing["object_uri"])
+        if meta is None:
+            raise HTTPException(status_code=409, detail="artifact object is missing in object store")
+        if int(meta.size) != int(existing["size"]):
+            raise HTTPException(status_code=409, detail="artifact size mismatch with object store")
+
     row = await pg.complete_artifact(
         artifact_id=artifact_id,
         status=body.status,
@@ -330,9 +374,20 @@ async def complete_artifact(body: ArtifactCompleteRequest):
     if row is None:
         raise HTTPException(status_code=404, detail="artifact_id not found")
 
+    download_url = build_artifact_transfer_url("download", row["artifact_id"])
+    if settings.object_store_enabled:
+        try:
+            download_url = object_store.create_presigned_get_url(
+                key=row["object_uri"],
+                expires_s=settings.artifacts_presign_ttl_s,
+            )
+        except Exception as e:
+            logging.exception("object store download URL generation failed", extra={"artifact_id": row["artifact_id"]})
+            raise HTTPException(status_code=503, detail=f"artifact download unavailable: {e}")
+
     return ArtifactResponse(
         **row,
-        download_url=build_artifact_transfer_url("download", row["artifact_id"]),
+        download_url=download_url,
         download_url_expires_in_s=settings.artifacts_presign_ttl_s,
     )
 
@@ -354,9 +409,20 @@ async def get_artifact(artifact_id: str):
     if row is None:
         raise HTTPException(status_code=404, detail="artifact_id not found")
 
+    download_url = build_artifact_transfer_url("download", row["artifact_id"])
+    if settings.object_store_enabled:
+        try:
+            download_url = object_store.create_presigned_get_url(
+                key=row["object_uri"],
+                expires_s=settings.artifacts_presign_ttl_s,
+            )
+        except Exception as e:
+            logging.exception("object store download URL generation failed", extra={"artifact_id": row["artifact_id"]})
+            raise HTTPException(status_code=503, detail=f"artifact download unavailable: {e}")
+
     return ArtifactResponse(
         **row,
-        download_url=build_artifact_transfer_url("download", row["artifact_id"]),
+        download_url=download_url,
         download_url_expires_in_s=settings.artifacts_presign_ttl_s,
     )
 
