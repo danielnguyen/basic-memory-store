@@ -214,6 +214,70 @@ Use when:
 
 ---
 
+## 8. Tier-aware Retrieval (Additive)
+
+### API Call
+POST /v1/conversations/{conversation_id}/retrieve
+
+### Request
+```json
+{
+  "owner_id": "user_123",
+  "client_id": "desktop",
+  "surface": "vscode",
+  "query": "what did I pin about travel?",
+  "k": 8
+}
+```
+
+### Response shape
+- `working`: recent conversation window
+- `semantic`: vector matches
+- `pinned`: pinned-memory overlay hooks
+- `policy`: policy overlay hooks
+- `persona`: persona overlay hooks
+
+---
+
+## 9. Artifact Metadata Flow (Additive)
+
+### Initialize upload
+POST /v1/artifacts/init
+
+### Complete upload
+POST /v1/artifacts/complete
+
+### Get artifact metadata
+GET /v1/artifacts/{artifact_id}
+
+Notes:
+- Existing chat clients do not need to use these endpoints.
+- Object/blob upload is modeled as a presigned-url style flow.
+- With `OBJECT_STORE_ENABLED=true`, `upload_url` and `download_url` are real signed URLs from MinIO/S3.
+- With object-store disabled, these remain placeholder URLs for integration wiring.
+- If PUT signing includes `Content-Type`, clients must upload with the exact same `Content-Type` header.
+
+---
+
+## 10. Orchestration + Traces (Additive)
+
+### API Calls
+- POST /v1/orchestrate/chat
+- GET /v1/traces/{request_id}
+
+Use `/v1/orchestrate/chat` when you want explicit `surface` and `artifact_ids` in trace records while keeping `/v1/chat` compatibility unchanged.
+
+---
+
+## 11. Ops Metrics
+
+### API Call
+GET /metrics
+
+Returns Prometheus exposition format including retrieval telemetry counters.
+
+---
+
 ## Summary: Scenarios → APIs
 
 | Scenario | API |
@@ -223,6 +287,10 @@ Use when:
 | Long-term memory search | POST /v1/chat (scope=owner) |
 | List conversations | GET /v1/conversations |
 | Manual message append | POST /v1/conversations/{id}/messages |
+| Tier-aware retrieval | POST /v1/conversations/{id}/retrieve |
+| Artifact metadata flow | POST /v1/artifacts/init + /complete + GET /v1/artifacts/{id} |
+| Explainability trace lookup | GET /v1/traces/{request_id} |
+| Prometheus metrics | GET /metrics |
 
 ---
 

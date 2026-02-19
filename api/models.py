@@ -126,6 +126,98 @@ class RetrieveResponse(BaseModel):
     hits: List[RetrieveHit]
 
 
+# ---- Artifacts ----
+
+ArtifactStatus = Literal["pending", "completed", "failed"]
+
+
+class ArtifactInitRequest(BaseModel):
+    owner_id: str = Field(..., examples=["daniel"])
+    client_id: Optional[str] = Field(default=None, examples=["vscode"])
+    conversation_id: Optional[str] = Field(default=None, examples=["550e8400-e29b-41d4-a716-446655440000"])
+    filename: str = Field(..., examples=["notes.pdf"])
+    mime: str = Field(..., examples=["application/pdf"])
+    size: int = Field(..., ge=0, examples=[1024])
+    source_surface: Optional[str] = Field(default=None, examples=["vscode"])
+
+
+class ArtifactInitResponse(BaseModel):
+    artifact_id: str
+    upload_url: str
+    upload_url_expires_in_s: int
+    object_uri: str
+    status: ArtifactStatus
+
+
+class ArtifactCompleteRequest(BaseModel):
+    artifact_id: str = Field(..., examples=["550e8400-e29b-41d4-a716-446655440000"])
+    sha256: Optional[str] = Field(default=None, examples=["a3f5e8f61dbb6f2035176697c22f45a194ce4f8ef2c31f6fb85fc5ac54c6d0d5"])
+    status: ArtifactStatus = Field(default="completed")
+
+
+class ArtifactResponse(BaseModel):
+    artifact_id: str
+    owner_id: str
+    client_id: Optional[str] = None
+    conversation_id: Optional[str] = None
+    filename: str
+    mime: str
+    size: int
+    object_uri: str
+    source_surface: Optional[str] = None
+    status: ArtifactStatus
+    sha256: Optional[str] = None
+    created_at: str
+    completed_at: Optional[str] = None
+    download_url: str
+    download_url_expires_in_s: int
+
+
+# ---- Tiered retrieval ----
+
+class OverlayItem(BaseModel):
+    id: str
+    content: str
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class TieredRetrieveRequest(BaseModel):
+    owner_id: str = Field(..., examples=["daniel"])
+    query: str = Field(..., examples=["what did I pin about memory?"])
+    client_id: Optional[str] = Field(default=None, examples=["vscode"])
+    surface: Optional[str] = Field(default=None, examples=["vscode"])
+    k: int = Field(default=8, ge=1, le=50)
+    min_score: float = Field(default=0.25, ge=0.0, le=1.0)
+    working_limit: int = Field(default=10, ge=0, le=100)
+    pinned_limit: int = Field(default=5, ge=0, le=50)
+
+
+class TieredRetrieveResponse(BaseModel):
+    conversation_id: str
+    query: str
+    working: List[RetrieveHit]
+    semantic: List[RetrieveHit]
+    pinned: List[OverlayItem]
+    policy: List[OverlayItem]
+    persona: List[OverlayItem]
+
+
+# ---- Traces ----
+
+class TraceResponse(BaseModel):
+    request_id: str
+    trace_id: str
+    conversation_id: Optional[str] = None
+    owner_id: Optional[str] = None
+    surface: Optional[str] = None
+    router_decision: Dict[str, Any] = Field(default_factory=dict)
+    retrieval: Dict[str, Any] = Field(default_factory=dict)
+    model_calls: Dict[str, Any] = Field(default_factory=dict)
+    cost: Dict[str, Any] = Field(default_factory=dict)
+    latency_ms: Optional[int] = None
+    created_at: str
+
+
 # ---- Chat ----
 
 class ChatRequest(BaseModel):
@@ -149,6 +241,15 @@ class ChatResponse(BaseModel):
     answer: str
     retrieved_count: int
     debug: Optional[RetrievalDebug] = None
+
+
+class OrchestrateChatRequest(ChatRequest):
+    surface: Optional[str] = Field(default=None, examples=["vscode"])
+    artifact_ids: Optional[List[str]] = Field(default=None, description="Optional artifact ids explicitly referenced by the client.")
+
+
+class OrchestrateChatResponse(ChatResponse):
+    request_id: str
 
 
 # ---- Debug ----

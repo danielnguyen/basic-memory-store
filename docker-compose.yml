@@ -34,6 +34,26 @@ services:
       timeout: 3s
       retries: 30
 
+  memory-minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: memory-minio
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - "${_VOLUME_BASIC_MEMORY_STORE}/minio_data:/data"
+    ports:
+      - "16335:9000"
+      - "16336:9001"
+    healthcheck:
+      test: ["CMD-SHELL", "grep -Eq ':2328 .* 0A' /proc/net/tcp"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+
   litellm:
     image: docker.litellm.ai/berriai/litellm:main-stable
     container_name: memory-litellm
@@ -66,6 +86,8 @@ services:
         condition: service_healthy
       memory-db-qdrant:
         condition: service_healthy
+      memory-minio:
+        condition: service_healthy
       litellm:
         condition: service_healthy
     environment:
@@ -96,6 +118,19 @@ services:
       - RECENT_TURNS=10
       - RETRIEVAL_K=8
       - MAX_CONTEXT_CHARS=12000
+
+      # Artifacts + object store
+      - ARTIFACTS_OBJECT_PREFIX=artifacts
+      - ARTIFACTS_PRESIGN_TTL_S=900
+      - OBJECT_STORE_ENABLED=true
+      - OBJECT_STORE_ENDPOINT=http://memory-minio:9000
+      - OBJECT_STORE_BUCKET=memory-artifacts
+      - OBJECT_STORE_ACCESS_KEY=${MINIO_ROOT_USER:-minioadmin}
+      - OBJECT_STORE_SECRET_KEY=${MINIO_ROOT_PASSWORD:-minioadmin}
+      - OBJECT_STORE_REGION=us-east-1
+      - OBJECT_STORE_PRESIGN_BASE_URL=${OBJECT_STORE_PRESIGN_BASE_URL}
+      - ARTIFACTS_MAX_SIZE_BYTES=104857600
+      - ARTIFACTS_ALLOWED_MIME=image/png,image/jpeg,image/webp,application/pdf,text/plain,text/markdown,application/json,application/zip
     volumes:
       - "${_VOLUME_BASIC_MEMORY_STORE}/app_data:/app/data:rw"
     ports:
