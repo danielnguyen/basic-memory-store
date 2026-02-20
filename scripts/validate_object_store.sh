@@ -6,12 +6,19 @@ trap 'echo "❌ failed at line $LINENO" >&2' ERR
 # ---- Config (override via env vars) ----
 BASE="${BASE:-http://127.0.0.1:4321}"
 KEY="${KEY:-${MEMORY_API_KEY:-dev-key}}"
+CF_ACCESS_CLIENT_ID="${CF_ACCESS_CLIENT_ID:-}"
+CF_ACCESS_CLIENT_SECRET="${CF_ACCESS_CLIENT_SECRET:-}"
 OWNER_ID="${OWNER_ID:-daniel}"
 MIME_TYPE="${MIME_TYPE:-text/plain}"
 FILENAME="${FILENAME:-artifact test.txt}"
 TMP_FILE="${TMP_FILE:-/tmp/artifact-test.txt}"
 
 HDR=(-H "X-API-Key: $KEY" -H "Content-Type: application/json")
+CF_HDR=()
+if [[ -n "$CF_ACCESS_CLIENT_ID" && -n "$CF_ACCESS_CLIENT_SECRET" ]]; then
+  CF_HDR=(-H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET")
+  HDR+=("${CF_HDR[@]}")
+fi
 
 # ---- Helpers ----
 die() { echo "❌ $*" >&2; exit 1; }
@@ -56,6 +63,7 @@ step "Upload via presigned PUT"
 PUT_OUT="$(mktemp)"
 PUT_CODE="$(
   curl -sS -o "$PUT_OUT" -w "%{http_code}" -X PUT "$UPLOAD_URL" \
+    "${CF_HDR[@]}" \
     -H "Content-Type: $MIME_TYPE" \
     --data-binary @"$TMP_FILE"
 )"
@@ -78,14 +86,14 @@ echo "$COMPLETE" | jq . || die "complete did not return valid JSON: $(echo "$COM
 echo "✅ complete succeeded"
 
 step "Get artifact metadata (includes download URL)"
-DL="$(curl -sS "$BASE/v1/artifacts/$ARTIFACT_ID" -H "X-API-Key: $KEY")"
+DL="$(curl -sS "$BASE/v1/artifacts/$ARTIFACT_ID" "${HDR[@]}")"
 echo "$DL" | jq . || die "download-url did not return valid JSON: $(echo "$DL" | head -c 300)"
 DOWNLOAD_URL="$(echo "$DL" | jq -r '.download_url')"
 [[ -n "$DOWNLOAD_URL" && "$DOWNLOAD_URL" != "null" ]] || die "download_url missing"
 
 step "Smoke check presigned GET"
 GET_OUT="$(mktemp)"
-GET_CODE="$(curl -sS -o "$GET_OUT" -w "%{http_code}" "$DOWNLOAD_URL")"
+GET_CODE="$(curl -sS -o "$GET_OUT" -w "%{http_code}" "$DOWNLOAD_URL" "${CF_HDR[@]}")"
 echo "GET status=$GET_CODE"
 if [[ ! "$GET_CODE" =~ ^2 ]]; then
   echo "--- GET response ---"

@@ -4,12 +4,17 @@ set -euo pipefail
 # ---- Config (override via env vars) ----
 BASE="${BASE:-http://127.0.0.1:4321}"
 KEY="${MEMORY_API_KEY:-dev-local}"
+CF_ACCESS_CLIENT_ID="${CF_ACCESS_CLIENT_ID:-}"
+CF_ACCESS_CLIENT_SECRET="${CF_ACCESS_CLIENT_SECRET:-}"
 
 OWNER_ID="${OWNER_ID:-test_user}"
 CLIENT_ID="${CLIENT_ID:-smoke}"
 TITLE="${TITLE:-smoke test}"
 
 HDR=(-H "X-API-Key: $KEY" -H "Content-Type: application/json")
+if [[ -n "$CF_ACCESS_CLIENT_ID" && -n "$CF_ACCESS_CLIENT_SECRET" ]]; then
+  HDR+=(-H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET")
+fi
 
 # ---- Helpers ----
 die() { echo "❌ $*" >&2; exit 1; }

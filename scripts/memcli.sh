@@ -12,6 +12,7 @@ set -euo pipefail
 #
 # Optional:
 #   BASE_URL=http://192.168.1.206:11440 OWNER_ID=daniel ./memcli.sh -c alexa_car --debug "ping"
+#   CF_ACCESS_CLIENT_ID=... CF_ACCESS_CLIENT_SECRET=... MEMORY_API_KEY=... ./memcli.sh -c alexa_car "hello"
 
 BASE_URL="${BASE_URL:-http://192.168.1.206:11440}"
 OWNER_ID="${OWNER_ID:-daniel}"
@@ -23,6 +24,12 @@ TITLE=""
 IDLE_TTL_S="${IDLE_TTL_S:-7200}"  # 2 hours default (matches "rolling conversation" idea)
 STATE_DIR="${STATE_DIR:-$HOME/.basic-memory-store}"
 API_KEY="${MEMORY_API_KEY:-}"
+CF_ACCESS_CLIENT_ID="${CF_ACCESS_CLIENT_ID:-}"
+CF_ACCESS_CLIENT_SECRET="${CF_ACCESS_CLIENT_SECRET:-}"
+CF_HDR=()
+if [[ -n "$CF_ACCESS_CLIENT_ID" && -n "$CF_ACCESS_CLIENT_SECRET" ]]; then
+  CF_HDR=(-H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET")
+fi
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -42,6 +49,8 @@ memcli.sh - simulate clients against Basic Memory Store
 Env:
   MEMORY_API_KEY=...           required
   BASE_URL=...                 default: $BASE_URL
+  CF_ACCESS_CLIENT_ID=...      optional (Cloudflare Access)
+  CF_ACCESS_CLIENT_SECRET=...  optional (Cloudflare Access)
   OWNER_ID=...                 default: $OWNER_ID
   IDLE_TTL_S=...               default: $IDLE_TTL_S
   STATE_DIR=...                default: $STATE_DIR
@@ -127,6 +136,7 @@ resolve_resp=$(
   curl -sS "$BASE_URL/v1/conversations/resolve" \
     -H "Content-Type: application/json" \
     -H "X-API-Key: $API_KEY" \
+    "${CF_HDR[@]}" \
     -d "$resolve_payload"
 )
 
@@ -167,6 +177,7 @@ chat_resp=$(
   curl -sS "$BASE_URL/v1/chat" \
     -H "Content-Type: application/json" \
     -H "X-API-Key: $API_KEY" \
+    "${CF_HDR[@]}" \
     -d "$chat_payload"
 )
 
