@@ -1,3 +1,17 @@
+networks:
+  cloudflare-egress:
+    external: true
+    name: cloudflare-egress
+
+  llm-memory-dmz:
+    name: llm-memory-dmz
+    driver: bridge
+    internal: true
+
+  llm-egress:
+    name: llm-egress
+    driver: bridge
+
 services:
   memory-db-postgres:
     image: postgres:16-alpine
@@ -10,8 +24,11 @@ services:
     volumes:
       - "${_VOLUME_BASIC_MEMORY_STORE}/postgres_data:/var/lib/postgresql/data"
       - "${_VOLUME_BASIC_MEMORY_STORE}/schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro"
-    ports:
-      - "15432:5432"
+    networks:
+      - llm-memory-dmz
+    # REMOVE ports to avoid host/LAN exposure
+    expose:
+      - "5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U memory_user -d memory_db"]
       interval: 2s
@@ -25,9 +42,12 @@ services:
     user: "1000:1000"
     volumes:
       - "${_VOLUME_BASIC_MEMORY_STORE}/qdrant_data:/qdrant/storage:rw"
-    ports:
-      - "16333:6333"
-      - "16334:6334"
+    networks:
+      - llm-memory-dmz
+    # REMOVE ports to avoid host/LAN exposure
+    expose:
+      - "6333"
+      - "6334"
     healthcheck:
       test: ["CMD-SHELL", "grep -Eq ':18BD .* 0A' /proc/net/tcp"]
       interval: 2s
@@ -44,9 +64,12 @@ services:
       - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
     volumes:
       - "${_VOLUME_BASIC_MEMORY_STORE}/minio_data:/data"
-    ports:
-      - "16335:9000"
-      - "16336:9001"
+    networks:
+      - llm-memory-dmz
+    # REMOVE ports to avoid host/LAN exposure
+    expose:
+      - "9000"
+      - "9001"
     healthcheck:
       test: ["CMD-SHELL", "grep -Eq ':2328 .* 0A' /proc/net/tcp"]
       interval: 5s
@@ -58,15 +81,17 @@ services:
     image: docker.litellm.ai/berriai/litellm:main-stable
     container_name: memory-litellm
     restart: unless-stopped
-    ports:
-      - "14000:4000"
     environment:
       - LITELLM_LOG=INFO
-
-      # Provider credentials
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     volumes:
-      - "${_VOLUME_BASIC_MEMORY_STORE}/litellm/config.yaml:/app/config.yaml:ro}"
+      - "${_VOLUME_BASIC_MEMORY_STORE}/litellm/config.yaml:/app/config.yaml:ro"
+    networks:
+      - llm-memory-dmz   # reachable by basic-memory-store
+      - llm-egress       # outbound internet to OpenAI
+    # REMOVE ports unless you truly need to access it from host
+    expose:
+      - "4000"
     command: ["--config", "/app/config.yaml", "--host", "0.0.0.0", "--port", "4000"]
     healthcheck:
       test: ["CMD-SHELL", "grep -Eq ':0FA0 .* 0A' /proc/net/tcp"]
@@ -74,7 +99,6 @@ services:
       timeout: 3s
       retries: 30
       start_period: 20s
-
 
   basic-memory-store:
     image: danielnguyen/basic-memory-store:latest
@@ -92,34 +116,15 @@ services:
         condition: service_healthy
     environment:
       - MEMORY_API_KEY=${MEMORY_API_KEY}
-
-      # Postgres (internal DNS)
       - PG_DSN=postgresql://memory_user:${POSTGRES_PASSWORD}@memory-db-postgres:5432/memory_db
-
-      # Qdrant (internal DNS)
       - QDRANT_URL=http://memory-db-qdrant:6333
       - QDRANT_COLLECTION=messages
-
-      # LiteLLM (internal DNS)
       - LITELLM_BASE_URL=http://litellm:4000
-      # - LITELLM_API_KEY=${LITELLM_API_KEY}
-
-      # Models (LiteLLM-exposed model names)
-      - CHAT_MODEL=gpt-4o-mini
-      - EMBED_MODEL=text-embedding-3-small
-      # Optional: if set, forwarded to LiteLLM. Leave unset to omit param (recommended for O-series).
-      # - CHAT_TEMPERATURE=0.2
-
-      # Indexing policy (reduce retrieval noise)
-      - INDEX_USER_QUESTIONS=false
-      - INDEX_ASSISTANT_MESSAGES=false
-
-      # Context / retrieval
+      - CHAT_MODEL=chat_voice_openai
+      - EMBED_MODEL=embed
       - RECENT_TURNS=10
       - RETRIEVAL_K=8
       - MAX_CONTEXT_CHARS=12000
-
-      # Artifacts + object store
       - ARTIFACTS_OBJECT_PREFIX=artifacts
       - ARTIFACTS_PRESIGN_TTL_S=900
       - OBJECT_STORE_ENABLED=true
@@ -133,10 +138,14 @@ services:
       - ARTIFACTS_ALLOWED_MIME=image/png,image/jpeg,image/webp,application/pdf,text/plain,text/markdown,application/json,application/zip
     volumes:
       - "${_VOLUME_BASIC_MEMORY_STORE}/app_data:/app/data:rw"
-    ports:
-      - "11440:8000"
+    networks:
+      - llm-memory-dmz
+      - cloudflare-egress
+    expose:
+      - "8000"
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8000/readyz"]
+      test: ["CMD-SHELL", "grep -Eq ':1F40 .* 0A' /proc/net/tcp"]
       interval: 5s
       timeout: 3s
       retries: 30
+      start_period: 15s
