@@ -211,11 +211,10 @@ class RetrieveBundleRequest(BaseModel):
 
 class ArtifactRef(BaseModel):
     artifact_id: str
-    mime_type: str
-    filename: Optional[str] = None
-    source_message_id: Optional[str] = None
-    uri: Optional[str] = None
+    file_path: str
+    snippet: str
     relevance_score: Optional[float] = None
+    repo_name: Optional[str] = None
 
 
 class RetrievalMessageItem(BaseModel):
@@ -246,6 +245,27 @@ class RetrieveBundleResponse(BaseModel):
     request_id: str
     conversation_id: str
     bundle: RetrievalBundle
+
+
+# ---- Ingestion ----
+
+class FileIngestionRequest(BaseModel):
+    owner_id: str
+    client_id: Optional[str] = None
+    source_surface: Optional[str] = None
+    repo_name: Optional[str] = None
+    paths: List[str] = Field(default_factory=list)
+
+
+class FileIngestionResponse(BaseModel):
+    ingestion_id: str
+    owner_id: str
+    repo_name: Optional[str] = None
+    files_seen: int
+    files_ingested: int
+    chunks_created: int
+    artifacts_created: int
+    status: Literal["completed"]
 
 
 # ---- Profiles ----

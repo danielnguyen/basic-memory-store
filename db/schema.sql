@@ -37,12 +37,17 @@ CREATE TABLE IF NOT EXISTS artifacts (
   owner_id TEXT NOT NULL,
   client_id TEXT,
   conversation_id UUID REFERENCES conversations(id) ON DELETE SET NULL,
+  ingestion_id UUID,
   sha256 TEXT,
   mime TEXT NOT NULL,
   size BIGINT NOT NULL CHECK (size >= 0),
   object_uri TEXT NOT NULL,
   source_surface TEXT,
+  source_kind TEXT,
   filename TEXT NOT NULL,
+  repo_name TEXT,
+  repo_ref TEXT,
+  file_path TEXT,
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'completed', 'failed')),
   content_hash_version TEXT NOT NULL DEFAULT 'v1',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -54,6 +59,12 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_owner_time
 
 CREATE INDEX IF NOT EXISTS idx_artifacts_convo_time
   ON artifacts(conversation_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_artifacts_ingestion
+  ON artifacts(ingestion_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_artifacts_owner_file_path
+  ON artifacts(owner_id, file_path);
 
 -- Explicit linkage between artifacts and message/conversation entities
 CREATE TABLE IF NOT EXISTS artifact_links (

@@ -80,6 +80,13 @@ class Settings(BaseSettings):
     # --- Context / Retrieval tuning ---
     recent_turns: int = Field(default=10, alias="RECENT_TURNS", ge=0, le=100)
     retrieval_k: int = Field(default=8, alias="RETRIEVAL_K", ge=1, le=50)
+    retrieval_artifact_k: int = Field(default=3, alias="RETRIEVAL_ARTIFACT_K", ge=0, le=20)
+    retrieval_artifact_max_snippet_chars: int = Field(
+        default=500,
+        alias="RETRIEVAL_ARTIFACT_MAX_SNIPPET_CHARS",
+        ge=100,
+        le=4000,
+    )
     max_context_chars: int = Field(default=12000, alias="MAX_CONTEXT_CHARS", ge=1000, le=200000)
 
     # --- R04/R11 ---
@@ -160,6 +167,18 @@ class Settings(BaseSettings):
         alias="ARTIFACTS_ALLOWED_MIME",
         description="Comma-separated allowed artifact MIME types.",
     )
+    ingest_max_file_bytes: int = Field(default=262144, alias="INGEST_MAX_FILE_BYTES", ge=1)
+    ingest_max_files_per_request: int = Field(default=200, alias="INGEST_MAX_FILES_PER_REQUEST", ge=1, le=5000)
+    ingest_allowed_extensions: str = Field(
+        default=".py,.md,.txt,.json,.yaml,.yml,.toml,.js,.ts,.tsx,.jsx,.sql,.sh,.env,.ini,.cfg,.html,.css",
+        alias="INGEST_ALLOWED_EXTENSIONS",
+    )
+    ingest_exclude_globs_default: str = Field(
+        default=".git/*,node_modules/*,.venv/*,venv/*,dist/*,build/*,__pycache__/*,.pytest_cache/*",
+        alias="INGEST_EXCLUDE_GLOBS_DEFAULT",
+    )
+    ingest_chunk_size_chars: int = Field(default=1200, alias="INGEST_CHUNK_SIZE_CHARS", ge=200, le=20000)
+    ingest_chunk_overlap_chars: int = Field(default=150, alias="INGEST_CHUNK_OVERLAP_CHARS", ge=0, le=5000)
 
     # pydantic-settings v2 config
     model_config = SettingsConfigDict(

@@ -19,6 +19,16 @@ class FakePG:
     async def conversation_exists(self, cid):
         return True
 
+    async def get_conversation(self, cid):
+        return {
+            "conversation_id": str(cid),
+            "owner_id": "owner",
+            "client_id": "client-a",
+            "title": None,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+        }
+
     async def get_message_snippets_by_ids(self, ids):
         return [
             {
@@ -41,6 +51,18 @@ class FakePG:
             }
         ]
 
+    async def get_derived_text_snippets_by_ids(self, ids):
+        return [
+            {
+                "derived_text_id": str(item),
+                "artifact_id": str(uuid.uuid4()),
+                "text": "def important_helper(): pass",
+                "file_path": "api/helpers.py",
+                "repo_name": "basic-memory-store",
+            }
+            for item in ids
+        ] if ids else []
+
 
 class FakeQdrant:
     def ping(self):
@@ -49,6 +71,24 @@ class FakeQdrant:
     async def search(self, **kwargs):
         hit = types.SimpleNamespace(message_id=str(uuid.uuid4()), score=0.77)
         return [hit]
+
+    async def search_artifact_chunks(self, **kwargs):
+        return [
+            types.SimpleNamespace(
+                derived_text_id=str(uuid.uuid4()),
+                artifact_id=str(uuid.uuid4()),
+                file_path="api/helpers.py",
+                repo_name="basic-memory-store",
+                score=0.66,
+            ),
+            types.SimpleNamespace(
+                derived_text_id=str(uuid.uuid4()),
+                artifact_id=str(uuid.uuid4()),
+                file_path="api/helpers.py",
+                repo_name="basic-memory-store",
+                score=0.61,
+            ),
+        ]
 
 
 def test_retrieve_bundle_shape(monkeypatch):
@@ -79,13 +119,14 @@ def test_retrieve_bundle_shape(monkeypatch):
         assert body["bundle"]["recent"][0]["content"] == "recent snippet"
         assert body["bundle"]["semantic"][0]["content"] == "semantic result"
         assert body["bundle"]["semantic"][0]["score"] == 0.77
-        assert body["bundle"]["artifact_refs"] == []
+        assert body["bundle"]["artifact_refs"][0]["file_path"] == "api/helpers.py"
+        assert len(body["bundle"]["artifact_refs"]) == 1
         assert body["bundle"]["observed_metadata"] == {
-            "mime_types": [],
-            "has_artifacts": False,
-            "has_code_like_content": False,
-            "estimated_chars": len("recent snippetsemantic result"),
+            "mime_types": ["text/plain"],
+            "has_artifacts": True,
+            "has_code_like_content": True,
+            "estimated_chars": len("recent snippetsemantic resultdef important_helper(): passdef important_helper(): pass"),
         }
-        assert body["bundle"]["token_estimate_total"] == len("recent snippetsemantic result") // 4
+        assert body["bundle"]["token_estimate_total"] == len("recent snippetsemantic resultdef important_helper(): passdef important_helper(): pass") // 4
     finally:
         client.close()

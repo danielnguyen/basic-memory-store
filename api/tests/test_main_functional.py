@@ -17,6 +17,7 @@ class FakePG:
         self.messages = []  # list of dicts
         self.artifacts = {}
         self.traces = {}
+        self.derived_text = {}
 
     async def open(self): ...
     async def close(self): ...
@@ -29,6 +30,18 @@ class FakePG:
 
     async def conversation_exists(self, cid):
         return cid in self.conversations
+
+    async def get_conversation(self, cid):
+        if cid not in self.conversations:
+            return None
+        return {
+            "conversation_id": str(cid),
+            "owner_id": "daniel",
+            "client_id": "smoke",
+            "title": None,
+            "created_at": "2026-01-01 00:00:00+00:00",
+            "updated_at": "2026-01-01 00:00:00+00:00",
+        }
 
     async def resolve_conversation(self, owner_id: str, client_id: str, idle_ttl_s: int, title=None):
         # Always create new for test determinism
@@ -90,6 +103,13 @@ class FakePG:
         client_id=None,
         conversation_id=None,
         source_surface=None,
+        source_kind=None,
+        repo_name=None,
+        repo_ref=None,
+        file_path=None,
+        ingestion_id=None,
+        sha256=None,
+        status="pending",
     ):
         row = {
             "artifact_id": str(artifact_id),
@@ -101,10 +121,15 @@ class FakePG:
             "size": size,
             "object_uri": object_uri,
             "source_surface": source_surface,
-            "status": "pending",
-            "sha256": None,
+            "status": status,
+            "sha256": sha256,
             "created_at": "2026-01-01 00:00:00+00:00",
-            "completed_at": None,
+            "completed_at": "2026-01-01 00:00:10+00:00" if status == "completed" else None,
+            "source_kind": source_kind,
+            "repo_name": repo_name,
+            "repo_ref": repo_ref,
+            "file_path": file_path,
+            "ingestion_id": str(ingestion_id) if ingestion_id else None,
         }
         self.artifacts[str(artifact_id)] = row
         return row
@@ -131,6 +156,26 @@ class FakePG:
 
     async def get_recent_message_items(self, conversation_id, limit=10):
         return await self.get_recent_message_snippets(conversation_id, limit=limit)
+
+    async def create_derived_text(self, *, artifact_id, kind, text, language, derivation_params):
+        did = uuid.uuid4()
+        row = {
+            "derived_text_id": str(did),
+            "artifact_id": str(artifact_id),
+            "kind": kind,
+            "language": language,
+            "text": text,
+            "derivation_params": derivation_params or {},
+            "created_at": "2026-01-01 00:00:00+00:00",
+        }
+        self.derived_text[str(did)] = row
+        return row
+
+    async def create_embedding_ref(self, *, ref_type, ref_id, model, qdrant_point_id):
+        return {"embedding_id": str(uuid.uuid4())}
+
+    async def get_derived_text_snippets_by_ids(self, ids):
+        return [self.derived_text[str(i)] for i in ids if str(i) in self.derived_text]
 
     async def get_pinned_memories(self, owner_id: str, conversation_id=None, limit=5):
         return []
@@ -200,6 +245,7 @@ class FakePG:
 class FakeQdrant:
     def __init__(self):
         self.upserts = []  # record calls
+        self.derived_upserts = []
 
     def ping(self): return True
 
@@ -210,6 +256,13 @@ class FakeQdrant:
 
     async def search(self, owner_id, query, k, min_score, conversation_id=None, client_id=None, exclude_message_ids=None):
         # Return empty by default (tests can monkeypatch this per-case)
+        return []
+
+    async def upsert_derived_text_vector(self, **kwargs):
+        self.derived_upserts.append(kwargs)
+        return True
+
+    async def search_artifact_chunks(self, **kwargs):
         return []
 
 
@@ -250,6 +303,8 @@ def client(monkeypatch):
         chat_model="chat_local_fast",
         chat_temperature=None,
         retrieval_k=5,
+        retrieval_artifact_k=3,
+        retrieval_artifact_max_snippet_chars=500,
         recent_turns=10,
         max_context_chars=4000,
         artifacts_object_prefix="artifacts",
@@ -261,6 +316,12 @@ def client(monkeypatch):
         index_user_questions=False,
         index_assistant_messages=True,
         min_index_chars=12,
+        ingest_max_file_bytes=262144,
+        ingest_max_files_per_request=200,
+        ingest_allowed_extensions=".py,.md,.txt,.json",
+        ingest_exclude_globs_default=".git/*,node_modules/*",
+        ingest_chunk_size_chars=1200,
+        ingest_chunk_overlap_chars=150,
     )
 
     fake_pg = FakePG()
@@ -453,6 +514,29 @@ def test_artifact_key_sanitization_helper():
     assert main_module._sanitize_object_key_component("   ") == "artifact"
 
 
+def test_file_ingestion_creates_artifacts_and_chunks(client, tmp_path):
+    src = tmp_path / "module.py"
+    src.write_text("def useful_helper():\n    return 'ok'\n", encoding="utf-8")
+
+    r = client.post(
+        "/v1/ingestion/files",
+        headers=auth_headers(),
+        json={
+            "owner_id": "daniel",
+            "client_id": "vscode",
+            "source_surface": "vscode",
+            "repo_name": "basic-memory-store",
+            "paths": [str(src)],
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["files_ingested"] == 1
+    assert body["chunks_created"] >= 1
+    assert body["artifacts_created"] == 1
+    assert main_module.qdrant.derived_upserts[0]["file_path"] == "module.py"
+
+
 def test_tiered_retrieve_endpoint(client, monkeypatch):
     convo = str(uuid.uuid4())
     main_module.pg.conversations.add(uuid.UUID(convo))
@@ -522,6 +606,46 @@ def test_orchestrate_chat_and_trace_read(client):
     trace = r2.json()
     assert trace["request_id"] == request_id
     assert trace["surface"] == "vscode"
+
+
+def test_v1_chat_includes_artifact_snippets_in_prompt(client, monkeypatch):
+    derived_id = str(uuid.uuid4())
+
+    class ArtifactHit:
+        def __init__(self):
+            self.derived_text_id = derived_id
+            self.artifact_id = str(uuid.uuid4())
+            self.file_path = "api/main.py"
+            self.repo_name = "basic-memory-store"
+            self.score = 0.72
+
+    async def fake_artifact_search(**kwargs):
+        return [ArtifactHit()]
+
+    async def fake_derived(ids):
+        return [{
+            "derived_text_id": derived_id,
+            "artifact_id": str(uuid.uuid4()),
+            "text": "def build_context_block(): pass",
+            "file_path": "api/main.py",
+            "repo_name": "basic-memory-store",
+        }]
+
+    monkeypatch.setattr(main_module.qdrant, "search_artifact_chunks", fake_artifact_search, raising=True)
+    monkeypatch.setattr(main_module.pg, "get_derived_text_snippets_by_ids", fake_derived, raising=True)
+
+    r = client.post(
+        "/v1/chat",
+        headers=auth_headers(),
+        json={
+            "owner_id": "daniel",
+            "client_id": "smoke",
+            "messages": [{"role": "user", "content": "Where is context built?"}],
+        },
+    )
+    assert r.status_code == 200
+    prompt_messages = main_module.litellm.calls[-1]["messages"]
+    assert any("Relevant ingested file excerpts:" in item["content"] for item in prompt_messages if item["role"] == "system")
 
 
 def test_metrics_exposes_skipped_qdrant_counter(client, monkeypatch):

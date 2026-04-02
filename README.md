@@ -72,6 +72,7 @@ BASIC-MEMORY-STORE/
 - Embeds selected messages via LiteLLM
 - Stores vectors in Qdrant
 - Retrieves relevant historical context
+- Ingests local text/code files into chunked artifact knowledge
 - Assembles prompts deterministically
 - Acts as a single “memory gateway” for all clients
 
@@ -129,14 +130,24 @@ OPENAI_API_KEY=sk-...
 LITELLM_API_KEY=
 
 # Models (LiteLLM names)
-CHAT_MODEL=gpt-4o-mini
-EMBED_MODEL=text-embedding-3-small
+CHAT_MODEL=chat_voice_openai
+EMBED_MODEL=embed
 
 # Request-ID / Trace contract
 REQUIRE_REQUEST_ID=true
 ENFORCE_REQUEST_ID_HEADER_BODY_MATCH=true
 ENABLE_TRACE_STORAGE=true
 ENABLE_PROFILE_RESOLVE=true
+
+# File ingestion / retrieval
+RETRIEVAL_ARTIFACT_K=3
+RETRIEVAL_ARTIFACT_MAX_SNIPPET_CHARS=500
+INGEST_MAX_FILE_BYTES=262144
+INGEST_MAX_FILES_PER_REQUEST=200
+INGEST_ALLOWED_EXTENSIONS=.py,.md,.txt,.json,.yaml,.yml,.toml,.js,.ts,.tsx,.jsx,.sql,.sh,.env,.ini,.cfg,.html,.css
+INGEST_EXCLUDE_GLOBS_DEFAULT=.git/*,node_modules/*,.venv/*,venv/*,dist/*,build/*,__pycache__/*,.pytest_cache/*
+INGEST_CHUNK_SIZE_CHARS=1200
+INGEST_CHUNK_OVERLAP_CHARS=150
 ```
 
 ---
@@ -163,6 +174,13 @@ Qdrant stores only:
 - embedding vector
 
 If Qdrant is lost, it can be rebuilt entirely from Postgres.
+
+Additions for file ingestion and retrieval:
+
+- `artifacts` stores file-level source metadata
+- `derived_text` stores rebuildable chunk text
+- `embeddings` links chunk refs to Qdrant point ids
+- Qdrant now stores both message vectors and derived-text chunk vectors
 
 ---
 
@@ -195,7 +213,7 @@ export PG_DSN="postgresql://memory_user:pass@127.0.0.1:15432/memory_db"
 export QDRANT_URL="http://127.0.0.1:16333"
 export LITELLM_BASE_URL="http://127.0.0.1:4000"
 export EMBED_MODEL="embed"
-export CHAT_MODEL="gpt-4o-mini"
+export CHAT_MODEL="chat_voice_openai"
 export ARTIFACTS_OBJECT_PREFIX="artifacts"
 export ARTIFACTS_PRESIGN_TTL_S="900"
 export OBJECT_STORE_ENABLED="true"
@@ -204,6 +222,14 @@ export OBJECT_STORE_BUCKET="memory-artifacts"
 export OBJECT_STORE_ACCESS_KEY="minioadmin"
 export OBJECT_STORE_SECRET_KEY="minioadmin"
 export OBJECT_STORE_REGION="us-east-1"
+export RETRIEVAL_ARTIFACT_K="3"
+export RETRIEVAL_ARTIFACT_MAX_SNIPPET_CHARS="500"
+export INGEST_MAX_FILE_BYTES="262144"
+export INGEST_MAX_FILES_PER_REQUEST="200"
+export INGEST_ALLOWED_EXTENSIONS=".py,.md,.txt,.json,.yaml,.yml,.toml,.js,.ts,.tsx,.jsx,.sql,.sh,.env,.ini,.cfg,.html,.css"
+export INGEST_EXCLUDE_GLOBS_DEFAULT=".git/*,node_modules/*,.venv/*,venv/*,dist/*,build/*,__pycache__/*,.pytest_cache/*"
+export INGEST_CHUNK_SIZE_CHARS="1200"
+export INGEST_CHUNK_OVERLAP_CHARS="150"
 
 uvicorn main:app --host 0.0.0.0 --port 4321 --reload
 ```
@@ -372,6 +398,42 @@ GET /v1/artifacts/{artifact_id}
 Current status: `upload_url`/`download_url` are placeholder URLs for integration wiring, not real cryptographic presigned URLs yet.
 When `OBJECT_STORE_ENABLED=true`, these are real presigned S3-compatible URLs (MinIO/S3).
 If PUT signing includes `Content-Type`, uploads must send the exact same `Content-Type` header.
+
+---
+
+### File ingestion
+
+```
+POST /v1/ingestion/files
+x-api-key: <MEMORY_API_KEY>
+```
+
+```json
+{
+  "owner_id": "user_123",
+  "client_id": "vscode",
+  "source_surface": "vscode",
+  "repo_name": "basic-memory-store",
+  "paths": ["/abs/path/to/files/or/dirs"]
+}
+```
+
+Behavior:
+- ingests local text/code files only
+- chunks and embeds file content
+- stores source metadata on `artifacts`
+- returns chunk-based `artifact_refs` in retrieval results
+
+Current MVP constraints:
+- ingestion is not conversation-scoped
+- artifact retrieval is capped and mixed alongside normal memory retrieval
+- repeated ingest of the same file may currently produce duplicate `artifact_refs`
+
+Apply the additive migration before using file ingestion against an existing DB:
+
+```bash
+psql "$PG_DSN" -f db/migrations/20260402_artifact_ingestion_additive.sql
+```
 
 ---
 
