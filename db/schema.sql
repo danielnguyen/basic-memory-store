@@ -104,16 +104,21 @@ CREATE INDEX IF NOT EXISTS idx_embeddings_ref
 -- End-to-end request traces for retrieval/routing/model-call observability
 CREATE TABLE IF NOT EXISTS traces (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  trace_id TEXT NOT NULL,
   request_id TEXT NOT NULL UNIQUE,
-  conversation_id UUID REFERENCES conversations(id) ON DELETE SET NULL,
-  owner_id TEXT,
-  surface TEXT,
-  router_decision_json JSONB,
-  retrieval_json JSONB,
-  model_calls_json JSONB,
-  cost_json JSONB,
+  conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  owner_id TEXT NOT NULL,
+  client_id TEXT,
+  surface TEXT NOT NULL,
+  profile_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  retrieval_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  router_decision_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  manual_override_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  model_call_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  fallback_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  cost_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   latency_ms INTEGER,
+  status TEXT NOT NULL CHECK (status IN ('ok', 'degraded', 'failed')),
+  error_text TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -122,6 +127,36 @@ CREATE INDEX IF NOT EXISTS idx_traces_conversation_time
 
 CREATE INDEX IF NOT EXISTS idx_traces_owner_time
   ON traces(owner_id, created_at DESC);
+
+-- Mode profiles and per-surface defaults
+CREATE TABLE IF NOT EXISTS profiles (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id TEXT NOT NULL,
+  profile_name TEXT NOT NULL,
+  profile_version INTEGER NOT NULL,
+  active BOOLEAN NOT NULL DEFAULT true,
+  prompt_overlay TEXT NOT NULL DEFAULT '',
+  retrieval_policy_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  routing_policy_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  response_style_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  safety_policy_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  tool_policy_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (owner_id, profile_name, profile_version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_profiles_owner_name_active
+  ON profiles(owner_id, profile_name, active, profile_version DESC);
+
+CREATE TABLE IF NOT EXISTS surface_profile_defaults (
+  owner_id TEXT NOT NULL,
+  surface TEXT NOT NULL,
+  client_id TEXT NOT NULL DEFAULT '',
+  profile_name TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (owner_id, surface, client_id)
+);
 
 -- Future compatibility hooks for tiering overlays
 CREATE TABLE IF NOT EXISTS pinned_memories (

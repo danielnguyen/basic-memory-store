@@ -84,7 +84,51 @@ class MessageCreateResponse(BaseModel):
     message_id: str
 
 
-# ---- Retrieval ----
+# ---- Artifacts ----
+
+class ArtifactInitRequest(BaseModel):
+    owner_id: str
+    client_id: Optional[str] = None
+    conversation_id: Optional[str] = None
+    filename: str
+    mime: str
+    size: int = Field(..., ge=1)
+    source_surface: Optional[str] = None
+
+
+class ArtifactInitResponse(BaseModel):
+    artifact_id: str
+    upload_url: str
+    upload_url_expires_in_s: int
+    object_uri: str
+    status: str
+
+
+class ArtifactCompleteRequest(BaseModel):
+    artifact_id: str
+    status: Literal["completed", "failed"] = "completed"
+    sha256: Optional[str] = None
+
+
+class ArtifactResponse(BaseModel):
+    artifact_id: str
+    owner_id: str
+    client_id: Optional[str] = None
+    conversation_id: Optional[str] = None
+    filename: str
+    mime: str
+    size: int
+    object_uri: str
+    source_surface: Optional[str] = None
+    status: str
+    sha256: Optional[str] = None
+    created_at: str
+    completed_at: Optional[str] = None
+    download_url: str
+    download_url_expires_in_s: int
+
+
+# ---- Retrieval (legacy) ----
 
 class RetrieveRequest(BaseModel):
     owner_id: str = Field(..., examples=["daniel"])
@@ -126,54 +170,7 @@ class RetrieveResponse(BaseModel):
     hits: List[RetrieveHit]
 
 
-# ---- Artifacts ----
-
-ArtifactStatus = Literal["pending", "completed", "failed"]
-
-
-class ArtifactInitRequest(BaseModel):
-    owner_id: str = Field(..., examples=["daniel"])
-    client_id: Optional[str] = Field(default=None, examples=["vscode"])
-    conversation_id: Optional[str] = Field(default=None, examples=["550e8400-e29b-41d4-a716-446655440000"])
-    filename: str = Field(..., examples=["notes.pdf"])
-    mime: str = Field(..., examples=["application/pdf"])
-    size: int = Field(..., ge=0, examples=[1024])
-    source_surface: Optional[str] = Field(default=None, examples=["vscode"])
-
-
-class ArtifactInitResponse(BaseModel):
-    artifact_id: str
-    upload_url: str
-    upload_url_expires_in_s: int
-    object_uri: str
-    status: ArtifactStatus
-
-
-class ArtifactCompleteRequest(BaseModel):
-    artifact_id: str = Field(..., examples=["550e8400-e29b-41d4-a716-446655440000"])
-    sha256: Optional[str] = Field(default=None, examples=["a3f5e8f61dbb6f2035176697c22f45a194ce4f8ef2c31f6fb85fc5ac54c6d0d5"])
-    status: ArtifactStatus = Field(default="completed")
-
-
-class ArtifactResponse(BaseModel):
-    artifact_id: str
-    owner_id: str
-    client_id: Optional[str] = None
-    conversation_id: Optional[str] = None
-    filename: str
-    mime: str
-    size: int
-    object_uri: str
-    source_surface: Optional[str] = None
-    status: ArtifactStatus
-    sha256: Optional[str] = None
-    created_at: str
-    completed_at: Optional[str] = None
-    download_url: str
-    download_url_expires_in_s: int
-
-
-# ---- Tiered retrieval ----
+# ---- Tiered retrieval (legacy/orchestrator wrapper) ----
 
 class OverlayItem(BaseModel):
     id: str
@@ -182,14 +179,14 @@ class OverlayItem(BaseModel):
 
 
 class TieredRetrieveRequest(BaseModel):
-    owner_id: str = Field(..., examples=["daniel"])
-    query: str = Field(..., examples=["what did I pin about memory?"])
-    client_id: Optional[str] = Field(default=None, examples=["vscode"])
-    surface: Optional[str] = Field(default=None, examples=["vscode"])
+    owner_id: str
+    client_id: Optional[str] = None
+    query: str
+    surface: Optional[str] = None
     k: int = Field(default=8, ge=1, le=50)
     min_score: float = Field(default=0.25, ge=0.0, le=1.0)
-    working_limit: int = Field(default=10, ge=0, le=100)
-    pinned_limit: int = Field(default=5, ge=0, le=50)
+    working_limit: int = Field(default=8, ge=1, le=100)
+    pinned_limit: int = Field(default=5, ge=0, le=100)
 
 
 class TieredRetrieveResponse(BaseModel):
@@ -202,19 +199,119 @@ class TieredRetrieveResponse(BaseModel):
     persona: List[OverlayItem]
 
 
+# ---- Retrieval bundle (R04/R11 MVP) ----
+
+class RetrieveBundleRequest(BaseModel):
+    request_id: str
+    owner_id: str
+    query: str
+    retrieval: Optional[RetrievalOptions] = None
+    include_artifacts: bool = False
+
+
+class ArtifactRef(BaseModel):
+    artifact_id: str
+    mime_type: str
+    filename: Optional[str] = None
+    source_message_id: Optional[str] = None
+    uri: Optional[str] = None
+    relevance_score: Optional[float] = None
+
+
+class RetrievalMessageItem(BaseModel):
+    message_id: str
+    conversation_id: str
+    role: Role
+    content: str
+    created_at: str
+    score: Optional[float] = None
+
+
+class ObservedMetadata(BaseModel):
+    mime_types: List[str] = Field(default_factory=list)
+    has_artifacts: bool = False
+    has_code_like_content: bool = False
+    estimated_chars: int = 0
+
+
+class RetrievalBundle(BaseModel):
+    recent: List[RetrievalMessageItem] = Field(default_factory=list)
+    semantic: List[RetrievalMessageItem] = Field(default_factory=list)
+    artifact_refs: List[ArtifactRef] = Field(default_factory=list)
+    token_estimate_total: Optional[int] = None
+    observed_metadata: ObservedMetadata
+
+
+class RetrieveBundleResponse(BaseModel):
+    request_id: str
+    conversation_id: str
+    bundle: RetrievalBundle
+
+
+# ---- Profiles ----
+
+class ProfileResolveRequest(BaseModel):
+    owner_id: str
+    surface: str
+    requested_profile: Optional[str] = None
+    client_id: Optional[str] = None
+
+
+class ProfileResolveResponse(BaseModel):
+    profile_name: str
+    source: Literal["requested", "surface_default", "global_default"]
+    profile_version: int
+    effective_profile_ref: str
+    prompt_overlay: str
+    retrieval_policy: Dict[str, Any]
+    routing_policy: Dict[str, Any]
+    response_style: Dict[str, Any]
+    safety_policy: Dict[str, Any]
+    tool_policy: Dict[str, Any]
+
+
 # ---- Traces ----
 
-class TraceResponse(BaseModel):
+class TraceCreateRequest(BaseModel):
     request_id: str
-    trace_id: str
-    conversation_id: Optional[str] = None
-    owner_id: Optional[str] = None
-    surface: Optional[str] = None
-    router_decision: Dict[str, Any] = Field(default_factory=dict)
-    retrieval: Dict[str, Any] = Field(default_factory=dict)
-    model_calls: Dict[str, Any] = Field(default_factory=dict)
+    conversation_id: str
+    owner_id: str
+    client_id: Optional[str] = None
+    surface: str
+    profile: Dict[str, Any]
+    retrieval: Dict[str, Any]
+    router_decision: Dict[str, Any]
+    manual_override: Dict[str, Any] = Field(default_factory=dict)
+    model_call: Dict[str, Any]
+    fallback: Dict[str, Any] = Field(default_factory=dict)
     cost: Dict[str, Any] = Field(default_factory=dict)
     latency_ms: Optional[int] = None
+    status: Literal["ok", "degraded", "failed"]
+    error: Optional[str] = None
+
+
+class TraceCreateResponse(BaseModel):
+    trace_id: str
+    request_id: str
+
+
+class TraceResponse(BaseModel):
+    trace_id: str
+    request_id: str
+    conversation_id: str
+    owner_id: str
+    client_id: Optional[str] = None
+    surface: str
+    profile: Dict[str, Any]
+    retrieval: Dict[str, Any]
+    router_decision: Dict[str, Any]
+    manual_override: Dict[str, Any]
+    model_call: Dict[str, Any]
+    fallback: Dict[str, Any]
+    cost: Dict[str, Any]
+    latency_ms: Optional[int] = None
+    status: str
+    error: Optional[str] = None
     created_at: str
 
 
@@ -236,6 +333,17 @@ class ChatRequest(BaseModel):
     )
 
 
+class RetrievalDebugHit(BaseModel):
+    message_id: str
+    score: float
+
+
+class RetrievalDebug(BaseModel):
+    scope_used: RetrievalScope
+    fallback_used: bool
+    hits: List[RetrievalDebugHit]
+
+
 class ChatResponse(BaseModel):
     conversation_id: str
     answer: str
@@ -244,20 +352,9 @@ class ChatResponse(BaseModel):
 
 
 class OrchestrateChatRequest(ChatRequest):
-    surface: Optional[str] = Field(default=None, examples=["vscode"])
-    artifact_ids: Optional[List[str]] = Field(default=None, description="Optional artifact ids explicitly referenced by the client.")
+    surface: str = "unknown"
+    artifact_ids: Optional[List[str]] = None
 
 
 class OrchestrateChatResponse(ChatResponse):
     request_id: str
-
-
-# ---- Debug ----
-class RetrievalDebugHit(BaseModel):
-    message_id: str
-    score: float
-
-class RetrievalDebug(BaseModel):
-    scope_used: RetrievalScope
-    fallback_used: bool
-    hits: List[RetrievalDebugHit]

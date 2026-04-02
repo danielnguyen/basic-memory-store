@@ -11,10 +11,10 @@ set -euo pipefail
 #   MEMORY_API_KEY=... ./memcli.sh -c alexa_car --show
 #
 # Optional:
-#   BASE_URL=http://192.168.1.206:11440 OWNER_ID=daniel ./memcli.sh -c alexa_car --debug "ping"
+#   BASE_URL=http://127.0.0.1:4321 OWNER_ID=daniel ./memcli.sh -c alexa_car --debug "ping"
 #   CF_ACCESS_CLIENT_ID=... CF_ACCESS_CLIENT_SECRET=... MEMORY_API_KEY=... ./memcli.sh -c alexa_car "hello"
 
-BASE_URL="${BASE_URL:-http://192.168.1.206:11440}"
+BASE_URL="${BASE_URL:-http://127.0.0.1:4321}"
 OWNER_ID="${OWNER_ID:-daniel}"
 CLIENT_ID=""
 DEBUG=false

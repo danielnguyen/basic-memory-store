@@ -129,6 +129,9 @@ class FakePG:
                 out.append(m)
         return out[-limit:]
 
+    async def get_recent_message_items(self, conversation_id, limit=10):
+        return await self.get_recent_message_snippets(conversation_id, limit=limit)
+
     async def get_pinned_memories(self, owner_id: str, conversation_id=None, limit=5):
         return []
 
@@ -165,6 +168,30 @@ class FakePG:
         }
         self.traces[request_id] = trace
         return trace["trace_id"]
+
+    async def create_trace(self, trace):
+        request_id = trace["request_id"]
+        out = {
+            "trace_id": str(uuid.uuid4()),
+            "request_id": request_id,
+            "conversation_id": str(trace["conversation_id"]),
+            "owner_id": trace["owner_id"],
+            "client_id": trace.get("client_id"),
+            "surface": trace["surface"],
+            "profile": trace.get("profile", {}),
+            "retrieval": trace.get("retrieval", {}),
+            "router_decision": trace.get("router_decision", {}),
+            "manual_override": trace.get("manual_override", {}),
+            "model_call": trace.get("model_call", {}),
+            "fallback": trace.get("fallback", {}),
+            "cost": trace.get("cost", {}),
+            "latency_ms": trace.get("latency_ms"),
+            "status": trace.get("status", "ok"),
+            "error": trace.get("error"),
+            "created_at": "2026-01-01 00:00:00+00:00",
+        }
+        self.traces[request_id] = out
+        return uuid.UUID(out["trace_id"])
 
     async def get_trace_by_request_id(self, request_id: str):
         return self.traces.get(request_id)
@@ -472,9 +499,10 @@ def test_tiered_retrieve_endpoint(client, monkeypatch):
 
 
 def test_orchestrate_chat_and_trace_read(client):
+    rid = "rid-orchestrate-test"
     r = client.post(
         "/v1/orchestrate/chat",
-        headers=auth_headers(),
+        headers={**auth_headers(), "X-Request-ID": rid},
         json={
             "owner_id": "daniel",
             "client_id": "vscode",
@@ -487,7 +515,7 @@ def test_orchestrate_chat_and_trace_read(client):
     body = r.json()
     assert body["answer"] == "pong"
     request_id = body["request_id"]
-    assert request_id
+    assert request_id == rid
 
     r2 = client.get(f"/v1/traces/{request_id}", headers=auth_headers())
     assert r2.status_code == 200
