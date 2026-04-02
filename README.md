@@ -131,6 +131,12 @@ LITELLM_API_KEY=
 # Models (LiteLLM names)
 CHAT_MODEL=gpt-4o-mini
 EMBED_MODEL=text-embedding-3-small
+
+# Request-ID / Trace contract
+REQUIRE_REQUEST_ID=true
+ENFORCE_REQUEST_ID_HEADER_BODY_MATCH=true
+ENABLE_TRACE_STORAGE=true
+ENABLE_PROFILE_RESOLVE=true
 ```
 
 ---
@@ -188,7 +194,7 @@ export MEMORY_API_KEY="dev-key"
 export PG_DSN="postgresql://memory_user:pass@127.0.0.1:15432/memory_db"
 export QDRANT_URL="http://127.0.0.1:16333"
 export LITELLM_BASE_URL="http://127.0.0.1:4000"
-export EMBED_MODEL="text-embedding-3-small"
+export EMBED_MODEL="embed"
 export CHAT_MODEL="gpt-4o-mini"
 export ARTIFACTS_OBJECT_PREFIX="artifacts"
 export ARTIFACTS_PRESIGN_TTL_S="900"
@@ -209,6 +215,28 @@ Then open Swagger at:
 Authorize with:
 
 `X-API-Key = dev-key`
+
+Health check:
+
+`GET /healthz` returns:
+- `status`
+- `service`
+- `time` (ISO8601)
+- best-effort `dependencies` status for Postgres/Qdrant
+
+### Local vs Docker defaults
+
+- Local app mode (recommended for day-to-day dev):
+  - `basic-memory-store` API: `http://127.0.0.1:4321`
+  - `chat-orchestrator` API: `http://127.0.0.1:4361`
+  - LiteLLM: `http://127.0.0.1:4000`
+  - Postgres: `127.0.0.1:15432`
+  - Qdrant: `127.0.0.1:16333`
+  - MinIO: `127.0.0.1:16335`
+
+- Docker compose mode (`docker-compose.yml` in this repo):
+  - Service-to-service base URL inside network: `http://basic-memory-store:8000`
+  - Host-published API port (if enabled in compose): `http://127.0.0.1:11440`
 
 ### 3) Reset dev environment (wipe DB)
 
@@ -241,7 +269,7 @@ docker compose up -d --build
 Then test:
 
 ```bash
-MEMORY_API_KEY=change_me BASE=http://127.0.0.1:11440 ./scripts/smoke-test.sh
+MEMORY_API_KEY=change_me BASE=http://127.0.0.1:4321 ./scripts/smoke-test.sh
 ```
 
 ---

@@ -523,89 +523,245 @@ class PostgresStore:
         cost: dict[str, Any] | None,
         latency_ms: int | None,
     ) -> str:
-        trace_id = str(uuid4())
-        q = """
-        INSERT INTO traces (
-            trace_id, request_id, conversation_id, owner_id, surface,
-            router_decision_json, retrieval_json, model_calls_json, cost_json, latency_ms
+        trace_id = await self.create_trace(
+            {
+                "request_id": request_id,
+                "conversation_id": conversation_id,
+                "owner_id": owner_id or "",
+                "surface": surface or "unknown",
+                "profile": {},
+                "retrieval": retrieval or {},
+                "router_decision": router_decision or {},
+                "manual_override": {},
+                "model_call": model_calls or {},
+                "fallback": {},
+                "cost": cost or {},
+                "latency_ms": latency_ms,
+                "status": "ok",
+                "error": None,
+            }
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (request_id) DO UPDATE
-        SET
-          conversation_id = EXCLUDED.conversation_id,
-          owner_id = EXCLUDED.owner_id,
-          surface = EXCLUDED.surface,
-          router_decision_json = EXCLUDED.router_decision_json,
-          retrieval_json = EXCLUDED.retrieval_json,
-          model_calls_json = EXCLUDED.model_calls_json,
-          cost_json = EXCLUDED.cost_json,
-          latency_ms = EXCLUDED.latency_ms
-        RETURNING trace_id;
-        """
-        async with self.pool.connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    q,
-                    (
-                        trace_id,
-                        request_id,
-                        conversation_id,
-                        owner_id,
-                        surface,
-                        Json(router_decision or {}),
-                        Json(retrieval or {}),
-                        Json(model_calls or {}),
-                        Json(cost or {}),
-                        latency_ms,
-                    ),
-                )
-                row = await cur.fetchone()
-        return row[0]
-
-    async def get_trace_by_request_id(self, request_id: str) -> dict[str, Any] | None:
-        q = """
-        SELECT request_id, trace_id, conversation_id, owner_id, surface,
-               router_decision_json, retrieval_json, model_calls_json, cost_json, latency_ms, created_at
-        FROM traces
-        WHERE request_id = %s;
-        """
-        async with self.pool.connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(q, (request_id,))
-                row = await cur.fetchone()
-
-        if row is None:
-            return None
-
-        (
-            req_id,
-            trace_id,
-            convo_id,
-            owner_id,
-            surface,
-            router_json,
-            retrieval_json,
-            model_calls_json,
-            cost_json,
-            latency_ms,
-            created_at,
-        ) = row
-        return {
-            "request_id": req_id,
-            "trace_id": trace_id,
-            "conversation_id": str(convo_id) if convo_id else None,
-            "owner_id": owner_id,
-            "surface": surface,
-            "router_decision": router_json or {},
-            "retrieval": retrieval_json or {},
-            "model_calls": model_calls_json or {},
-            "cost": cost_json or {},
-            "latency_ms": latency_ms,
-            "created_at": str(created_at),
-        }
+        return str(trace_id)
 
     async def ping(self) -> None:
         async with self.pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute("SELECT 1;")
                 await cur.fetchone()
+
+    async def get_recent_message_items(self, conversation_id: UUID, limit: int = 10) -> list[dict[str, Any]]:
+        q = """
+        SELECT id, conversation_id, role, content, created_at
+        FROM messages
+        WHERE conversation_id = %s
+        ORDER BY created_at DESC
+        LIMIT %s;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (conversation_id, limit))
+                rows = await cur.fetchall()
+
+        rows.reverse()
+        return [
+            {
+                "message_id": str(r[0]),
+                "conversation_id": str(r[1]),
+                "role": r[2],
+                "content": r[3],
+                "created_at": str(r[4]),
+            }
+            for r in rows
+        ]
+
+    async def resolve_profile(
+        self,
+        owner_id: str,
+        surface: str,
+        requested_profile: str | None = None,
+        client_id: str | None = None,
+        default_profile_name: str = "dev",
+    ) -> dict[str, Any]:
+        client_key = client_id or ""
+
+        if requested_profile:
+            q = """
+            SELECT profile_name, profile_version, prompt_overlay, retrieval_policy_json,
+                   routing_policy_json, response_style_json, safety_policy_json, tool_policy_json
+            FROM profiles
+            WHERE owner_id = %s AND profile_name = %s AND active = true
+            ORDER BY profile_version DESC
+            LIMIT 1;
+            """
+            async with self.pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(q, (owner_id, requested_profile))
+                    row = await cur.fetchone()
+            if row:
+                return {
+                    "profile_name": row[0],
+                    "source": "requested",
+                    "profile_version": row[1],
+                    "effective_profile_ref": f"{owner_id}:{row[0]}:{row[1]}",
+                    "prompt_overlay": row[2] or "",
+                    "retrieval_policy": row[3] or {},
+                    "routing_policy": row[4] or {},
+                    "response_style": row[5] or {},
+                    "safety_policy": row[6] or {},
+                    "tool_policy": row[7] or {},
+                }
+
+        q_surface = """
+        SELECT p.profile_name, p.profile_version, p.prompt_overlay, p.retrieval_policy_json,
+               p.routing_policy_json, p.response_style_json, p.safety_policy_json, p.tool_policy_json
+        FROM surface_profile_defaults spd
+        JOIN profiles p
+          ON p.owner_id = spd.owner_id
+         AND p.profile_name = spd.profile_name
+         AND p.active = true
+        WHERE spd.owner_id = %s
+          AND spd.surface = %s
+          AND spd.client_id = %s
+        ORDER BY p.profile_version DESC
+        LIMIT 1;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q_surface, (owner_id, surface, client_key))
+                row = await cur.fetchone()
+        if row:
+            return {
+                "profile_name": row[0],
+                "source": "surface_default",
+                "profile_version": row[1],
+                "effective_profile_ref": f"{owner_id}:{row[0]}:{row[1]}",
+                "prompt_overlay": row[2] or "",
+                "retrieval_policy": row[3] or {},
+                "routing_policy": row[4] or {},
+                "response_style": row[5] or {},
+                "safety_policy": row[6] or {},
+                "tool_policy": row[7] or {},
+            }
+
+        q_global = """
+        SELECT profile_name, profile_version, prompt_overlay, retrieval_policy_json,
+               routing_policy_json, response_style_json, safety_policy_json, tool_policy_json
+        FROM profiles
+        WHERE owner_id = %s AND profile_name = %s AND active = true
+        ORDER BY profile_version DESC
+        LIMIT 1;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q_global, (owner_id, default_profile_name))
+                row = await cur.fetchone()
+        if row:
+            return {
+                "profile_name": row[0],
+                "source": "global_default",
+                "profile_version": row[1],
+                "effective_profile_ref": f"{owner_id}:{row[0]}:{row[1]}",
+                "prompt_overlay": row[2] or "",
+                "retrieval_policy": row[3] or {},
+                "routing_policy": row[4] or {},
+                "response_style": row[5] or {},
+                "safety_policy": row[6] or {},
+                "tool_policy": row[7] or {},
+            }
+
+        return {
+            "profile_name": default_profile_name,
+            "source": "global_default",
+            "profile_version": 1,
+            "effective_profile_ref": f"{owner_id}:{default_profile_name}:1",
+            "prompt_overlay": "",
+            "retrieval_policy": {},
+            "routing_policy": {},
+            "response_style": {},
+            "safety_policy": {},
+            "tool_policy": {},
+        }
+
+    async def create_trace(self, trace: dict[str, Any]) -> UUID:
+        q = """
+        INSERT INTO traces (
+            request_id, conversation_id, owner_id, client_id, surface,
+            profile_json, retrieval_json, router_decision_json, manual_override_json,
+            model_call_json, fallback_json, cost_json, latency_ms, status, error_text
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (request_id) DO UPDATE
+            SET conversation_id = EXCLUDED.conversation_id,
+                owner_id = EXCLUDED.owner_id,
+                client_id = EXCLUDED.client_id,
+                surface = EXCLUDED.surface,
+                profile_json = EXCLUDED.profile_json,
+                retrieval_json = EXCLUDED.retrieval_json,
+                router_decision_json = EXCLUDED.router_decision_json,
+                manual_override_json = EXCLUDED.manual_override_json,
+                model_call_json = EXCLUDED.model_call_json,
+                fallback_json = EXCLUDED.fallback_json,
+                cost_json = EXCLUDED.cost_json,
+                latency_ms = EXCLUDED.latency_ms,
+                status = EXCLUDED.status,
+                error_text = EXCLUDED.error_text
+        RETURNING id;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    q,
+                    (
+                        trace["request_id"],
+                        trace["conversation_id"],
+                        trace["owner_id"],
+                        trace.get("client_id"),
+                        trace["surface"],
+                        Json(trace.get("profile", {})),
+                        Json(trace.get("retrieval", {})),
+                        Json(trace.get("router_decision", {})),
+                        Json(trace.get("manual_override", {})),
+                        Json(trace.get("model_call", {})),
+                        Json(trace.get("fallback", {})),
+                        Json(trace.get("cost", {})),
+                        trace.get("latency_ms"),
+                        trace["status"],
+                        trace.get("error"),
+                    ),
+                )
+                row = await cur.fetchone()
+                return row[0]
+
+    async def get_trace_by_request_id(self, request_id: str) -> dict[str, Any] | None:
+        q = """
+        SELECT id, request_id, conversation_id, owner_id, client_id, surface,
+               profile_json, retrieval_json, router_decision_json, manual_override_json,
+               model_call_json, fallback_json, cost_json, latency_ms, status, error_text, created_at
+        FROM traces
+        WHERE request_id = %s
+        LIMIT 1;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (request_id,))
+                row = await cur.fetchone()
+        if not row:
+            return None
+        return {
+            "trace_id": str(row[0]),
+            "request_id": row[1],
+            "conversation_id": str(row[2]),
+            "owner_id": row[3],
+            "client_id": row[4],
+            "surface": row[5],
+            "profile": row[6] or {},
+            "retrieval": row[7] or {},
+            "router_decision": row[8] or {},
+            "manual_override": row[9] or {},
+            "model_call": row[10] or {},
+            "fallback": row[11] or {},
+            "cost": row[12] or {},
+            "latency_ms": row[13],
+            "status": row[14],
+            "error": row[15],
+            "created_at": str(row[16]),
+        }

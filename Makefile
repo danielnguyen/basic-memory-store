@@ -2,7 +2,7 @@ SHELL := /usr/bin/env bash
 
 DEV_COMPOSE := docker-compose.dev.yml
 
-.PHONY: dev-up dev-down dev-reset dev-bootstrap dev-logs dev-test dev-install dev-start dev-start-reload
+.PHONY: dev-up dev-down dev-reset dev-bootstrap dev-seed-profiles dev-logs dev-test dev-install dev-start dev-start-reload
 
 dev-up:
 	@docker compose -f $(DEV_COMPOSE) up -d
@@ -19,6 +19,9 @@ dev-reset:
 
 dev-bootstrap:
 	@./scripts/dev_bootstrap.sh
+
+dev-seed-profiles:
+	@./scripts/dev_seed_profiles.sh
 
 dev-logs:
 	@docker compose -f $(DEV_COMPOSE) logs -f --tail=200

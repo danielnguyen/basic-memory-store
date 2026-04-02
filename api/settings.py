@@ -82,6 +82,15 @@ class Settings(BaseSettings):
     retrieval_k: int = Field(default=8, alias="RETRIEVAL_K", ge=1, le=50)
     max_context_chars: int = Field(default=12000, alias="MAX_CONTEXT_CHARS", ge=1000, le=200000)
 
+    # --- R04/R11 ---
+    require_request_id: bool = Field(default=True, alias="REQUIRE_REQUEST_ID")
+    enforce_request_id_header_body_match: bool = Field(default=True, alias="ENFORCE_REQUEST_ID_HEADER_BODY_MATCH")
+    enable_trace_storage: bool = Field(default=True, alias="ENABLE_TRACE_STORAGE")
+    trace_redact_pii: bool = Field(default=False, alias="TRACE_REDACT_PII")
+    trace_max_payload_bytes: int = Field(default=250000, alias="TRACE_MAX_PAYLOAD_BYTES", ge=1000, le=5000000)
+    enable_profile_resolve: bool = Field(default=True, alias="ENABLE_PROFILE_RESOLVE")
+    default_profile_name: str = Field(default="dev", alias="DEFAULT_PROFILE_NAME")
+
     # --- Artifact storage hooks (MVP-friendly; S3/MinIO integration can be added later) ---
     artifacts_object_prefix: str = Field(
         default="artifacts",

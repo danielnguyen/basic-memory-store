@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, UTC
 from uuid import UUID, uuid4
 
@@ -43,6 +44,15 @@ from models import (
     OverlayItem,
     RetrievalDebug,
     RetrievalDebugHit,
+    RetrieveBundleRequest,
+    RetrieveBundleResponse,
+    RetrievalBundle,
+    RetrievalMessageItem,
+    ObservedMetadata,
+    ProfileResolveRequest,
+    ProfileResolveResponse,
+    TraceCreateRequest,
+    TraceCreateResponse,
     TraceResponse,
 )
 
@@ -62,9 +72,21 @@ async def require_api_key(api_key: str | None = Security(api_key_header)) -> Non
 
 # Apply auth globally to avoid forgetting it per-route.
 # (If you want /healthz and /readyz to be public later, we can split routers.)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await pg.open()
+    if getattr(settings, "object_store_enabled", False):
+        object_store.ensure_bucket()
+    try:
+        yield
+    finally:
+        await pg.close()
+
+
 app = FastAPI(
     title="Basic Memory Store",
     version="0.1.0",
+    lifespan=lifespan,
     swagger_ui_parameters={
         "persistAuthorization": True,
         "displayRequestDuration": True,
@@ -74,11 +96,12 @@ app = FastAPI(
 
 @app.middleware("http")
 async def attach_request_id(request: Request, call_next):
-    """Attach/propagate a request id for log correlation and client debugging."""
-    rid = request.headers.get("X-Request-ID") or str(uuid4())
+    """Echo X-Request-ID only when provided by caller."""
+    rid = request.headers.get("X-Request-ID")
     request.state.request_id = rid
     response = await call_next(request)
-    response.headers["X-Request-ID"] = rid
+    if rid:
+        response.headers["X-Request-ID"] = rid
     return response
 
 
@@ -120,6 +143,17 @@ def should_index_message(role: str, content: str) -> bool:
     return True
 
 
+def _require_matching_request_id(request: Request, body_request_id: str) -> str:
+    header_request_id = request.headers.get("X-Request-ID")
+    if settings.require_request_id and not header_request_id:
+        raise HTTPException(status_code=400, detail="X-Request-ID header is required")
+    if not body_request_id:
+        raise HTTPException(status_code=400, detail="request_id is required in request body")
+    if settings.enforce_request_id_header_body_match and header_request_id != body_request_id:
+        raise HTTPException(status_code=400, detail="request_id must match X-Request-ID")
+    return body_request_id
+
+
 def _sanitize_object_key_component(name: str) -> str:
     cleaned = name.strip()
     cleaned = cleaned.replace("\\", "_").replace("/", "_")
@@ -151,22 +185,28 @@ def build_artifact_transfer_url(kind: str, artifact_id: str) -> str:
     return f"{settings.artifacts_upload_base_url.rstrip('/')}/{kind}/{artifact_id}"
 
 
-
-@app.on_event("startup")
-async def startup() -> None:
-    await pg.open()
-    if settings.object_store_enabled:
-        object_store.ensure_bucket()
-
-
-@app.on_event("shutdown")
-async def shutdown() -> None:
-    await pg.close()
-
-
 @app.get("/healthz", tags=["ops"], summary="Liveness probe")
 async def healthz():
-    return {"ok": True}
+    dependencies = {"postgres": "unknown", "qdrant": "unknown"}
+
+    try:
+        await pg.ping()
+        dependencies["postgres"] = "ok"
+    except Exception as e:  # best effort only
+        dependencies["postgres"] = f"error:{type(e).__name__}"
+
+    try:
+        qdrant.ping()
+        dependencies["qdrant"] = "ok"
+    except Exception as e:  # best effort only
+        dependencies["qdrant"] = f"error:{type(e).__name__}"
+
+    return {
+        "status": "ok",
+        "service": "basic-memory-store",
+        "time": datetime.now(UTC).isoformat(),
+        "dependencies": dependencies,
+    }
 
 
 @app.get("/readyz", tags=["ops"], summary="Readiness probe")
@@ -474,7 +514,7 @@ async def retrieve(body: RetrieveRequest, request: Request):
     response_model=TieredRetrieveResponse,
     tags=["retrieve"],
     dependencies=[Depends(require_api_key)],
-    summary="Tier-aware retrieval for a specific conversation",
+    summary="Tier-aware retrieval for a specific conversation (v1 contract)",
 )
 async def retrieve_tiered(conversation_id: str, body: TieredRetrieveRequest):
     try:
@@ -500,7 +540,6 @@ async def retrieve_tiered(conversation_id: str, body: TieredRetrieveRequest):
     )
     semantic_snips = await pg.get_message_snippets_by_ids(semantic_ids)
     semantic_score_by_id = {h.message_id: h.score for h in semantic_hits}
-
     working_snips = await pg.get_recent_message_snippets(conversation_id=cid, limit=body.working_limit)
     pinned_items = await pg.get_pinned_memories(owner_id=body.owner_id, conversation_id=cid, limit=body.pinned_limit)
     policy_items = await pg.get_policy_overlays(owner_id=body.owner_id, surface=body.surface)
@@ -534,6 +573,85 @@ async def retrieve_tiered(conversation_id: str, body: TieredRetrieveRequest):
         pinned=[OverlayItem(**item) for item in pinned_items],
         policy=[OverlayItem(**item) for item in policy_items],
         persona=[OverlayItem(**item) for item in persona_items],
+    )
+
+
+@app.post(
+    "/v2/conversations/{conversation_id}/retrieve",
+    response_model=RetrieveBundleResponse,
+    tags=["retrieve"],
+    dependencies=[Depends(require_api_key)],
+    summary="Retrieve minimal context bundle for a specific conversation (v2 contract)",
+)
+async def retrieve_tiered_v2(conversation_id: str, body: RetrieveBundleRequest, request: Request):
+    _require_matching_request_id(request, body.request_id)
+
+    try:
+        cid = UUID(conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="conversation_id must be a UUID")
+
+    if not await pg.conversation_exists(cid):
+        raise HTTPException(status_code=404, detail="conversation_id not found")
+
+    opts = body.retrieval or RetrievalOptions(k=settings.retrieval_k, min_score=0.25, scope="conversation")
+    semantic_hits = await qdrant.search(
+        owner_id=body.owner_id,
+        query=body.query,
+        k=opts.k,
+        min_score=opts.min_score,
+        conversation_id=cid,
+        client_id=None,
+    )
+    semantic_ids = _safe_uuid_message_ids(
+        semantic_hits,
+        context="/v2/conversations/{id}/retrieve",
+        kind="semantic",
+    )
+    semantic_snips = await pg.get_message_snippets_by_ids(semantic_ids)
+    semantic_score_by_id = {h.message_id: h.score for h in semantic_hits}
+
+    recent_snips = await pg.get_recent_message_items(conversation_id=cid, limit=settings.recent_turns)
+
+    all_content = "".join([s["content"] for s in recent_snips] + [s["content"] for s in semantic_snips])
+    has_code_like_content = any(tok in all_content for tok in ("```", "def ", "class ", "import ", "{", "};"))
+    token_estimate_total = max(1, len(all_content) // 4) if all_content else None
+
+    return RetrieveBundleResponse(
+        request_id=body.request_id,
+        conversation_id=str(cid),
+        bundle=RetrievalBundle(
+            recent=[
+                RetrievalMessageItem(
+                    message_id=s["message_id"],
+                    conversation_id=s["conversation_id"],
+                    role=s["role"],
+                    content=s["content"],
+                    created_at=s["created_at"],
+                    score=None,
+                )
+                for s in recent_snips
+            ],
+            semantic=[
+                RetrievalMessageItem(
+                    message_id=s["message_id"],
+                    conversation_id=s["conversation_id"],
+                    role=s["role"],
+                    content=s["content"],
+                    created_at=s["created_at"],
+                    score=semantic_score_by_id.get(s["message_id"]),
+                )
+                for s in semantic_snips
+            ],
+            artifact_refs=[],
+            token_estimate_total=token_estimate_total,
+            observed_metadata=ObservedMetadata(
+                mime_types=[],
+                has_artifacts=False,
+                has_code_like_content=has_code_like_content,
+                estimated_chars=len(all_content),
+            ),
+        ),
     )
 
 
@@ -728,32 +846,40 @@ async def _run_chat(
     request_id = getattr(request.state, "request_id", None)
     if request_id:
         try:
-            await pg.write_trace(
-                request_id=request_id,
-                conversation_id=cid,
-                owner_id=owner_id,
-                surface=surface,
-                router_decision={
+            await pg.create_trace(
+                {
+                    "request_id": request_id,
+                    "conversation_id": cid,
+                    "owner_id": owner_id,
+                    "client_id": client_id,
+                    "surface": surface or "chat",
+                    "profile": {},
+                    "router_decision": {
                     "selected_model": settings.chat_model,
                     "rule_id": "default-chat-model",
                     "fallbacks": [],
-                },
-                retrieval={
+                    },
+                    "retrieval": {
                     "query": last_user_text,
                     "scope_requested": opts.scope,
                     "scope_used": scope_used,
                     "fallback_used": fallback_used,
                     "hits": [{"message_id": h.message_id, "score": h.score} for h in filtered_hits],
                     "artifacts_used": artifact_ids or [],
-                },
-                model_calls={
+                    },
+                    "manual_override": {},
+                    "model_call": {
                     "provider": "litellm",
                     "model": settings.chat_model,
                     "latency_ms": model_latency_ms,
                     "error": None,
-                },
-                cost={"estimate_usd": None},
-                latency_ms=int((time.perf_counter() - request_started) * 1000),
+                    },
+                    "fallback": {},
+                    "cost": {"estimate_usd": None},
+                    "latency_ms": int((time.perf_counter() - request_started) * 1000),
+                    "status": "ok",
+                    "error": None,
+                }
             )
         except Exception:
             logging.exception("trace write failed (non-fatal)", extra={"request_id": request_id})
@@ -795,7 +921,53 @@ async def orchestrate_chat(body: OrchestrateChatRequest, request: Request):
         surface=body.surface,
         artifact_ids=body.artifact_ids or [],
     )
-    return OrchestrateChatResponse(**resp.model_dump(), request_id=getattr(request.state, "request_id", ""))
+    return OrchestrateChatResponse(**resp.model_dump(), request_id=(getattr(request.state, "request_id", None) or ""))
+
+
+@app.post(
+    "/v1/profiles/resolve",
+    response_model=ProfileResolveResponse,
+    tags=["profiles"],
+    dependencies=[Depends(require_api_key)],
+    summary="Resolve effective profile for owner/surface/client",
+)
+async def resolve_profile(body: ProfileResolveRequest):
+    if not settings.enable_profile_resolve:
+        raise HTTPException(status_code=503, detail="profile resolve is disabled")
+    out = await pg.resolve_profile(
+        owner_id=body.owner_id,
+        surface=body.surface,
+        requested_profile=body.requested_profile,
+        client_id=body.client_id,
+        default_profile_name=settings.default_profile_name,
+    )
+    return ProfileResolveResponse(**out)
+
+
+@app.post(
+    "/v1/traces",
+    response_model=TraceCreateResponse,
+    tags=["traces"],
+    dependencies=[Depends(require_api_key)],
+    summary="Upsert one trace document per request",
+)
+async def create_trace(body: TraceCreateRequest, request: Request):
+    _require_matching_request_id(request, body.request_id)
+    if not settings.enable_trace_storage:
+        raise HTTPException(status_code=503, detail="trace storage is disabled")
+
+    try:
+        conversation_id = UUID(body.conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="conversation_id must be a UUID")
+
+    trace_id = await pg.create_trace(
+        {
+            **body.model_dump(),
+            "conversation_id": conversation_id,
+        }
+    )
+    return TraceCreateResponse(trace_id=str(trace_id), request_id=body.request_id)
 
 
 @app.get(
