@@ -239,7 +239,38 @@ POST /v1/conversations/{conversation_id}/retrieve
 
 ---
 
-## 9. Artifact Metadata Flow (Additive)
+## 9. File Ingestion
+
+### API Call
+POST /v1/ingestion/files
+
+### Request
+```json
+{
+  "owner_id": "user_123",
+  "client_id": "desktop",
+  "source_surface": "vscode",
+  "repo_name": "basic-memory-store",
+  "paths": ["/abs/path/to/files/or/dirs"]
+}
+```
+
+### Behavior
+- discovers local text/code files under the provided paths
+- applies configured extension and exclude-glob filters
+- chunks file contents
+- embeds chunk text and stores vectors in Qdrant
+- stores source attribution on `artifacts`
+
+### Notes
+- ingestion is not conversation-scoped
+- retrieval mixes artifact chunk hits alongside existing message retrieval
+- artifact refs are capped in retrieval output
+- repeated ingest of the same file may currently surface duplicate `artifact_refs`
+
+---
+
+## 10. Artifact Metadata Flow (Additive)
 
 ### Initialize upload
 POST /v1/artifacts/init
@@ -259,7 +290,7 @@ Notes:
 
 ---
 
-## 10. Orchestration + Traces (Additive)
+## 11. Orchestration + Traces (Additive)
 
 ### API Calls
 - POST /v1/orchestrate/chat
@@ -269,7 +300,7 @@ Use `/v1/orchestrate/chat` when you want explicit `surface` and `artifact_ids` i
 
 ---
 
-## 11. Ops Metrics
+## 12. Ops Metrics
 
 ### API Call
 GET /metrics
@@ -288,6 +319,7 @@ Returns Prometheus exposition format including retrieval telemetry counters.
 | List conversations | GET /v1/conversations |
 | Manual message append | POST /v1/conversations/{id}/messages |
 | Tier-aware retrieval | POST /v1/conversations/{id}/retrieve |
+| File ingestion | POST /v1/ingestion/files |
 | Artifact metadata flow | POST /v1/artifacts/init + /complete + GET /v1/artifacts/{id} |
 | Explainability trace lookup | GET /v1/traces/{request_id} |
 | Prometheus metrics | GET /metrics |

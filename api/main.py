@@ -16,7 +16,8 @@ from clients.litellm import LiteLLMClient
 from storage.postgres import PostgresStore
 from storage.qdrant import QdrantStore, RetrievalHit as QdrantHit
 from storage.object_store import ObjectStoreClient
-from prompts.context import assemble_messages, build_context_block
+from prompts.context import assemble_messages, build_artifact_context_block, build_context_block
+from services.ingestion import ingest_files
 
 from models import (
     ArtifactCompleteRequest,
@@ -49,6 +50,9 @@ from models import (
     RetrievalBundle,
     RetrievalMessageItem,
     ObservedMetadata,
+    ArtifactRef,
+    FileIngestionRequest,
+    FileIngestionResponse,
     ProfileResolveRequest,
     ProfileResolveResponse,
     TraceCreateRequest,
@@ -174,6 +178,52 @@ def _safe_uuid_message_ids(hits: list[QdrantHit], *, context: str, kind: str) ->
     return out
 
 
+def _safe_uuid_ids(raw_ids: list[str], *, context: str, kind: str) -> list[UUID]:
+    out: list[UUID] = []
+    for item in raw_ids:
+        try:
+            out.append(UUID(item))
+        except (TypeError, ValueError):
+            memory_skipped_qdrant_ids_total.labels(kind=kind).inc()
+            logging.warning("Skipping non-UUID retrieval hit id in %s: %r", context, item)
+    return out
+
+
+def _cap_snippet(text: str, max_chars: int) -> str:
+    cleaned = text.strip()
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return cleaned[: max_chars - 12].rstrip() + "...(trunc)"
+
+
+def _retrieval_artifact_k() -> int:
+    return int(getattr(settings, "retrieval_artifact_k", 3))
+
+
+def _retrieval_artifact_max_snippet_chars() -> int:
+    return int(getattr(settings, "retrieval_artifact_max_snippet_chars", 500))
+
+
+def _dedupe_artifact_refs(refs: list[ArtifactRef]) -> list[ArtifactRef]:
+    best_by_key: dict[tuple[str | None, str, str], ArtifactRef] = {}
+    order: list[tuple[str | None, str, str]] = []
+
+    for ref in refs:
+        key = (ref.repo_name, ref.file_path, ref.snippet)
+        existing = best_by_key.get(key)
+        if existing is None:
+            best_by_key[key] = ref
+            order.append(key)
+            continue
+
+        existing_score = existing.relevance_score if existing.relevance_score is not None else float("-inf")
+        candidate_score = ref.relevance_score if ref.relevance_score is not None else float("-inf")
+        if candidate_score > existing_score:
+            best_by_key[key] = ref
+
+    return [best_by_key[key] for key in order]
+
+
 def build_artifact_object_uri(owner_id: str, artifact_id: UUID, filename: str) -> str:
     safe_owner = _sanitize_object_key_component(owner_id)
     safe_name = _sanitize_object_key_component(filename)
@@ -202,6 +252,7 @@ async def healthz():
         dependencies["qdrant"] = f"error:{type(e).__name__}"
 
     return {
+        "ok": True,
         "status": "ok",
         "service": "basic-memory-store",
         "time": datetime.now(UTC).isoformat(),
@@ -327,6 +378,28 @@ async def add_message(conversation_id: str, body: MessageCreateRequest):
 # -------------------------
 # Artifacts
 # -------------------------
+
+@app.post(
+    "/v1/ingestion/files",
+    response_model=FileIngestionResponse,
+    tags=["ingestion"],
+    dependencies=[Depends(require_api_key)],
+    summary="Ingest local files or directories into artifact chunks",
+)
+async def ingest_files_endpoint(body: FileIngestionRequest):
+    if not body.paths:
+        raise HTTPException(status_code=422, detail="paths must not be empty")
+    result = await ingest_files(
+        pg=pg,
+        qdrant=qdrant,
+        settings=settings,
+        owner_id=body.owner_id,
+        client_id=body.client_id,
+        source_surface=body.source_surface,
+        repo_name=body.repo_name,
+        paths=body.paths,
+    )
+    return FileIngestionResponse(**result)
 
 @app.post(
     "/v1/artifacts/init",
@@ -591,17 +664,28 @@ async def retrieve_tiered_v2(conversation_id: str, body: RetrieveBundleRequest, 
     except ValueError:
         raise HTTPException(status_code=400, detail="conversation_id must be a UUID")
 
-    if not await pg.conversation_exists(cid):
+    convo = await pg.get_conversation(cid)
+    if convo is None:
         raise HTTPException(status_code=404, detail="conversation_id not found")
 
     opts = body.retrieval or RetrievalOptions(k=settings.retrieval_k, min_score=0.25, scope="conversation")
+    artifact_k = _retrieval_artifact_k()
+
+    def _scope_filters(scope: str) -> tuple[str | None, str | None]:
+        if scope == "conversation":
+            return str(cid), None
+        if scope == "client":
+            return None, convo.get("client_id")
+        return None, None
+
+    conversation_filter, client_filter = _scope_filters(opts.scope)
     semantic_hits = await qdrant.search(
         owner_id=body.owner_id,
         query=body.query,
         k=opts.k,
         min_score=opts.min_score,
-        conversation_id=cid,
-        client_id=None,
+        conversation_id=conversation_filter,
+        client_id=client_filter,
     )
     semantic_ids = _safe_uuid_message_ids(
         semantic_hits,
@@ -610,12 +694,43 @@ async def retrieve_tiered_v2(conversation_id: str, body: RetrieveBundleRequest, 
     )
     semantic_snips = await pg.get_message_snippets_by_ids(semantic_ids)
     semantic_score_by_id = {h.message_id: h.score for h in semantic_hits}
+    artifact_hits = await qdrant.search_artifact_chunks(
+        owner_id=body.owner_id,
+        query=body.query,
+        k=artifact_k,
+        min_score=opts.min_score,
+        client_id=client_filter,
+    ) if artifact_k > 0 else []
+    artifact_ids = _safe_uuid_ids(
+        [hit.derived_text_id for hit in artifact_hits],
+        context="/v2/conversations/{id}/retrieve",
+        kind="artifact",
+    )
+    artifact_snips = await pg.get_derived_text_snippets_by_ids(artifact_ids)
+    artifact_score_by_id = {h.derived_text_id: h.score for h in artifact_hits}
 
     recent_snips = await pg.get_recent_message_items(conversation_id=cid, limit=settings.recent_turns)
 
-    all_content = "".join([s["content"] for s in recent_snips] + [s["content"] for s in semantic_snips])
+    all_content = "".join(
+        [s["content"] for s in recent_snips]
+        + [s["content"] for s in semantic_snips]
+        + [s["text"] for s in artifact_snips]
+    )
     has_code_like_content = any(tok in all_content for tok in ("```", "def ", "class ", "import ", "{", "};"))
     token_estimate_total = max(1, len(all_content) // 4) if all_content else None
+
+    artifact_refs = _dedupe_artifact_refs(
+        [
+            ArtifactRef(
+                artifact_id=s["artifact_id"],
+                file_path=s["file_path"],
+                snippet=_cap_snippet(s["text"], _retrieval_artifact_max_snippet_chars()),
+                relevance_score=artifact_score_by_id.get(s["derived_text_id"]),
+                repo_name=s.get("repo_name"),
+            )
+            for s in artifact_snips[:artifact_k]
+        ]
+    )
 
     return RetrieveBundleResponse(
         request_id=body.request_id,
@@ -643,11 +758,11 @@ async def retrieve_tiered_v2(conversation_id: str, body: RetrieveBundleRequest, 
                 )
                 for s in semantic_snips
             ],
-            artifact_refs=[],
+            artifact_refs=artifact_refs,
             token_estimate_total=token_estimate_total,
             observed_metadata=ObservedMetadata(
-                mime_types=[],
-                has_artifacts=False,
+                mime_types=["text/plain"] if artifact_snips else [],
+                has_artifacts=bool(artifact_snips),
                 has_code_like_content=has_code_like_content,
                 estimated_chars=len(all_content),
             ),
@@ -727,6 +842,7 @@ async def _run_chat(
     opts = body.retrieval or RetrievalOptions(k=settings.retrieval_k, min_score=0.25, scope="conversation")
     k = opts.k
     min_score = opts.min_score
+    artifact_k = _retrieval_artifact_k()
 
     scope_used = opts.scope
     fallback_used = False
@@ -769,6 +885,19 @@ async def _run_chat(
     filtered_hits = [h for h in retrieval_hits if h.message_id not in inserted_user_message_ids]
     retrieval_ids = _safe_uuid_message_ids(filtered_hits, context="/v1/chat", kind="retrieval")
     retrieved = await pg.get_message_snippets_by_ids(retrieval_ids)
+    artifact_hits = await qdrant.search_artifact_chunks(
+        owner_id=owner_id,
+        query=last_user_text,
+        k=artifact_k,
+        min_score=min_score,
+        client_id=client_id if opts.scope == "client" else None,
+    ) if artifact_k > 0 else []
+    artifact_ids_for_prompt = _safe_uuid_ids(
+        [hit.derived_text_id for hit in artifact_hits],
+        context="/v1/chat",
+        kind="artifact",
+    )
+    artifact_snips = await pg.get_derived_text_snippets_by_ids(artifact_ids_for_prompt)
     recent = await pg.get_recent_messages(conversation_id=cid, limit=settings.recent_turns)
 
     system_preamble = (
@@ -777,7 +906,19 @@ async def _run_chat(
         "- If context conflicts, prefer newer timestamps.\n"
         "- Do not invent facts.\n"
     )
-    context_block = build_context_block(retrieved=retrieved, max_chars=settings.max_context_chars)
+    message_context_block = build_context_block(retrieved=retrieved, max_chars=settings.max_context_chars)
+    artifact_context_block = build_artifact_context_block(
+        [
+            {
+                "repo_name": s.get("repo_name"),
+                "file_path": s.get("file_path"),
+                "snippet": _cap_snippet(s["text"], _retrieval_artifact_max_snippet_chars()),
+            }
+            for s in artifact_snips[:artifact_k]
+        ],
+        max_chars=max(1000, settings.max_context_chars // 3),
+    )
+    context_block = "\n\n".join(part for part in (message_context_block, artifact_context_block) if part)
     prompt_messages = assemble_messages(
         system_preamble=system_preamble,
         context_block=context_block,
@@ -839,7 +980,7 @@ async def _run_chat(
     resp = ChatResponse(
         conversation_id=str(cid),
         answer=answer,
-        retrieved_count=len(retrieved),
+        retrieved_count=len(retrieved) + len(artifact_snips[:artifact_k]),
         debug=debug_block,
     )
 
@@ -865,7 +1006,17 @@ async def _run_chat(
                     "scope_used": scope_used,
                     "fallback_used": fallback_used,
                     "hits": [{"message_id": h.message_id, "score": h.score} for h in filtered_hits],
-                    "artifacts_used": artifact_ids or [],
+                    "artifacts_used": (artifact_ids or []) + [s["artifact_id"] for s in artifact_snips[:artifact_k]],
+                    "artifact_refs": [
+                        {
+                            "artifact_id": s["artifact_id"],
+                            "file_path": s["file_path"],
+                            "snippet": _cap_snippet(s["text"], _retrieval_artifact_max_snippet_chars()),
+                            "relevance_score": next((h.score for h in artifact_hits if h.derived_text_id == s["derived_text_id"]), None),
+                            "repo_name": s.get("repo_name"),
+                        }
+                        for s in artifact_snips[:artifact_k]
+                    ],
                     },
                     "manual_override": {},
                     "model_call": {

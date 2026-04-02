@@ -255,6 +255,28 @@ class PostgresStore:
                 await cur.execute(q, (conversation_id,))
                 return (await cur.fetchone()) is not None
 
+    async def get_conversation(self, conversation_id: UUID) -> dict[str, Any] | None:
+        q = """
+        SELECT id, owner_id, client_id, title, created_at, updated_at
+        FROM conversations
+        WHERE id = %s
+        LIMIT 1;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (conversation_id,))
+                row = await cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "conversation_id": str(row[0]),
+            "owner_id": row[1],
+            "client_id": row[2],
+            "title": row[3],
+            "created_at": str(row[4]),
+            "updated_at": str(row[5]),
+        }
+
 
     async def get_messages_for_reindex(
         self,
@@ -316,21 +338,68 @@ class PostgresStore:
         client_id: str | None = None,
         conversation_id: UUID | None = None,
         source_surface: str | None = None,
+        source_kind: str | None = None,
+        repo_name: str | None = None,
+        repo_ref: str | None = None,
+        file_path: str | None = None,
+        ingestion_id: UUID | None = None,
+        sha256: str | None = None,
+        status: str = "pending",
     ) -> dict[str, Any]:
         q = """
         INSERT INTO artifacts (
-            id, owner_id, client_id, conversation_id, filename, mime, size, object_uri, source_surface, status
+            id, owner_id, client_id, conversation_id, filename, mime, size, object_uri, source_surface,
+            status, sha256, source_kind, repo_name, repo_ref, file_path, ingestion_id, completed_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending')
-        RETURNING id, owner_id, client_id, conversation_id, filename, mime, size, object_uri, source_surface, status, sha256, created_at, completed_at;
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                CASE WHEN %s = 'completed' THEN now() ELSE NULL END)
+        RETURNING id, owner_id, client_id, conversation_id, filename, mime, size, object_uri, source_surface,
+                  status, sha256, created_at, completed_at, source_kind, repo_name, repo_ref, file_path, ingestion_id;
         """
         async with self.pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     q,
-                    (artifact_id, owner_id, client_id, conversation_id, filename, mime, size, object_uri, source_surface),
+                    (
+                        artifact_id,
+                        owner_id,
+                        client_id,
+                        conversation_id,
+                        filename,
+                        mime,
+                        size,
+                        object_uri,
+                        source_surface,
+                        status,
+                        sha256,
+                        source_kind,
+                        repo_name,
+                        repo_ref,
+                        file_path,
+                        ingestion_id,
+                        status,
+                    ),
                 )
-                (aid, owner, c_id, convo_id, name, kind, byte_size, uri, surface, status, sha256, created_at, completed_at) = await cur.fetchone()
+                (
+                    aid,
+                    owner,
+                    c_id,
+                    convo_id,
+                    name,
+                    kind,
+                    byte_size,
+                    uri,
+                    surface,
+                    status_out,
+                    sha256_out,
+                    created_at,
+                    completed_at,
+                    source_kind_out,
+                    repo_name_out,
+                    repo_ref_out,
+                    file_path_out,
+                    ingestion_id_out,
+                ) = await cur.fetchone()
 
         return {
             "artifact_id": str(aid),
@@ -342,10 +411,15 @@ class PostgresStore:
             "size": int(byte_size),
             "object_uri": uri,
             "source_surface": surface,
-            "status": status,
-            "sha256": sha256,
+            "status": status_out,
+            "sha256": sha256_out,
             "created_at": str(created_at),
             "completed_at": str(completed_at) if completed_at else None,
+            "source_kind": source_kind_out,
+            "repo_name": repo_name_out,
+            "repo_ref": repo_ref_out,
+            "file_path": file_path_out,
+            "ingestion_id": str(ingestion_id_out) if ingestion_id_out else None,
         }
 
     async def complete_artifact(
@@ -390,7 +464,8 @@ class PostgresStore:
 
     async def get_artifact(self, artifact_id: UUID) -> dict[str, Any] | None:
         q = """
-        SELECT id, owner_id, client_id, conversation_id, filename, mime, size, object_uri, source_surface, status, sha256, created_at, completed_at
+        SELECT id, owner_id, client_id, conversation_id, filename, mime, size, object_uri, source_surface,
+               status, sha256, created_at, completed_at, source_kind, repo_name, repo_ref, file_path, ingestion_id
         FROM artifacts
         WHERE id = %s;
         """
@@ -402,7 +477,26 @@ class PostgresStore:
         if row is None:
             return None
 
-        (aid, owner, c_id, convo_id, name, kind, byte_size, uri, surface, status, sha256, created_at, completed_at) = row
+        (
+            aid,
+            owner,
+            c_id,
+            convo_id,
+            name,
+            kind,
+            byte_size,
+            uri,
+            surface,
+            status,
+            sha256,
+            created_at,
+            completed_at,
+            source_kind,
+            repo_name,
+            repo_ref,
+            file_path,
+            ingestion_id,
+        ) = row
         return {
             "artifact_id": str(aid),
             "owner_id": owner,
@@ -417,7 +511,85 @@ class PostgresStore:
             "sha256": sha256,
             "created_at": str(created_at),
             "completed_at": str(completed_at) if completed_at else None,
+            "source_kind": source_kind,
+            "repo_name": repo_name,
+            "repo_ref": repo_ref,
+            "file_path": file_path,
+            "ingestion_id": str(ingestion_id) if ingestion_id else None,
         }
+
+    async def create_derived_text(
+        self,
+        *,
+        artifact_id: UUID,
+        kind: str,
+        text: str,
+        language: str | None,
+        derivation_params: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        q = """
+        INSERT INTO derived_text (artifact_id, kind, language, text, derivation_params)
+        VALUES (%s, %s, %s, %s, %s)
+        RETURNING id, artifact_id, kind, language, text, derivation_params, created_at;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (artifact_id, kind, language, text, Json(derivation_params or {})))
+                row = await cur.fetchone()
+        return {
+            "derived_text_id": str(row[0]),
+            "artifact_id": str(row[1]),
+            "kind": row[2],
+            "language": row[3],
+            "text": row[4],
+            "derivation_params": row[5] or {},
+            "created_at": str(row[6]),
+        }
+
+    async def create_embedding_ref(
+        self,
+        *,
+        ref_type: str,
+        ref_id: UUID,
+        model: str,
+        qdrant_point_id: str,
+    ) -> dict[str, Any]:
+        q = """
+        INSERT INTO embeddings (ref_type, ref_id, model, qdrant_point_id)
+        VALUES (%s, %s, %s, %s)
+        RETURNING id;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (ref_type, ref_id, model, qdrant_point_id))
+                row = await cur.fetchone()
+        return {"embedding_id": str(row[0])}
+
+    async def get_derived_text_snippets_by_ids(self, ids: list[UUID]) -> list[dict[str, Any]]:
+        if not ids:
+            return []
+        id_strs = [str(i) for i in ids]
+        q = """
+        SELECT dt.id, dt.artifact_id, dt.text, dt.derivation_params, a.file_path, a.repo_name
+        FROM derived_text dt
+        JOIN artifacts a ON a.id = dt.artifact_id
+        WHERE dt.id = ANY(%s);
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (id_strs,))
+                rows = await cur.fetchall()
+        by_id: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            by_id[str(row[0])] = {
+                "derived_text_id": str(row[0]),
+                "artifact_id": str(row[1]),
+                "text": row[2],
+                "derivation_params": row[3] or {},
+                "file_path": row[4] or "",
+                "repo_name": row[5],
+            }
+        return [by_id[item] for item in id_strs if item in by_id]
 
     async def get_recent_message_snippets(self, conversation_id: UUID, limit: int = 10) -> list[dict[str, Any]]:
         q = """
