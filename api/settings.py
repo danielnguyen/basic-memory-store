@@ -87,6 +87,44 @@ class Settings(BaseSettings):
         ge=100,
         le=4000,
     )
+    retrieval_recent_half_life_days: int = Field(
+        default=14,
+        alias="RETRIEVAL_RECENT_HALF_LIFE_DAYS",
+        ge=1,
+        le=3650,
+    )
+    retrieval_balanced_half_life_days: int = Field(
+        default=45,
+        alias="RETRIEVAL_BALANCED_HALF_LIFE_DAYS",
+        ge=1,
+        le=3650,
+    )
+    retrieval_historical_half_life_days: int = Field(
+        default=365,
+        alias="RETRIEVAL_HISTORICAL_HALF_LIFE_DAYS",
+        ge=1,
+        le=3650,
+    )
+    retrieval_conversation_boost: float = Field(
+        default=0.08,
+        alias="RETRIEVAL_CONVERSATION_BOOST",
+        ge=0.0,
+        le=1.0,
+    )
+    retrieval_pinned_bias: float = Field(
+        default=0.12,
+        alias="RETRIEVAL_PINNED_BIAS",
+        ge=0.0,
+        le=1.0,
+    )
+    retrieval_missing_penalty_cap: float = Field(
+        default=0.15,
+        alias="RETRIEVAL_MISSING_PENALTY_CAP",
+        ge=0.0,
+        le=1.0,
+    )
+    enable_hygiene_scan_api: bool = Field(default=True, alias="ENABLE_HYGIENE_SCAN_API")
+    enable_graph_retrieval_expansion: bool = Field(default=False, alias="ENABLE_GRAPH_RETRIEVAL_EXPANSION")
     max_context_chars: int = Field(default=12000, alias="MAX_CONTEXT_CHARS", ge=1000, le=200000)
 
     # --- R04/R11 ---

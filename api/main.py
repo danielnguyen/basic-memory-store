@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, UTC
+from datetime import datetime, UTC, timedelta
+from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Security, Request, Response
@@ -53,6 +55,10 @@ from models import (
     ArtifactRef,
     FileIngestionRequest,
     FileIngestionResponse,
+    HygieneFlagItem,
+    HygieneFlagListResponse,
+    HygieneScanRequest,
+    HygieneScanResponse,
     ProfileResolveRequest,
     ProfileResolveResponse,
     TraceCreateRequest,
@@ -204,6 +210,105 @@ def _retrieval_artifact_max_snippet_chars() -> int:
     return int(getattr(settings, "retrieval_artifact_max_snippet_chars", 500))
 
 
+def _time_window_cutoff(time_window: str) -> datetime | None:
+    now = datetime.now(UTC)
+    if time_window == "7d":
+        return now - timedelta(days=7)
+    if time_window == "30d":
+        return now - timedelta(days=30)
+    if time_window == "90d":
+        return now - timedelta(days=90)
+    return None
+
+
+def _half_life_days(retrieval_mode: str) -> int:
+    if retrieval_mode == "recent":
+        return int(settings.retrieval_recent_half_life_days)
+    if retrieval_mode == "historical":
+        return int(settings.retrieval_historical_half_life_days)
+    return int(settings.retrieval_balanced_half_life_days)
+
+
+def _safe_dt(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace(" ", "T"))
+    except ValueError:
+        return None
+
+
+def _message_missing_score(item: dict[str, object]) -> float:
+    metadata = item.get("metadata") if isinstance(item, dict) else None
+    if not isinstance(metadata, dict):
+        return 0.0
+    score = 0.0
+    if metadata.get("artifact_expected") and not metadata.get("artifact_ids"):
+        score += 0.08
+    if metadata.get("dangling_reference"):
+        score += 0.05
+    return min(score, float(settings.retrieval_missing_penalty_cap))
+
+
+def _artifact_missing_score(item: dict[str, object]) -> float:
+    derivation_params = item.get("derivation_params") if isinstance(item, dict) else None
+    if not isinstance(derivation_params, dict):
+        return 0.0
+    score = 0.0
+    if not item.get("file_path"):
+        score += 0.08
+    if derivation_params.get("linked_entities_missing"):
+        score += 0.05
+    return min(score, float(settings.retrieval_missing_penalty_cap))
+
+
+def _score_item(
+    *,
+    semantic_score: float | None,
+    created_at: str | None,
+    retrieval_mode: str,
+    is_same_conversation: bool,
+    is_pinned: bool,
+    missing_score: float,
+) -> dict[str, float]:
+    base_score = float(semantic_score or 0.0)
+    recency_adjustment = 0.0
+    created_dt = _safe_dt(created_at)
+    if created_dt is not None:
+        age_days = max(0.0, (datetime.now(UTC) - created_dt).total_seconds() / 86400.0)
+        boost = math.exp(-(age_days / max(1, _half_life_days(retrieval_mode))))
+        if retrieval_mode == "recent":
+            recency_adjustment = 0.2 * boost
+        elif retrieval_mode == "historical":
+            recency_adjustment = 0.05 * boost
+        else:
+            recency_adjustment = 0.12 * boost
+
+    conversation_boost = float(settings.retrieval_conversation_boost) if is_same_conversation else 0.0
+    # R08 mentions pinned overrides, but the current v2 retrieval bundle does not include pinned memories.
+    # Pinned memories remain exposed separately through the unchanged tiered retrieval path.
+    pinned_bias = float(settings.retrieval_pinned_bias) if is_pinned else 0.0
+    final_score = base_score + recency_adjustment + conversation_boost + pinned_bias - missing_score
+    return {
+        "semantic_score": round(base_score, 6),
+        "recency_adjustment": round(recency_adjustment, 6),
+        "conversation_boost": round(conversation_boost, 6),
+        "pinned_bias": round(pinned_bias, 6),
+        "missing_score": round(missing_score, 6),
+        "final_score": round(final_score, 6),
+    }
+
+
+def _in_time_window(created_at: str | None, time_window: str) -> bool:
+    cutoff = _time_window_cutoff(time_window)
+    if cutoff is None:
+        return True
+    created_dt = _safe_dt(created_at)
+    if created_dt is None:
+        return True
+    return created_dt >= cutoff
+
+
 def _dedupe_artifact_refs(refs: list[ArtifactRef]) -> list[ArtifactRef]:
     best_by_key: dict[tuple[str | None, str, str], ArtifactRef] = {}
     order: list[tuple[str | None, str, str]] = []
@@ -222,6 +327,10 @@ def _dedupe_artifact_refs(refs: list[ArtifactRef]) -> list[ArtifactRef]:
             best_by_key[key] = ref
 
     return [best_by_key[key] for key in order]
+
+
+def _normalize_hygiene_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip().lower())
 
 
 def build_artifact_object_uri(owner_id: str, artifact_id: UUID, filename: str) -> str:
@@ -711,10 +820,44 @@ async def retrieve_tiered_v2(conversation_id: str, body: RetrieveBundleRequest, 
 
     recent_snips = await pg.get_recent_message_items(conversation_id=cid, limit=settings.recent_turns)
 
+    ranked_semantic: list[tuple[dict[str, Any], dict[str, float]]] = []
+    for s in semantic_snips:
+        if not _in_time_window(s.get("created_at"), opts.time_window):
+            continue
+        score_details = _score_item(
+            semantic_score=semantic_score_by_id.get(s["message_id"]),
+            created_at=s.get("created_at"),
+            retrieval_mode=opts.retrieval_mode,
+            is_same_conversation=(s.get("conversation_id") == str(cid)),
+            # v2 retrieval does not currently include pinned memories in this ranked set.
+            is_pinned=False,
+            missing_score=_message_missing_score(s),
+        )
+        ranked_semantic.append((s, score_details))
+    ranked_semantic.sort(key=lambda item: item[1]["final_score"], reverse=True)
+    ranked_semantic = ranked_semantic[: opts.k]
+
+    ranked_artifacts: list[tuple[dict[str, Any], dict[str, float]]] = []
+    for s in artifact_snips:
+        if not _in_time_window(s.get("created_at"), opts.time_window):
+            continue
+        score_details = _score_item(
+            semantic_score=artifact_score_by_id.get(s["derived_text_id"]),
+            created_at=s.get("created_at"),
+            retrieval_mode=opts.retrieval_mode,
+            is_same_conversation=False,
+            # v2 retrieval does not currently include pinned memories in artifact ranking either.
+            is_pinned=False,
+            missing_score=_artifact_missing_score(s),
+        )
+        ranked_artifacts.append((s, score_details))
+    ranked_artifacts.sort(key=lambda item: item[1]["final_score"], reverse=True)
+    ranked_artifacts = ranked_artifacts[:artifact_k]
+
     all_content = "".join(
         [s["content"] for s in recent_snips]
-        + [s["content"] for s in semantic_snips]
-        + [s["text"] for s in artifact_snips]
+        + [s["content"] for s, _ in ranked_semantic]
+        + [s["text"] for s, _ in ranked_artifacts]
     )
     has_code_like_content = any(tok in all_content for tok in ("```", "def ", "class ", "import ", "{", "};"))
     token_estimate_total = max(1, len(all_content) // 4) if all_content else None
@@ -725,10 +868,11 @@ async def retrieve_tiered_v2(conversation_id: str, body: RetrieveBundleRequest, 
                 artifact_id=s["artifact_id"],
                 file_path=s["file_path"],
                 snippet=_cap_snippet(s["text"], _retrieval_artifact_max_snippet_chars()),
-                relevance_score=artifact_score_by_id.get(s["derived_text_id"]),
+                relevance_score=score_details["final_score"],
                 repo_name=s.get("repo_name"),
+                score_details=score_details,
             )
-            for s in artifact_snips[:artifact_k]
+            for s, score_details in ranked_artifacts
         ]
     )
 
@@ -754,20 +898,108 @@ async def retrieve_tiered_v2(conversation_id: str, body: RetrieveBundleRequest, 
                     role=s["role"],
                     content=s["content"],
                     created_at=s["created_at"],
-                    score=semantic_score_by_id.get(s["message_id"]),
+                    score=score_details["final_score"],
+                    score_details=score_details,
                 )
-                for s in semantic_snips
+                for s, score_details in ranked_semantic
             ],
             artifact_refs=artifact_refs,
             token_estimate_total=token_estimate_total,
             observed_metadata=ObservedMetadata(
-                mime_types=["text/plain"] if artifact_snips else [],
-                has_artifacts=bool(artifact_snips),
+                mime_types=["text/plain"] if ranked_artifacts else [],
+                has_artifacts=bool(ranked_artifacts),
                 has_code_like_content=has_code_like_content,
                 estimated_chars=len(all_content),
             ),
+            retrieval_debug={
+                "time_window": opts.time_window,
+                "retrieval_mode": opts.retrieval_mode,
+                "semantic_candidates": len(semantic_snips),
+                "semantic_ranked": len(ranked_semantic),
+                "artifact_candidates": len(artifact_snips),
+                "artifact_ranked": len(ranked_artifacts),
+                "graph_expansion_applied": False,
+                "pinned_handling": "pinned memories are not part of the v2 ranked bundle; they remain available via the unchanged tiered retrieval path",
+                "missing_score_note": "project heuristic; not an explicit spec term",
+            },
         ),
     )
+
+
+# -------------------------
+# Hygiene
+# -------------------------
+
+@app.post(
+    "/v1/hygiene/scan",
+    response_model=HygieneScanResponse,
+    tags=["hygiene"],
+    dependencies=[Depends(require_api_key)],
+    summary="Run a minimal pinned-memory hygiene scan (redundancy plus metadata-shaped contradiction checks)",
+)
+async def scan_hygiene(body: HygieneScanRequest):
+    if not settings.enable_hygiene_scan_api:
+        raise HTTPException(status_code=503, detail="hygiene scan API is disabled")
+
+    pinned_rows = await pg.get_pinned_memories_for_hygiene(owner_id=body.owner_id, limit=body.limit)
+    seen_by_text: dict[str, dict[str, Any]] = {}
+    created_flags: list[dict[str, Any]] = []
+    by_topic: dict[str, list[dict[str, Any]]] = {}
+
+    for row in pinned_rows:
+        normalized = _normalize_hygiene_text(row["content"])
+        if normalized in seen_by_text:
+            created_flags.append(
+                await pg.create_hygiene_flag(
+                    owner_id=body.owner_id,
+                    subject_type="pinned_memory",
+                    subject_id=UUID(row["id"]),
+                    flag_type="pinned_redundancy",
+                    details={"duplicate_of": seen_by_text[normalized]["id"]},
+                )
+            )
+        else:
+            seen_by_text[normalized] = row
+
+        metadata = row.get("metadata") or {}
+        # Current MVP contradiction detection only applies when pinned-memory metadata
+        # explicitly provides comparable topic/value fields. Rows without that shape are ignored.
+        topic = metadata.get("topic")
+        value = metadata.get("value")
+        if isinstance(topic, str) and isinstance(value, str):
+            by_topic.setdefault(topic.strip().lower(), []).append({"id": row["id"], "value": value.strip().lower()})
+
+    for topic, items in by_topic.items():
+        values = {item["value"] for item in items}
+        if len(values) > 1:
+            for item in items:
+                created_flags.append(
+                    await pg.create_hygiene_flag(
+                        owner_id=body.owner_id,
+                        subject_type="pinned_memory",
+                        subject_id=UUID(item["id"]),
+                        flag_type="pinned_contradiction",
+                        details={"topic": topic, "values_seen": sorted(values)},
+                    )
+                )
+
+    return HygieneScanResponse(
+        owner_id=body.owner_id,
+        flags_created=sum(1 for flag in created_flags if flag.get("created")),
+        flags=[HygieneFlagItem(**flag) for flag in created_flags],
+    )
+
+
+@app.get(
+    "/v1/hygiene/flags",
+    response_model=HygieneFlagListResponse,
+    tags=["hygiene"],
+    dependencies=[Depends(require_api_key)],
+    summary="List memory hygiene flags",
+)
+async def list_hygiene_flags(owner_id: str, status: str | None = None, limit: int = 50):
+    flags = await pg.list_hygiene_flags(owner_id=owner_id, status=status, limit=limit)
+    return HygieneFlagListResponse(flags=[HygieneFlagItem(**flag) for flag in flags])
 
 
 # -------------------------
