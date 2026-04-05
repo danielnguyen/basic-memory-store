@@ -7,6 +7,8 @@ from pydantic import BaseModel, Field
 
 Role = Literal["user", "assistant", "system", "tool"]
 RetrievalScope = Literal["conversation", "client", "owner"]
+TimeWindow = Literal["7d", "30d", "90d", "all"]
+RetrievalMode = Literal["recent", "balanced", "historical"]
 
 
 class MessageIn(BaseModel):
@@ -26,6 +28,16 @@ class RetrievalOptions(BaseModel):
         default="conversation",
         description="Retrieval scope: conversation (default), client, or owner.",
         examples=["conversation"],
+    )
+    time_window: TimeWindow = Field(
+        default="all",
+        description="Spec-shaped time window control for retrieval candidate selection.",
+        examples=["30d"],
+    )
+    retrieval_mode: RetrievalMode = Field(
+        default="balanced",
+        description="Spec-shaped retrieval mode controlling recency bias.",
+        examples=["balanced"],
     )
 
 
@@ -215,6 +227,7 @@ class ArtifactRef(BaseModel):
     snippet: str
     relevance_score: Optional[float] = None
     repo_name: Optional[str] = None
+    score_details: Dict[str, Any] = Field(default_factory=dict)
 
 
 class RetrievalMessageItem(BaseModel):
@@ -224,6 +237,7 @@ class RetrievalMessageItem(BaseModel):
     content: str
     created_at: str
     score: Optional[float] = None
+    score_details: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ObservedMetadata(BaseModel):
@@ -239,6 +253,7 @@ class RetrievalBundle(BaseModel):
     artifact_refs: List[ArtifactRef] = Field(default_factory=list)
     token_estimate_total: Optional[int] = None
     observed_metadata: ObservedMetadata
+    retrieval_debug: Dict[str, Any] = Field(default_factory=dict)
 
 
 class RetrieveBundleResponse(BaseModel):
@@ -266,6 +281,35 @@ class FileIngestionResponse(BaseModel):
     chunks_created: int
     artifacts_created: int
     status: Literal["completed"]
+
+
+# ---- Hygiene / Graph MVP ----
+
+class HygieneScanRequest(BaseModel):
+    owner_id: str
+    limit: int = Field(default=50, ge=1, le=500)
+
+
+class HygieneFlagItem(BaseModel):
+    flag_id: str
+    owner_id: str
+    subject_type: str
+    subject_id: Optional[str] = None
+    flag_type: str
+    details: Dict[str, Any] = Field(default_factory=dict)
+    status: str
+    created_at: str
+    resolved_at: Optional[str] = None
+
+
+class HygieneScanResponse(BaseModel):
+    owner_id: str
+    flags_created: int
+    flags: List[HygieneFlagItem] = Field(default_factory=list)
+
+
+class HygieneFlagListResponse(BaseModel):
+    flags: List[HygieneFlagItem] = Field(default_factory=list)
 
 
 # ---- Profiles ----

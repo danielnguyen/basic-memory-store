@@ -83,6 +83,7 @@ class FakePG:
                         "conversation_id": m["conversation_id"],
                         "role": m["role"],
                         "content": m["content"],
+                        "metadata": {},
                         "created_at": m["created_at"],
                     }
                 )
@@ -175,15 +176,42 @@ class FakePG:
         return {"embedding_id": str(uuid.uuid4())}
 
     async def get_derived_text_snippets_by_ids(self, ids):
-        return [self.derived_text[str(i)] for i in ids if str(i) in self.derived_text]
+        return [
+            {
+                **self.derived_text[str(i)],
+                "created_at": self.derived_text[str(i)].get("created_at", "2026-01-01 00:00:00+00:00"),
+                "mime": "text/plain",
+            }
+            for i in ids
+            if str(i) in self.derived_text
+        ]
 
     async def get_pinned_memories(self, owner_id: str, conversation_id=None, limit=5):
+        return []
+
+    async def get_pinned_memories_for_hygiene(self, owner_id: str, limit=50):
         return []
 
     async def get_policy_overlays(self, owner_id: str, surface=None):
         return []
 
     async def get_persona_overlays(self, owner_id: str, surface=None):
+        return []
+
+    async def create_hygiene_flag(self, *, owner_id: str, subject_type: str, subject_id, flag_type: str, details=None):
+        return {
+            "flag_id": str(uuid.uuid4()),
+            "owner_id": owner_id,
+            "subject_type": subject_type,
+            "subject_id": str(subject_id) if subject_id else None,
+            "flag_type": flag_type,
+            "details": details or {},
+            "status": "open",
+            "created_at": "2026-01-01 00:00:00+00:00",
+            "resolved_at": None,
+        }
+
+    async def list_hygiene_flags(self, *, owner_id: str, status=None, limit=50):
         return []
 
     async def write_trace(
@@ -305,6 +333,14 @@ def client(monkeypatch):
         retrieval_k=5,
         retrieval_artifact_k=3,
         retrieval_artifact_max_snippet_chars=500,
+        retrieval_recent_half_life_days=14,
+        retrieval_balanced_half_life_days=45,
+        retrieval_historical_half_life_days=365,
+        retrieval_conversation_boost=0.08,
+        retrieval_pinned_bias=0.12,
+        retrieval_missing_penalty_cap=0.15,
+        enable_hygiene_scan_api=True,
+        enable_graph_retrieval_expansion=False,
         recent_turns=10,
         max_context_chars=4000,
         artifacts_object_prefix="artifacts",

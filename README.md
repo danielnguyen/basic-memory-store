@@ -116,30 +116,26 @@ This allows:
 
 ## Environment variables
 
-Typical `.env` contents:
+Runtime mode split:
+
+- Local host-run config lives in `api/.env` (copy from `api/.env.example`)
+- Docker Compose config lives in `.env` (copy from `.env.example`)
+
+Typical local `api/.env` contents:
 
 ```bash
-# Postgres (used by docker-compose.yml)
-POSTGRES_PASSWORD=change_me
-
-# Memory API
-MEMORY_API_KEY=change_me
-
-# LiteLLM / provider
-OPENAI_API_KEY=sk-...
+MEMORY_API_KEY=dev-local
+PG_DSN=postgresql://memory_user:pass@127.0.0.1:15432/memory_db
+QDRANT_URL=http://127.0.0.1:16333
+LITELLM_BASE_URL=http://127.0.0.1:4000
 LITELLM_API_KEY=
-
-# Models (LiteLLM names)
+OPENAI_API_KEY=sk-...
 CHAT_MODEL=chat_voice_openai
 EMBED_MODEL=embed
-
-# Request-ID / Trace contract
 REQUIRE_REQUEST_ID=true
 ENFORCE_REQUEST_ID_HEADER_BODY_MATCH=true
 ENABLE_TRACE_STORAGE=true
 ENABLE_PROFILE_RESOLVE=true
-
-# File ingestion / retrieval
 RETRIEVAL_ARTIFACT_K=3
 RETRIEVAL_ARTIFACT_MAX_SNIPPET_CHARS=500
 INGEST_MAX_FILE_BYTES=262144
@@ -203,34 +199,46 @@ This runs:
 - `docker compose -f docker-compose.dev.yml up -d`
 - `./scripts/dev_bootstrap.sh` (applies `db/schema.sql`)
 
-### 2) Run the API locally
+### 2) Configure local app mode
 
-From `api/` with your venv active:
+Create `api/.env` from `api/.env.example`, then update it for your local settings:
 
 ```bash
-export MEMORY_API_KEY="dev-key"
-export PG_DSN="postgresql://memory_user:pass@127.0.0.1:15432/memory_db"
-export QDRANT_URL="http://127.0.0.1:16333"
-export LITELLM_BASE_URL="http://127.0.0.1:4000"
-export EMBED_MODEL="embed"
-export CHAT_MODEL="chat_voice_openai"
-export ARTIFACTS_OBJECT_PREFIX="artifacts"
-export ARTIFACTS_PRESIGN_TTL_S="900"
-export OBJECT_STORE_ENABLED="true"
-export OBJECT_STORE_ENDPOINT="http://127.0.0.1:16335"
-export OBJECT_STORE_BUCKET="memory-artifacts"
-export OBJECT_STORE_ACCESS_KEY="minioadmin"
-export OBJECT_STORE_SECRET_KEY="minioadmin"
-export OBJECT_STORE_REGION="us-east-1"
-export RETRIEVAL_ARTIFACT_K="3"
-export RETRIEVAL_ARTIFACT_MAX_SNIPPET_CHARS="500"
-export INGEST_MAX_FILE_BYTES="262144"
-export INGEST_MAX_FILES_PER_REQUEST="200"
-export INGEST_ALLOWED_EXTENSIONS=".py,.md,.txt,.json,.yaml,.yml,.toml,.js,.ts,.tsx,.jsx,.sql,.sh,.env,.ini,.cfg,.html,.css"
-export INGEST_EXCLUDE_GLOBS_DEFAULT=".git/*,node_modules/*,.venv/*,venv/*,dist/*,build/*,__pycache__/*,.pytest_cache/*"
-export INGEST_CHUNK_SIZE_CHARS="1200"
-export INGEST_CHUNK_OVERLAP_CHARS="150"
+MEMORY_API_KEY=dev-local
+PG_DSN=postgresql://memory_user:pass@127.0.0.1:15432/memory_db
+QDRANT_URL=http://127.0.0.1:16333
+LITELLM_BASE_URL=http://127.0.0.1:4000
+EMBED_MODEL=embed
+CHAT_MODEL=chat_voice_openai
+ARTIFACTS_OBJECT_PREFIX=artifacts
+ARTIFACTS_PRESIGN_TTL_S=900
+OBJECT_STORE_ENABLED=true
+OBJECT_STORE_ENDPOINT=http://127.0.0.1:16335
+OBJECT_STORE_BUCKET=memory-artifacts
+OBJECT_STORE_ACCESS_KEY=minioadmin
+OBJECT_STORE_SECRET_KEY=minioadmin
+OBJECT_STORE_REGION=us-east-1
+RETRIEVAL_ARTIFACT_K=3
+RETRIEVAL_ARTIFACT_MAX_SNIPPET_CHARS=500
+INGEST_MAX_FILE_BYTES=262144
+INGEST_MAX_FILES_PER_REQUEST=200
+INGEST_ALLOWED_EXTENSIONS=.py,.md,.txt,.json,.yaml,.yml,.toml,.js,.ts,.tsx,.jsx,.sql,.sh,.env,.ini,.cfg,.html,.css
+INGEST_EXCLUDE_GLOBS_DEFAULT=.git/*,node_modules/*,.venv/*,venv/*,dist/*,build/*,__pycache__/*,.pytest_cache/*
+INGEST_CHUNK_SIZE_CHARS=1200
+INGEST_CHUNK_OVERLAP_CHARS=150
+```
 
+### 3) Run the API locally
+
+From repo root:
+
+```bash
+make dev-start
+```
+
+Or from `api/` with your venv active:
+
+```bash
 uvicorn main:app --host 0.0.0.0 --port 4321 --reload
 ```
 
@@ -240,7 +248,7 @@ Then open Swagger at:
 
 Authorize with:
 
-`X-API-Key = dev-key`
+`X-API-Key = dev-local`
 
 Health check:
 
@@ -255,7 +263,8 @@ Health check:
 - Local app mode (recommended for day-to-day dev):
   - `basic-memory-store` API: `http://127.0.0.1:4321`
   - `chat-orchestrator` API: `http://127.0.0.1:4361`
-  - LiteLLM: `http://127.0.0.1:4000`
+  - LiteLLM: use the value from `api/.env`
+  - With `make dev-up`, the default LiteLLM endpoint is `http://127.0.0.1:4000`
   - Postgres: `127.0.0.1:15432`
   - Qdrant: `127.0.0.1:16333`
   - MinIO: `127.0.0.1:16335`

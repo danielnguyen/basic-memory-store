@@ -119,7 +119,7 @@ class PostgresStore:
         id_strs = [str(i) for i in ids]
 
         q = """
-        SELECT id, conversation_id, role, content, created_at
+        SELECT id, conversation_id, role, content, metadata, created_at
         FROM messages
         WHERE id = ANY(%s);
         """
@@ -129,12 +129,13 @@ class PostgresStore:
                 rows = await cur.fetchall()
 
         by_id: dict[str, dict[str, Any]] = {}
-        for (mid, cid, role, content, created_at) in rows:
+        for (mid, cid, role, content, metadata, created_at) in rows:
             by_id[str(mid)] = {
                 "message_id": str(mid),
                 "conversation_id": str(cid),
                 "role": role,
                 "content": content,
+                "metadata": metadata or {},
                 "created_at": str(created_at),
             }
 
@@ -529,7 +530,7 @@ class PostgresStore:
     ) -> dict[str, Any]:
         q = """
         INSERT INTO derived_text (artifact_id, kind, language, text, derivation_params)
-        VALUES (%s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s::jsonb)
         RETURNING id, artifact_id, kind, language, text, derivation_params, created_at;
         """
         async with self.pool.connection() as conn:
@@ -570,7 +571,7 @@ class PostgresStore:
             return []
         id_strs = [str(i) for i in ids]
         q = """
-        SELECT dt.id, dt.artifact_id, dt.text, dt.derivation_params, a.file_path, a.repo_name
+        SELECT dt.id, dt.artifact_id, dt.text, dt.derivation_params, dt.created_at, a.file_path, a.repo_name, a.mime
         FROM derived_text dt
         JOIN artifacts a ON a.id = dt.artifact_id
         WHERE dt.id = ANY(%s);
@@ -586,8 +587,10 @@ class PostgresStore:
                 "artifact_id": str(row[1]),
                 "text": row[2],
                 "derivation_params": row[3] or {},
-                "file_path": row[4] or "",
-                "repo_name": row[5],
+                "created_at": str(row[4]),
+                "file_path": row[5] or "",
+                "repo_name": row[6],
+                "mime": row[7],
             }
         return [by_id[item] for item in id_strs if item in by_id]
 
@@ -651,6 +654,29 @@ class PostgresStore:
             for (pid, content, metadata) in rows
         ]
 
+    async def get_pinned_memories_for_hygiene(self, owner_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        q = """
+        SELECT id, conversation_id, content, metadata, created_at
+        FROM pinned_memories
+        WHERE owner_id = %s
+        ORDER BY created_at DESC
+        LIMIT %s;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (owner_id, limit))
+                rows = await cur.fetchall()
+        return [
+            {
+                "id": str(row[0]),
+                "conversation_id": str(row[1]) if row[1] else None,
+                "content": row[2],
+                "metadata": row[3] or {},
+                "created_at": str(row[4]),
+            }
+            for row in rows
+        ]
+
     async def get_policy_overlays(self, owner_id: str, surface: str | None = None) -> list[dict[str, Any]]:
         q = """
         SELECT id, policy_json
@@ -682,6 +708,100 @@ class PostgresStore:
                 rows = await cur.fetchall()
 
         return [{"id": str(pid), "content": "persona", "metadata": payload or {}} for (pid, payload) in rows]
+
+    async def create_hygiene_flag(
+        self,
+        *,
+        owner_id: str,
+        subject_type: str,
+        subject_id: UUID | None,
+        flag_type: str,
+        details: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        details_payload = details or {}
+        q_existing = """
+        SELECT id, owner_id, subject_type, subject_id, flag_type, details_json, status, created_at, resolved_at
+        FROM memory_hygiene_flags
+        WHERE owner_id = %s
+          AND subject_type = %s
+          AND subject_id IS NOT DISTINCT FROM %s
+          AND flag_type = %s
+          AND details_json = %s::jsonb
+          AND status = 'open'
+        ORDER BY created_at DESC
+        LIMIT 1;
+        """
+        q_insert = """
+        INSERT INTO memory_hygiene_flags (owner_id, subject_type, subject_id, flag_type, details_json)
+        VALUES (%s, %s, %s, %s, %s::jsonb)
+        RETURNING id, owner_id, subject_type, subject_id, flag_type, details_json, status, created_at, resolved_at;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    q_existing,
+                    (owner_id, subject_type, subject_id, flag_type, Json(details_payload)),
+                )
+                row = await cur.fetchone()
+                created = False
+                if row is None:
+                    await cur.execute(
+                        q_insert,
+                        (owner_id, subject_type, subject_id, flag_type, Json(details_payload)),
+                    )
+                    row = await cur.fetchone()
+                    created = True
+        return {
+            "flag_id": str(row[0]),
+            "owner_id": row[1],
+            "subject_type": row[2],
+            "subject_id": str(row[3]) if row[3] else None,
+            "flag_type": row[4],
+            "details": row[5] or {},
+            "status": row[6],
+            "created_at": str(row[7]),
+            "resolved_at": str(row[8]) if row[8] else None,
+            "created": created,
+        }
+
+    async def list_hygiene_flags(
+        self,
+        *,
+        owner_id: str,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        params: list[Any] = [owner_id]
+        where = "WHERE owner_id = %s"
+        if status is not None:
+            where += " AND status = %s"
+            params.append(status)
+        q = f"""
+        SELECT id, owner_id, subject_type, subject_id, flag_type, details_json, status, created_at, resolved_at
+        FROM memory_hygiene_flags
+        {where}
+        ORDER BY created_at DESC
+        LIMIT %s;
+        """
+        params.append(limit)
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, tuple(params))
+                rows = await cur.fetchall()
+        return [
+            {
+                "flag_id": str(row[0]),
+                "owner_id": row[1],
+                "subject_type": row[2],
+                "subject_id": str(row[3]) if row[3] else None,
+                "flag_type": row[4],
+                "details": row[5] or {},
+                "status": row[6],
+                "created_at": str(row[7]),
+                "resolved_at": str(row[8]) if row[8] else None,
+            }
+            for row in rows
+        ]
 
     async def write_trace(
         self,
