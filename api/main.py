@@ -36,6 +36,8 @@ from models import (
     OrchestrateChatResponse,
     ConversationResolveRequest,
     ConversationResolveResponse,
+    EventIngestRequest,
+    EventIngestResponse,
     MessageCreateRequest,
     MessageCreateResponse,
     RetrieveRequest,
@@ -236,6 +238,48 @@ def _safe_dt(value: str | None) -> datetime | None:
         return datetime.fromisoformat(value.replace(" ", "T"))
     except ValueError:
         return None
+
+
+def _normalize_source_type(source_type: str) -> tuple[str, str | None, str]:
+    normalized = source_type.strip().lower()
+    if normalized not in {"git", "calendar", "finance", "portfolio"}:
+        raise HTTPException(status_code=400, detail="source_type must be one of: git, calendar, finance, portfolio")
+
+    routed = "portfolio" if normalized == "finance" else normalized
+    stream_key = f"event-stream:{routed}"
+    original = normalized if normalized != routed else None
+    return routed, original, stream_key
+
+
+def _event_stream_title(source_type: str) -> str:
+    return f"{source_type} event stream"
+
+
+def _render_event_message_content(
+    *,
+    source_type: str,
+    event_type: str,
+    source_event_id: str,
+    event_time: datetime | None,
+    payload_json: dict[str, Any],
+) -> str:
+    lines = [
+        f"{source_type.capitalize()} event: {event_type.replace('_', ' ')}.",
+        f"Source event id: {source_event_id}.",
+    ]
+    if event_time is not None:
+        lines.append(f"Event time: {event_time.isoformat()}.")
+    summary = payload_json.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        lines.append(f"Summary: {summary.strip()}")
+    title = payload_json.get("title")
+    if isinstance(title, str) and title.strip():
+        lines.append(f"Title: {title.strip()}")
+    for key in ("repo", "branch", "location", "account", "symbol"):
+        value = payload_json.get(key)
+        if isinstance(value, str) and value.strip():
+            lines.append(f"{key.capitalize()}: {value.strip()}")
+    return "\n".join(lines)
 
 
 def _message_missing_score(item: dict[str, object]) -> float:
@@ -482,6 +526,112 @@ async def add_message(conversation_id: str, body: MessageCreateRequest):
             )
 
     return MessageCreateResponse(message_id=str(mid))
+
+
+@app.post(
+    "/v1/events/ingest",
+    response_model=EventIngestResponse,
+    tags=["events"],
+    dependencies=[Depends(require_api_key)],
+    summary="Ingest one external event as a durable event memory",
+)
+async def ingest_event(body: EventIngestRequest, request: Request):
+    _require_matching_request_id(request, body.request_id)
+
+    source_type, source_type_original, stream_key = _normalize_source_type(body.source_type)
+    event_log, created = await pg.claim_event_ingest(
+        owner_id=body.owner_id,
+        source_type=source_type,
+        source_event_id=body.source_event_id,
+        event_type=body.event_type,
+        event_time=body.event_time.isoformat() if body.event_time else None,
+        payload_json=body.payload_json,
+    )
+    if (not created) and event_log.get("message_id"):
+        return EventIngestResponse(
+            request_id=body.request_id,
+            created=False,
+            event_log_id=event_log["event_log_id"],
+            conversation_id=event_log.get("conversation_id"),
+            message_id=event_log.get("message_id"),
+            entity_ids=[],
+        )
+
+    conversation_id = await pg.get_or_create_event_stream_conversation(
+        owner_id=body.owner_id,
+        client_id=stream_key,
+        title=_event_stream_title(source_type),
+    )
+    metadata: dict[str, Any] = {
+        "memory_kind": "event",
+        "event_memory": True,
+        "source_type": source_type,
+        "source_stream": stream_key,
+        "source_event_id": body.source_event_id,
+        "event_type": body.event_type,
+        "event_log_id": event_log["event_log_id"],
+        "payload_json": body.payload_json,
+        "entities": [entity.model_dump() for entity in body.entities],
+    }
+    if body.event_time is not None:
+        metadata["event_time"] = body.event_time.isoformat()
+    if source_type_original is not None:
+        metadata["source_type_original"] = source_type_original
+
+    content = _render_event_message_content(
+        source_type=source_type,
+        event_type=body.event_type,
+        source_event_id=body.source_event_id,
+        event_time=body.event_time,
+        payload_json=body.payload_json,
+    )
+    message_id = await pg.add_message(
+        conversation_id=conversation_id,
+        owner_id=body.owner_id,
+        role="tool",
+        content=content,
+        client_id=stream_key,
+        metadata=metadata,
+    )
+    await pg.finalize_event_ingest(
+        event_log_id=UUID(event_log["event_log_id"]),
+        conversation_id=conversation_id,
+        message_id=message_id,
+    )
+
+    try:
+        await qdrant.upsert_message_vector(
+            message_id=message_id,
+            owner_id=body.owner_id,
+            conversation_id=conversation_id,
+            role="tool",
+            content=content,
+            client_id=stream_key,
+        )
+    except Exception:
+        logging.exception(
+            "qdrant upsert failed for event message (non-fatal)",
+            extra={"message_id": str(message_id)},
+        )
+
+    entity_ids: list[str] = []
+    for entity in body.entities:
+        row = await pg.upsert_memory_entity(
+            owner_id=body.owner_id,
+            entity_type=entity.entity_type,
+            canonical_name=entity.canonical_name,
+            metadata=entity.metadata,
+        )
+        entity_ids.append(row["entity_id"])
+
+    return EventIngestResponse(
+        request_id=body.request_id,
+        created=True,
+        event_log_id=event_log["event_log_id"],
+        conversation_id=str(conversation_id),
+        message_id=str(message_id),
+        entity_ids=entity_ids,
+    )
 
 
 # -------------------------
