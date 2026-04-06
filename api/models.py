@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
@@ -281,6 +282,34 @@ class FileIngestionResponse(BaseModel):
     chunks_created: int
     artifacts_created: int
     status: Literal["completed"]
+
+
+# ---- Event Ingest (Cluster 5 / R12 MVP) ----
+
+class EventEntityIn(BaseModel):
+    entity_type: str
+    canonical_name: str
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class EventIngestRequest(BaseModel):
+    request_id: str
+    owner_id: str
+    source_type: str
+    source_event_id: str
+    event_type: str
+    event_time: Optional[datetime] = None
+    payload_json: Dict[str, Any] = Field(default_factory=dict)
+    entities: List[EventEntityIn] = Field(default_factory=list)
+
+
+class EventIngestResponse(BaseModel):
+    request_id: str
+    created: bool
+    event_log_id: str
+    conversation_id: Optional[str] = None
+    message_id: Optional[str] = None
+    entity_ids: List[str] = Field(default_factory=list)
 
 
 # ---- Hygiene / Graph MVP ----

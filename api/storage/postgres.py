@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any, Optional
 from uuid import UUID, uuid4
 
@@ -54,6 +55,40 @@ class PostgresStore:
                 await cur.execute(q, (owner_id, client_id, title))
                 row = await cur.fetchone()
                 return row[0]
+
+    async def get_conversation_by_owner_client(self, owner_id: str, client_id: str) -> dict[str, Any] | None:
+        q = """
+        SELECT id, owner_id, client_id, title, created_at, updated_at
+        FROM conversations
+        WHERE owner_id = %s AND client_id = %s
+        ORDER BY created_at ASC, id ASC
+        LIMIT 1;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (owner_id, client_id))
+                row = await cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "conversation_id": str(row[0]),
+            "owner_id": row[1],
+            "client_id": row[2],
+            "title": row[3],
+            "created_at": str(row[4]),
+            "updated_at": str(row[5]),
+        }
+
+    async def get_or_create_event_stream_conversation(
+        self,
+        owner_id: str,
+        client_id: str,
+        title: str | None = None,
+    ) -> UUID:
+        existing = await self.get_conversation_by_owner_client(owner_id=owner_id, client_id=client_id)
+        if existing is not None:
+            return UUID(existing["conversation_id"])
+        return await self.create_conversation(owner_id=owner_id, client_id=client_id, title=title)
 
     async def add_message(
         self,
@@ -276,6 +311,129 @@ class PostgresStore:
             "title": row[3],
             "created_at": str(row[4]),
             "updated_at": str(row[5]),
+        }
+
+    async def claim_event_ingest(
+        self,
+        *,
+        owner_id: str,
+        source_type: str,
+        source_event_id: str,
+        event_type: str,
+        event_time: str | None,
+        payload_json: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], bool]:
+        insert_q = """
+        INSERT INTO event_ingest_log (
+            owner_id, source_type, source_event_id, event_type, event_time, payload_json
+        )
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (owner_id, source_type, source_event_id) DO NOTHING
+        RETURNING id, owner_id, source_type, source_event_id, event_type, event_time, payload_json,
+                  conversation_id, message_id, created_at;
+        """
+        select_q = """
+        SELECT id, owner_id, source_type, source_event_id, event_type, event_time, payload_json,
+               conversation_id, message_id, created_at
+        FROM event_ingest_log
+        WHERE owner_id = %s AND source_type = %s AND source_event_id = %s
+        LIMIT 1;
+        """
+        params = (
+            owner_id,
+            source_type,
+            source_event_id,
+            event_type,
+            event_time,
+            Json(payload_json or {}),
+        )
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(insert_q, params)
+                row = await cur.fetchone()
+                created = row is not None
+                if row is None:
+                    await cur.execute(select_q, (owner_id, source_type, source_event_id))
+                    row = await cur.fetchone()
+        return {
+            "event_log_id": str(row[0]),
+            "owner_id": row[1],
+            "source_type": row[2],
+            "source_event_id": row[3],
+            "event_type": row[4],
+            "event_time": str(row[5]) if row[5] else None,
+            "payload_json": row[6] or {},
+            "conversation_id": str(row[7]) if row[7] else None,
+            "message_id": str(row[8]) if row[8] else None,
+            "created_at": str(row[9]),
+        }, created
+
+    async def finalize_event_ingest(
+        self,
+        *,
+        event_log_id: UUID,
+        conversation_id: UUID,
+        message_id: UUID,
+    ) -> dict[str, Any]:
+        q = """
+        UPDATE event_ingest_log
+        SET conversation_id = %s,
+            message_id = %s
+        WHERE id = %s
+        RETURNING id, conversation_id, message_id;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (conversation_id, message_id, event_log_id))
+                row = await cur.fetchone()
+        return {
+            "event_log_id": str(row[0]),
+            "conversation_id": str(row[1]) if row[1] else None,
+            "message_id": str(row[2]) if row[2] else None,
+        }
+
+    async def upsert_memory_entity(
+        self,
+        *,
+        owner_id: str,
+        entity_type: str,
+        canonical_name: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_key = re.sub(r"\s+", " ", canonical_name.strip().lower())
+        q = """
+        INSERT INTO memory_entities (
+            owner_id, entity_type, canonical_name, normalized_key, metadata_json
+        )
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (owner_id, entity_type, normalized_key) DO UPDATE
+            SET canonical_name = EXCLUDED.canonical_name,
+                metadata_json = memory_entities.metadata_json || EXCLUDED.metadata_json,
+                updated_at = now()
+        RETURNING id, owner_id, entity_type, canonical_name, normalized_key, metadata_json, created_at, updated_at;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    q,
+                    (
+                        owner_id,
+                        entity_type,
+                        canonical_name,
+                        normalized_key,
+                        Json(metadata or {}),
+                    ),
+                )
+                row = await cur.fetchone()
+        return {
+            "entity_id": str(row[0]),
+            "owner_id": row[1],
+            "entity_type": row[2],
+            "canonical_name": row[3],
+            "normalized_key": row[4],
+            "metadata": row[5] or {},
+            "created_at": str(row[6]),
+            "updated_at": str(row[7]),
         }
 
 
