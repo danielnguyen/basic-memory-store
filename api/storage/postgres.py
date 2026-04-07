@@ -392,6 +392,338 @@ class PostgresStore:
             "message_id": str(row[2]) if row[2] else None,
         }
 
+    async def get_event_ingest_log(self, event_log_id: UUID) -> dict[str, Any] | None:
+        q = """
+        SELECT id, owner_id, source_type, source_event_id, event_type, event_time, payload_json,
+               conversation_id, message_id, created_at
+        FROM event_ingest_log
+        WHERE id = %s
+        LIMIT 1;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (event_log_id,))
+                row = await cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "event_log_id": str(row[0]),
+            "owner_id": row[1],
+            "source_type": row[2],
+            "source_event_id": row[3],
+            "event_type": row[4],
+            "event_time": str(row[5]) if row[5] else None,
+            "payload_json": row[6] or {},
+            "conversation_id": str(row[7]) if row[7] else None,
+            "message_id": str(row[8]) if row[8] else None,
+            "created_at": str(row[9]),
+        }
+
+    async def get_proactive_prefs(self, owner_id: str) -> dict[str, Any] | None:
+        q = """
+        SELECT owner_id, enabled, allowed_surfaces_json, rule_prefs_json, created_at, updated_at
+        FROM proactive_prefs
+        WHERE owner_id = %s
+        LIMIT 1;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (owner_id,))
+                row = await cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "owner_id": row[0],
+            "enabled": bool(row[1]),
+            "allowed_surfaces_json": row[2] or [],
+            "rule_prefs_json": row[3] or {},
+            "created_at": str(row[4]),
+            "updated_at": str(row[5]),
+        }
+
+    async def upsert_proactive_prefs(
+        self,
+        *,
+        owner_id: str,
+        enabled: bool,
+        allowed_surfaces_json: list[str],
+        rule_prefs_json: dict[str, Any],
+    ) -> dict[str, Any]:
+        q = """
+        INSERT INTO proactive_prefs (owner_id, enabled, allowed_surfaces_json, rule_prefs_json)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (owner_id) DO UPDATE
+            SET enabled = EXCLUDED.enabled,
+                allowed_surfaces_json = EXCLUDED.allowed_surfaces_json,
+                rule_prefs_json = EXCLUDED.rule_prefs_json,
+                updated_at = now()
+        RETURNING owner_id, enabled, allowed_surfaces_json, rule_prefs_json, created_at, updated_at;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (owner_id, enabled, Json(allowed_surfaces_json), Json(rule_prefs_json)))
+                row = await cur.fetchone()
+        return {
+            "owner_id": row[0],
+            "enabled": bool(row[1]),
+            "allowed_surfaces_json": row[2] or [],
+            "rule_prefs_json": row[3] or {},
+            "created_at": str(row[4]),
+            "updated_at": str(row[5]),
+        }
+
+    async def create_proactive_suggestion(
+        self,
+        *,
+        owner_id: str,
+        source_event_log_id: UUID | None,
+        source_type: str,
+        kind: str,
+        title: str,
+        body: str,
+        explanation_json: dict[str, Any],
+        evidence_json: dict[str, Any],
+        target_surface: str | None,
+    ) -> tuple[dict[str, Any], bool]:
+        q = """
+        INSERT INTO proactive_suggestions (
+            owner_id, source_event_log_id, source_type, kind, title, body,
+            explanation_json, evidence_json, target_surface
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (owner_id, source_event_log_id, kind) DO UPDATE
+            SET explanation_json = EXCLUDED.explanation_json,
+                evidence_json = EXCLUDED.evidence_json,
+                target_surface = EXCLUDED.target_surface,
+                updated_at = now()
+        RETURNING id, owner_id, source_event_log_id, source_type, kind, status, title, body,
+                  explanation_json, evidence_json, target_surface, delivery_surface,
+                  delivery_status, delivery_external_id, delivery_error, delivered_at,
+                  created_at, updated_at, (xmax = 0) AS inserted;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    q,
+                    (
+                        owner_id,
+                        source_event_log_id,
+                        source_type,
+                        kind,
+                        title,
+                        body,
+                        Json(explanation_json),
+                        Json(evidence_json),
+                        target_surface,
+                    ),
+                )
+                row = await cur.fetchone()
+        return ({
+            "suggestion_id": str(row[0]),
+            "owner_id": row[1],
+            "source_event_log_id": str(row[2]) if row[2] else None,
+            "source_type": row[3],
+            "kind": row[4],
+            "status": row[5],
+            "title": row[6],
+            "body": row[7],
+            "explanation_json": row[8] or {},
+            "evidence_json": row[9] or {},
+            "target_surface": row[10],
+            "delivery_surface": row[11],
+            "delivery_status": row[12],
+            "delivery_external_id": row[13],
+            "delivery_error": row[14],
+            "delivered_at": str(row[15]) if row[15] else None,
+            "created_at": str(row[16]),
+            "updated_at": str(row[17]),
+        }, bool(row[18]))
+
+    async def list_proactive_suggestions(
+        self,
+        *,
+        owner_id: str,
+        status: str | None = None,
+        surface: str | None = None,
+    ) -> list[dict[str, Any]]:
+        params: list[Any] = [owner_id]
+        where = ["owner_id = %s"]
+        if status is not None:
+            where.append("status = %s")
+            params.append(status)
+        if surface is not None:
+            where.append("target_surface = %s")
+            params.append(surface)
+        q = f"""
+        SELECT id, owner_id, source_event_log_id, source_type, kind, status, title, body,
+               explanation_json, evidence_json, target_surface, delivery_surface,
+               delivery_status, delivery_external_id, delivery_error, delivered_at,
+               created_at, updated_at
+        FROM proactive_suggestions
+        WHERE {' AND '.join(where)}
+        ORDER BY created_at DESC, id DESC;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, tuple(params))
+                rows = await cur.fetchall()
+        return [
+            {
+                "suggestion_id": str(row[0]),
+                "owner_id": row[1],
+                "source_event_log_id": str(row[2]) if row[2] else None,
+                "source_type": row[3],
+                "kind": row[4],
+                "status": row[5],
+                "title": row[6],
+                "body": row[7],
+                "explanation_json": row[8] or {},
+                "evidence_json": row[9] or {},
+                "target_surface": row[10],
+                "delivery_surface": row[11],
+                "delivery_status": row[12],
+                "delivery_external_id": row[13],
+                "delivery_error": row[14],
+                "delivered_at": str(row[15]) if row[15] else None,
+                "created_at": str(row[16]),
+                "updated_at": str(row[17]),
+            }
+            for row in rows
+        ]
+
+    async def get_proactive_suggestion(self, suggestion_id: UUID) -> dict[str, Any] | None:
+        q = """
+        SELECT id, owner_id, source_event_log_id, source_type, kind, status, title, body,
+               explanation_json, evidence_json, target_surface, delivery_surface,
+               delivery_status, delivery_external_id, delivery_error, delivered_at,
+               created_at, updated_at
+        FROM proactive_suggestions
+        WHERE id = %s
+        LIMIT 1;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (suggestion_id,))
+                row = await cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "suggestion_id": str(row[0]),
+            "owner_id": row[1],
+            "source_event_log_id": str(row[2]) if row[2] else None,
+            "source_type": row[3],
+            "kind": row[4],
+            "status": row[5],
+            "title": row[6],
+            "body": row[7],
+            "explanation_json": row[8] or {},
+            "evidence_json": row[9] or {},
+            "target_surface": row[10],
+            "delivery_surface": row[11],
+            "delivery_status": row[12],
+            "delivery_external_id": row[13],
+            "delivery_error": row[14],
+            "delivered_at": str(row[15]) if row[15] else None,
+            "created_at": str(row[16]),
+            "updated_at": str(row[17]),
+        }
+
+    async def record_proactive_feedback(
+        self,
+        *,
+        suggestion_id: UUID,
+        owner_id: str,
+        feedback_type: str,
+        reason: str | None,
+    ) -> dict[str, Any]:
+        next_status = None
+        if feedback_type == "dismissed":
+            next_status = "dismissed"
+        elif feedback_type == "accepted":
+            next_status = "accepted"
+
+        insert_q = """
+        INSERT INTO proactive_feedback (suggestion_id, owner_id, feedback_type, reason)
+        VALUES (%s, %s, %s, %s)
+        RETURNING id, created_at;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(insert_q, (suggestion_id, owner_id, feedback_type, reason))
+                feedback_row = await cur.fetchone()
+                if next_status is not None:
+                    await cur.execute(
+                        """
+                        UPDATE proactive_suggestions
+                        SET status = %s,
+                            updated_at = now()
+                        WHERE id = %s AND owner_id = %s
+                        """,
+                        (next_status, suggestion_id, owner_id),
+                    )
+                await cur.execute(
+                    """
+                    SELECT status
+                    FROM proactive_suggestions
+                    WHERE id = %s AND owner_id = %s
+                    LIMIT 1;
+                    """,
+                    (suggestion_id, owner_id),
+                )
+                status_row = await cur.fetchone()
+        if status_row is None:
+            raise KeyError("suggestion not found")
+        return {
+            "feedback_id": str(feedback_row[0]),
+            "suggestion_id": str(suggestion_id),
+            "owner_id": owner_id,
+            "feedback_type": feedback_type,
+            "reason": reason,
+            "status": status_row[0],
+            "created_at": str(feedback_row[1]),
+        }
+
+    async def record_proactive_delivery_attempt(
+        self,
+        *,
+        suggestion_id: UUID,
+        owner_id: str,
+        surface: str,
+        delivery_status: str,
+        external_id: str | None,
+        error: str | None,
+    ) -> dict[str, Any] | None:
+        delivered_at_clause = "now()" if delivery_status == "delivered" else "NULL"
+        q = f"""
+        UPDATE proactive_suggestions
+        SET delivery_surface = %s,
+            delivery_status = %s,
+            delivery_external_id = %s,
+            delivery_error = %s,
+            delivered_at = {delivered_at_clause},
+            updated_at = now()
+        WHERE id = %s AND owner_id = %s
+        RETURNING id, owner_id, status, delivery_status, delivery_surface,
+                  delivery_external_id, delivery_error, delivered_at, updated_at;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (surface, delivery_status, external_id, error, suggestion_id, owner_id))
+                row = await cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "suggestion_id": str(row[0]),
+            "owner_id": row[1],
+            "status": row[2],
+            "delivery_status": row[3],
+            "delivery_surface": row[4],
+            "delivery_external_id": row[5],
+            "delivery_error": row[6],
+            "delivered_at": str(row[7]) if row[7] else None,
+            "updated_at": str(row[8]),
+        }
+
     async def upsert_memory_entity(
         self,
         *,
