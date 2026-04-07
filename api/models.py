@@ -312,6 +312,106 @@ class EventIngestResponse(BaseModel):
     entity_ids: List[str] = Field(default_factory=list)
 
 
+# ---- Proactive (Cluster 6 / R16 MVP) ----
+
+SuggestionStatus = Literal["pending", "dismissed", "accepted", "expired"]
+DeliveryStatus = Literal["not_attempted", "delivered", "failed"]
+FeedbackType = Literal["dismissed", "useful", "not_useful", "accepted"]
+ProactiveSurface = Literal["telegram"]
+
+
+class ProactivePrefsUpdateRequest(BaseModel):
+    owner_id: str
+    enabled: bool
+    allowed_surfaces_json: List[ProactiveSurface] = Field(default_factory=list)
+    rule_prefs_json: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ProactivePrefsResponse(BaseModel):
+    owner_id: str
+    enabled: bool
+    allowed_surfaces_json: List[str] = Field(default_factory=list)
+    rule_prefs_json: Dict[str, Any] = Field(default_factory=dict)
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class ProactiveSuggestionItem(BaseModel):
+    suggestion_id: str
+    owner_id: str
+    source_event_log_id: Optional[str] = None
+    source_type: str
+    kind: str
+    status: SuggestionStatus
+    title: str
+    body: str
+    explanation_json: Dict[str, Any] = Field(default_factory=dict)
+    evidence_json: Dict[str, Any] = Field(default_factory=dict)
+    target_surface: Optional[str] = None
+    delivery_surface: Optional[str] = None
+    delivery_status: DeliveryStatus
+    delivery_external_id: Optional[str] = None
+    delivery_error: Optional[str] = None
+    delivered_at: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+class ProactiveSuggestionListResponse(BaseModel):
+    suggestions: List[ProactiveSuggestionItem] = Field(default_factory=list)
+
+
+class ProactiveSuggestionFeedbackRequest(BaseModel):
+    owner_id: str
+    feedback_type: FeedbackType
+    reason: Optional[str] = None
+
+
+class ProactiveSuggestionFeedbackResponse(BaseModel):
+    feedback_id: str
+    suggestion_id: str
+    owner_id: str
+    feedback_type: FeedbackType
+    reason: Optional[str] = None
+    status: SuggestionStatus
+    created_at: str
+
+
+class ProactiveDeliveryAttemptRequest(BaseModel):
+    owner_id: str
+    surface: ProactiveSurface
+    status: Literal["delivered", "failed"]
+    external_id: Optional[str] = None
+    error: Optional[str] = None
+
+
+class ProactiveDeliveryAttemptResponse(BaseModel):
+    suggestion_id: str
+    owner_id: str
+    status: SuggestionStatus
+    delivery_status: DeliveryStatus
+    delivery_surface: Optional[str] = None
+    delivery_external_id: Optional[str] = None
+    delivery_error: Optional[str] = None
+    delivered_at: Optional[str] = None
+    updated_at: str
+
+
+class ProactiveEvaluateRequest(BaseModel):
+    request_id: str
+    owner_id: str
+    event_log_id: str
+    surface: Optional[str] = None
+
+
+class ProactiveEvaluateResponse(BaseModel):
+    request_id: str
+    owner_id: str
+    event_log_id: str
+    created_count: int
+    suggestions: List[ProactiveSuggestionItem] = Field(default_factory=list)
+
+
 # ---- Hygiene / Graph MVP ----
 
 class HygieneScanRequest(BaseModel):

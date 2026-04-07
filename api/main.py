@@ -20,6 +20,8 @@ from storage.qdrant import QdrantStore, RetrievalHit as QdrantHit
 from storage.object_store import ObjectStoreClient
 from prompts.context import assemble_messages, build_artifact_context_block, build_context_block
 from services.ingestion import ingest_files
+from services.retrieval import build_retrieval_bundle
+from services.proactive import evaluate_event as evaluate_proactive_event
 
 from models import (
     ArtifactCompleteRequest,
@@ -38,6 +40,16 @@ from models import (
     ConversationResolveResponse,
     EventIngestRequest,
     EventIngestResponse,
+    ProactiveDeliveryAttemptRequest,
+    ProactiveDeliveryAttemptResponse,
+    ProactiveEvaluateRequest,
+    ProactiveEvaluateResponse,
+    ProactivePrefsResponse,
+    ProactivePrefsUpdateRequest,
+    ProactiveSuggestionFeedbackRequest,
+    ProactiveSuggestionFeedbackResponse,
+    ProactiveSuggestionItem,
+    ProactiveSuggestionListResponse,
     MessageCreateRequest,
     MessageCreateResponse,
     RetrieveRequest,
@@ -928,151 +940,21 @@ async def retrieve_tiered_v2(conversation_id: str, body: RetrieveBundleRequest, 
         raise HTTPException(status_code=404, detail="conversation_id not found")
 
     opts = body.retrieval or RetrievalOptions(k=settings.retrieval_k, min_score=0.25, scope="conversation")
-    artifact_k = _retrieval_artifact_k()
-
-    def _scope_filters(scope: str) -> tuple[str | None, str | None]:
-        if scope == "conversation":
-            return str(cid), None
-        if scope == "client":
-            return None, convo.get("client_id")
-        return None, None
-
-    conversation_filter, client_filter = _scope_filters(opts.scope)
-    semantic_hits = await qdrant.search(
+    bundle = await build_retrieval_bundle(
+        pg=pg,
+        qdrant=qdrant,
+        settings=settings,
         owner_id=body.owner_id,
+        conversation_id=cid,
+        client_id=convo.get("client_id"),
         query=body.query,
-        k=opts.k,
-        min_score=opts.min_score,
-        conversation_id=conversation_filter,
-        client_id=client_filter,
-    )
-    semantic_ids = _safe_uuid_message_ids(
-        semantic_hits,
-        context="/v2/conversations/{id}/retrieve",
-        kind="semantic",
-    )
-    semantic_snips = await pg.get_message_snippets_by_ids(semantic_ids)
-    semantic_score_by_id = {h.message_id: h.score for h in semantic_hits}
-    artifact_hits = await qdrant.search_artifact_chunks(
-        owner_id=body.owner_id,
-        query=body.query,
-        k=artifact_k,
-        min_score=opts.min_score,
-        client_id=client_filter,
-    ) if artifact_k > 0 else []
-    artifact_ids = _safe_uuid_ids(
-        [hit.derived_text_id for hit in artifact_hits],
-        context="/v2/conversations/{id}/retrieve",
-        kind="artifact",
-    )
-    artifact_snips = await pg.get_derived_text_snippets_by_ids(artifact_ids)
-    artifact_score_by_id = {h.derived_text_id: h.score for h in artifact_hits}
-
-    recent_snips = await pg.get_recent_message_items(conversation_id=cid, limit=settings.recent_turns)
-
-    ranked_semantic: list[tuple[dict[str, Any], dict[str, float]]] = []
-    for s in semantic_snips:
-        if not _in_time_window(s.get("created_at"), opts.time_window):
-            continue
-        score_details = _score_item(
-            semantic_score=semantic_score_by_id.get(s["message_id"]),
-            created_at=s.get("created_at"),
-            retrieval_mode=opts.retrieval_mode,
-            is_same_conversation=(s.get("conversation_id") == str(cid)),
-            # v2 retrieval does not currently include pinned memories in this ranked set.
-            is_pinned=False,
-            missing_score=_message_missing_score(s),
-        )
-        ranked_semantic.append((s, score_details))
-    ranked_semantic.sort(key=lambda item: item[1]["final_score"], reverse=True)
-    ranked_semantic = ranked_semantic[: opts.k]
-
-    ranked_artifacts: list[tuple[dict[str, Any], dict[str, float]]] = []
-    for s in artifact_snips:
-        if not _in_time_window(s.get("created_at"), opts.time_window):
-            continue
-        score_details = _score_item(
-            semantic_score=artifact_score_by_id.get(s["derived_text_id"]),
-            created_at=s.get("created_at"),
-            retrieval_mode=opts.retrieval_mode,
-            is_same_conversation=False,
-            # v2 retrieval does not currently include pinned memories in artifact ranking either.
-            is_pinned=False,
-            missing_score=_artifact_missing_score(s),
-        )
-        ranked_artifacts.append((s, score_details))
-    ranked_artifacts.sort(key=lambda item: item[1]["final_score"], reverse=True)
-    ranked_artifacts = ranked_artifacts[:artifact_k]
-
-    all_content = "".join(
-        [s["content"] for s in recent_snips]
-        + [s["content"] for s, _ in ranked_semantic]
-        + [s["text"] for s, _ in ranked_artifacts]
-    )
-    has_code_like_content = any(tok in all_content for tok in ("```", "def ", "class ", "import ", "{", "};"))
-    token_estimate_total = max(1, len(all_content) // 4) if all_content else None
-
-    artifact_refs = _dedupe_artifact_refs(
-        [
-            ArtifactRef(
-                artifact_id=s["artifact_id"],
-                file_path=s["file_path"],
-                snippet=_cap_snippet(s["text"], _retrieval_artifact_max_snippet_chars()),
-                relevance_score=score_details["final_score"],
-                repo_name=s.get("repo_name"),
-                score_details=score_details,
-            )
-            for s, score_details in ranked_artifacts
-        ]
+        opts=opts,
     )
 
     return RetrieveBundleResponse(
         request_id=body.request_id,
         conversation_id=str(cid),
-        bundle=RetrievalBundle(
-            recent=[
-                RetrievalMessageItem(
-                    message_id=s["message_id"],
-                    conversation_id=s["conversation_id"],
-                    role=s["role"],
-                    content=s["content"],
-                    created_at=s["created_at"],
-                    score=None,
-                )
-                for s in recent_snips
-            ],
-            semantic=[
-                RetrievalMessageItem(
-                    message_id=s["message_id"],
-                    conversation_id=s["conversation_id"],
-                    role=s["role"],
-                    content=s["content"],
-                    created_at=s["created_at"],
-                    score=score_details["final_score"],
-                    score_details=score_details,
-                )
-                for s, score_details in ranked_semantic
-            ],
-            artifact_refs=artifact_refs,
-            token_estimate_total=token_estimate_total,
-            observed_metadata=ObservedMetadata(
-                mime_types=["text/plain"] if ranked_artifacts else [],
-                has_artifacts=bool(ranked_artifacts),
-                has_code_like_content=has_code_like_content,
-                estimated_chars=len(all_content),
-            ),
-            retrieval_debug={
-                "time_window": opts.time_window,
-                "retrieval_mode": opts.retrieval_mode,
-                "semantic_candidates": len(semantic_snips),
-                "semantic_ranked": len(ranked_semantic),
-                "artifact_candidates": len(artifact_snips),
-                "artifact_ranked": len(ranked_artifacts),
-                "graph_expansion_applied": False,
-                "pinned_handling": "pinned memories are not part of the v2 ranked bundle; they remain available via the unchanged tiered retrieval path",
-                "missing_score_note": "project heuristic; not an explicit spec term",
-            },
-        ),
+        bundle=bundle,
     )
 
 
@@ -1455,6 +1337,153 @@ async def orchestrate_chat(body: OrchestrateChatRequest, request: Request):
         artifact_ids=body.artifact_ids or [],
     )
     return OrchestrateChatResponse(**resp.model_dump(), request_id=(getattr(request.state, "request_id", None) or ""))
+
+
+@app.get(
+    "/v1/proactive/preferences",
+    response_model=ProactivePrefsResponse,
+    tags=["proactive"],
+    dependencies=[Depends(require_api_key)],
+    summary="Get proactive preferences for an owner",
+)
+async def get_proactive_preferences(owner_id: str):
+    row = await pg.get_proactive_prefs(owner_id)
+    if row is None:
+        return ProactivePrefsResponse(
+            owner_id=owner_id,
+            enabled=False,
+            allowed_surfaces_json=[],
+            rule_prefs_json={},
+            created_at=None,
+            updated_at=None,
+        )
+    return ProactivePrefsResponse(**row)
+
+
+@app.put(
+    "/v1/proactive/preferences",
+    response_model=ProactivePrefsResponse,
+    tags=["proactive"],
+    dependencies=[Depends(require_api_key)],
+    summary="Create or update proactive preferences for an owner",
+)
+async def put_proactive_preferences(body: ProactivePrefsUpdateRequest):
+    row = await pg.upsert_proactive_prefs(
+        owner_id=body.owner_id,
+        enabled=body.enabled,
+        allowed_surfaces_json=list(body.allowed_surfaces_json),
+        rule_prefs_json=body.rule_prefs_json,
+    )
+    logging.info("proactive_prefs_updated", extra={"owner_id": body.owner_id, "enabled": body.enabled, "allowed_surfaces": row["allowed_surfaces_json"]})
+    return ProactivePrefsResponse(**row)
+
+
+@app.get(
+    "/v1/proactive/suggestions",
+    response_model=ProactiveSuggestionListResponse,
+    tags=["proactive"],
+    dependencies=[Depends(require_api_key)],
+    summary="List proactive suggestions with optional lifecycle status and target surface filters",
+)
+async def list_proactive_suggestions(
+    owner_id: str,
+    status: str | None = None,
+    surface: str | None = None,
+    delivery_status: str | None = None,
+):
+    rows = await pg.list_proactive_suggestions(
+        owner_id=owner_id,
+        status=status,
+        surface=surface,
+        delivery_status=delivery_status,
+    )
+    return ProactiveSuggestionListResponse(suggestions=[ProactiveSuggestionItem(**row) for row in rows])
+
+
+@app.post(
+    "/v1/proactive/suggestions/{suggestion_id}/feedback",
+    response_model=ProactiveSuggestionFeedbackResponse,
+    tags=["proactive"],
+    dependencies=[Depends(require_api_key)],
+    summary="Record user feedback for one proactive suggestion",
+)
+async def record_proactive_feedback(suggestion_id: str, body: ProactiveSuggestionFeedbackRequest):
+    try:
+        sid = UUID(suggestion_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="suggestion_id must be a UUID")
+
+    suggestion = await pg.get_proactive_suggestion(sid)
+    if suggestion is None or suggestion["owner_id"] != body.owner_id:
+        raise HTTPException(status_code=404, detail="suggestion not found")
+
+    row = await pg.record_proactive_feedback(
+        suggestion_id=sid,
+        owner_id=body.owner_id,
+        feedback_type=body.feedback_type,
+        reason=body.reason,
+    )
+    logging.info("proactive_feedback_recorded", extra={"owner_id": body.owner_id, "suggestion_id": suggestion_id, "feedback_type": body.feedback_type})
+    return ProactiveSuggestionFeedbackResponse(**row)
+
+
+@app.post(
+    "/v1/proactive/suggestions/{suggestion_id}/delivery-attempt",
+    response_model=ProactiveDeliveryAttemptResponse,
+    tags=["proactive"],
+    dependencies=[Depends(require_api_key)],
+    summary="Record one delivery attempt result for a proactive suggestion",
+)
+async def record_proactive_delivery_attempt(suggestion_id: str, body: ProactiveDeliveryAttemptRequest):
+    try:
+        sid = UUID(suggestion_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="suggestion_id must be a UUID")
+
+    row = await pg.record_proactive_delivery_attempt(
+        suggestion_id=sid,
+        owner_id=body.owner_id,
+        surface=body.surface,
+        delivery_status=body.status,
+        external_id=body.external_id,
+        error=body.error,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="suggestion not found")
+    logging.info("proactive_delivery_attempt_recorded", extra={"owner_id": body.owner_id, "suggestion_id": suggestion_id, "surface": body.surface, "delivery_status": body.status})
+    return ProactiveDeliveryAttemptResponse(**row)
+
+
+@app.post(
+    "/v1/internal/proactive/evaluate",
+    response_model=ProactiveEvaluateResponse,
+    tags=["proactive"],
+    dependencies=[Depends(require_api_key)],
+    summary="Evaluate one ingested event against the deterministic proactive rules",
+)
+async def evaluate_proactive(body: ProactiveEvaluateRequest, request: Request):
+    _require_matching_request_id(request, body.request_id)
+    try:
+        event_log_id = UUID(body.event_log_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="event_log_id must be a UUID")
+
+    suggestions = await evaluate_proactive_event(
+        pg=pg,
+        qdrant=qdrant,
+        settings=settings,
+        owner_id=body.owner_id,
+        event_log_id=event_log_id,
+        surface=body.surface,
+    )
+    logging.info("proactive_evaluate_completed", extra={"owner_id": body.owner_id, "event_log_id": body.event_log_id, "created_count": len(suggestions)})
+    return ProactiveEvaluateResponse(
+        request_id=body.request_id,
+        owner_id=body.owner_id,
+        event_log_id=body.event_log_id,
+        created_count=len(suggestions),
+        suggestions=[ProactiveSuggestionItem(**row) for row in suggestions],
+    )
 
 
 @app.post(
