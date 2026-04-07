@@ -95,12 +95,14 @@ class FakePG:
         self.suggestions[suggestion_id] = row
         return row.copy(), True
 
-    async def list_proactive_suggestions(self, *, owner_id, status=None, surface=None):
+    async def list_proactive_suggestions(self, *, owner_id, status=None, surface=None, delivery_status=None):
         rows = [row.copy() for row in self.suggestions.values() if row["owner_id"] == owner_id]
         if status is not None:
             rows = [row for row in rows if row["status"] == status]
         if surface is not None:
             rows = [row for row in rows if row["target_surface"] == surface]
+        if delivery_status is not None:
+            rows = [row for row in rows if row["delivery_status"] == delivery_status]
         rows.sort(key=lambda row: row["created_at"], reverse=True)
         return rows
 
@@ -219,6 +221,69 @@ def test_proactive_disabled_skips_suggestion_creation(monkeypatch):
         assert r.status_code == 200
         assert r.json()["created_count"] == 0
         assert fake_pg.suggestions == {}
+    finally:
+        client.close()
+
+
+def test_list_suggestions_can_filter_by_delivery_status(monkeypatch):
+    client, fake_pg, _ = _client(monkeypatch)
+    try:
+        not_attempted, _ = awaitable(fake_pg.create_proactive_suggestion(
+            owner_id="owner",
+            source_event_log_id=uuid.uuid4(),
+            source_type="git",
+            kind="git_risk_scan",
+            title="pending unsent",
+            body="body",
+            explanation_json={},
+            evidence_json={},
+            target_surface="telegram",
+        ))
+        delivered, _ = awaitable(fake_pg.create_proactive_suggestion(
+            owner_id="owner",
+            source_event_log_id=uuid.uuid4(),
+            source_type="git",
+            kind="git_risk_scan",
+            title="pending delivered",
+            body="body",
+            explanation_json={},
+            evidence_json={},
+            target_surface="telegram",
+        ))
+        awaitable(fake_pg.record_proactive_delivery_attempt(
+            suggestion_id=uuid.UUID(delivered["suggestion_id"]),
+            owner_id="owner",
+            surface="telegram",
+            delivery_status="delivered",
+            external_id="nr-delivered",
+            error=None,
+        ))
+
+        unfiltered = client.get(
+            "/v1/proactive/suggestions",
+            headers={"X-API-Key": "testkey"},
+            params={"owner_id": "owner", "status": "pending", "surface": "telegram"},
+        )
+        assert unfiltered.status_code == 200
+        assert {item["suggestion_id"] for item in unfiltered.json()["suggestions"]} == {
+            not_attempted["suggestion_id"],
+            delivered["suggestion_id"],
+        }
+
+        filtered = client.get(
+            "/v1/proactive/suggestions",
+            headers={"X-API-Key": "testkey"},
+            params={
+                "owner_id": "owner",
+                "status": "pending",
+                "surface": "telegram",
+                "delivery_status": "not_attempted",
+            },
+        )
+        assert filtered.status_code == 200
+        suggestions = filtered.json()["suggestions"]
+        assert [item["suggestion_id"] for item in suggestions] == [not_attempted["suggestion_id"]]
+        assert suggestions[0]["delivery_status"] == "not_attempted"
     finally:
         client.close()
 

@@ -545,6 +545,7 @@ class PostgresStore:
         owner_id: str,
         status: str | None = None,
         surface: str | None = None,
+        delivery_status: str | None = None,
     ) -> list[dict[str, Any]]:
         params: list[Any] = [owner_id]
         where = ["owner_id = %s"]
@@ -554,6 +555,9 @@ class PostgresStore:
         if surface is not None:
             where.append("target_surface = %s")
             params.append(surface)
+        if delivery_status is not None:
+            where.append("delivery_status = %s")
+            params.append(delivery_status)
         q = f"""
         SELECT id, owner_id, source_event_log_id, source_type, kind, status, title, body,
                explanation_json, evidence_json, target_surface, delivery_surface,

@@ -1385,8 +1385,18 @@ async def put_proactive_preferences(body: ProactivePrefsUpdateRequest):
     dependencies=[Depends(require_api_key)],
     summary="List proactive suggestions with optional lifecycle status and target surface filters",
 )
-async def list_proactive_suggestions(owner_id: str, status: str | None = None, surface: str | None = None):
-    rows = await pg.list_proactive_suggestions(owner_id=owner_id, status=status, surface=surface)
+async def list_proactive_suggestions(
+    owner_id: str,
+    status: str | None = None,
+    surface: str | None = None,
+    delivery_status: str | None = None,
+):
+    rows = await pg.list_proactive_suggestions(
+        owner_id=owner_id,
+        status=status,
+        surface=surface,
+        delivery_status=delivery_status,
+    )
     return ProactiveSuggestionListResponse(suggestions=[ProactiveSuggestionItem(**row) for row in rows])
 
 
