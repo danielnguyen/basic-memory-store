@@ -178,6 +178,10 @@ Additions for file ingestion and retrieval:
 - `embeddings` links chunk refs to Qdrant point ids
 - Qdrant now stores both message vectors and derived-text chunk vectors
 
+Cluster 7.5 hardening adds adapter-level derived-object contract helpers and a
+deterministic retrieval replay wrapper. These do not add schema, require a
+universal derived-object table, or change public API response shapes.
+
 ---
 
 ## Local dev (fast bootstrap)
