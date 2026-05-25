@@ -164,7 +164,7 @@ def test_retrieve_bundle_shape(monkeypatch):
 def test_retrieve_bundle_recent_mode_with_30d_window(monkeypatch):
     fake_pg = FakePG(
         message_times=[
-            "2026-03-25T00:00:00+00:00",
+            "2026-05-20T00:00:00+00:00",
             "2025-10-01T00:00:00+00:00",
         ]
     )
