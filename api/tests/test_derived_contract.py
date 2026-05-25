@@ -1,3 +1,5 @@
+import pytest
+
 from services.derived_contract import derived_text_contract_view, proactive_suggestion_contract_view
 
 
@@ -37,3 +39,8 @@ def test_proactive_suggestion_contract_view_uses_event_source_ref():
     assert out["owner_id"] == "owner"
     assert out["source_refs"] == [{"ref_type": "event_log", "ref_id": "event-1", "support_kind": "direct"}]
     assert out["explanation"] == "calendar event needs follow up"
+
+
+def test_derived_text_contract_view_rejects_missing_identifier():
+    with pytest.raises(ValueError, match="missing an identifier"):
+        derived_text_contract_view({"artifact_id": "a-1", "kind": "chunk"})
