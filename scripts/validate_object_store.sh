@@ -5,7 +5,7 @@ trap 'echo "❌ failed at line $LINENO" >&2' ERR
 
 # ---- Config (override via env vars) ----
 BASE="${BASE:-http://127.0.0.1:4321}"
-KEY="${KEY:-${MEMORY_API_KEY:-dev-key}}"
+KEY="${KEY:-${MEMORY_API_KEY:-dev-local}}"
 CF_ACCESS_CLIENT_ID="${CF_ACCESS_CLIENT_ID:-}"
 CF_ACCESS_CLIENT_SECRET="${CF_ACCESS_CLIENT_SECRET:-}"
 OWNER_ID="${OWNER_ID:-daniel}"
