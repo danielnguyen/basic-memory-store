@@ -37,7 +37,7 @@ class FakePG:
                 "source_refs_json": kwargs["source_refs_json"],
                 "source_ref_hash": kwargs["source_ref_hash"],
                 "scores_json": kwargs["scores_json"],
-                "promotion_state": kwargs["promotion_state"],
+                "promotion_state": "promoted",
                 "status": "active",
                 "supersedes_memory_id": str(kwargs["supersedes_memory_id"])
                 if kwargs["supersedes_memory_id"]

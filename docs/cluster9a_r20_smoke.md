@@ -22,7 +22,6 @@ curl -sS -X POST "$BASE/v1/internal/memory/promote" \
     "summary":"User prefers concise operational answers.",
     "source_refs":[{"ref_type":"message","ref_id":"00000000-0000-0000-0000-000000000001"}],
     "scores":{"utility_score":0.9},
-    "promotion_state":"promoted",
     "confidence":0.8,
     "explanation":{"rationale":"manual smoke promotion"},
     "reinforce":false
@@ -43,7 +42,6 @@ curl -sS -X POST "$BASE/v1/internal/memory/promote" \
     "summary":"User prefers concise operational answers.",
     "source_refs":[{"ref_type":"message","ref_id":"00000000-0000-0000-0000-000000000001"}],
     "scores":{"utility_score":0.9},
-    "promotion_state":"promoted",
     "reinforce":true
   }'
 ```

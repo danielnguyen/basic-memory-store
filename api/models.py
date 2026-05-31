@@ -514,7 +514,7 @@ class MemoryPromoteRequest(BaseModel):
     summary: str = Field(..., min_length=1, max_length=4000)
     source_refs: List[MemorySourceRef] = Field(..., min_length=1, max_length=50)
     scores: Dict[str, Any] = Field(default_factory=dict)
-    promotion_state: Literal["candidate", "promoted", "suppressed", "decayed"] = "promoted"
+    promotion_state: Literal["promoted"] = "promoted"
     confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     explanation: Dict[str, Any] = Field(default_factory=dict)
     generation_trace_id: Optional[str] = Field(default=None, max_length=160)

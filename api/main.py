@@ -1519,7 +1519,7 @@ async def promote_memory(body: MemoryPromoteRequest, request: Request):
             source_refs_json=normalized_refs,
             source_ref_hash=source_ref_hash(normalized_refs),
             scores_json=normalize_scores(body.scores),
-            promotion_state=body.promotion_state,
+            promotion_state="promoted",
             confidence=body.confidence,
             explanation_json=body.explanation,
             generation_trace_id=body.generation_trace_id,
