@@ -1468,6 +1468,388 @@ class PostgresStore:
             "tool_policy": {},
         }
 
+
+    def _memory_item_from_row(self, row: tuple[Any, ...]) -> dict[str, Any]:
+        return {
+            "memory_id": str(row[0]),
+            "owner_id": row[1],
+            "memory_type": row[2],
+            "summary": row[3],
+            "source_refs_json": row[4] or [],
+            "source_ref_hash": row[5],
+            "scores_json": row[6] or {},
+            "promotion_state": row[7],
+            "status": row[8],
+            "supersedes_memory_id": str(row[9]) if row[9] else None,
+            "superseded_by_memory_id": str(row[10]) if row[10] else None,
+            "last_reinforced_at": str(row[11]) if row[11] else None,
+            "expires_at": str(row[12]) if row[12] else None,
+            "derivation_version": row[13],
+            "confidence": row[14],
+            "explanation_json": row[15] or {},
+            "generation_trace_id": row[16],
+            "created_at": str(row[17]),
+            "updated_at": str(row[18]),
+        }
+
+    def _memory_event_from_row(self, row: tuple[Any, ...]) -> dict[str, Any]:
+        return {
+            "event_id": str(row[0]),
+            "memory_id": str(row[1]),
+            "owner_id": row[2],
+            "event_type": row[3],
+            "reason_json": row[4] or {},
+            "created_at": str(row[5]),
+        }
+
+    async def promote_memory_item(
+        self,
+        *,
+        owner_id: str,
+        memory_type: str,
+        summary: str,
+        source_refs_json: list[dict[str, Any]],
+        source_ref_hash: str,
+        scores_json: dict[str, Any],
+        promotion_state: str,
+        confidence: float | None,
+        explanation_json: dict[str, Any],
+        generation_trace_id: str | None,
+        expires_at: str | None,
+        request_id: str,
+        reinforce: bool,
+        supersedes_memory_id: UUID | None,
+        derivation_version: str = "r20-mvp-v1",
+    ) -> dict[str, Any]:
+        select_cols = """
+            id, owner_id, memory_type, summary, source_refs_json, source_ref_hash,
+            scores_json, promotion_state, status, supersedes_memory_id,
+            superseded_by_memory_id, last_reinforced_at, expires_at,
+            derivation_version, confidence, explanation_json, generation_trace_id,
+            created_at, updated_at
+        """
+        events_appended: list[str] = []
+        incoming_for_compare = {
+            "memory_type": memory_type,
+            "summary": summary,
+            "source_refs_json": source_refs_json,
+            "scores_json": scores_json,
+            "promotion_state": promotion_state,
+            "expires_at": expires_at,
+            "confidence": confidence,
+            "explanation_json": explanation_json,
+            "generation_trace_id": generation_trace_id,
+        }
+
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                if supersedes_memory_id is not None:
+                    new_id = uuid4()
+                    await cur.execute(
+                        f"""
+                        SELECT {select_cols}
+                        FROM memory_items
+                        WHERE id = %s AND owner_id = %s
+                        FOR UPDATE;
+                        """,
+                        (supersedes_memory_id, owner_id),
+                    )
+                    old_row = await cur.fetchone()
+                    if old_row is None:
+                        raise KeyError("superseded memory not found")
+
+                    await cur.execute(
+                        """
+                        UPDATE memory_items
+                        SET status = 'superseded',
+                            superseded_by_memory_id = %s,
+                            updated_at = now()
+                        WHERE id = %s AND owner_id = %s;
+                        """,
+                        (new_id, supersedes_memory_id, owner_id),
+                    )
+                    await cur.execute(
+                        """
+                        INSERT INTO memory_events (memory_id, owner_id, event_type, reason_json)
+                        VALUES (%s, %s, 'superseded', %s::jsonb);
+                        """,
+                        (
+                            supersedes_memory_id,
+                            owner_id,
+                            Json({"request_id": request_id, "superseded_by_memory_id": str(new_id)}),
+                        ),
+                    )
+
+                    await cur.execute(
+                        f"""
+                        INSERT INTO memory_items (
+                            id, owner_id, memory_type, summary, source_refs_json,
+                            source_ref_hash, scores_json, promotion_state, status,
+                            supersedes_memory_id, expires_at, derivation_version,
+                            confidence, explanation_json, generation_trace_id
+                        ) VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s,
+                                  'active', %s, %s, %s, %s, %s::jsonb, %s)
+                        RETURNING {select_cols};
+                        """,
+                        (
+                            new_id,
+                            owner_id,
+                            memory_type,
+                            summary,
+                            Json(source_refs_json),
+                            source_ref_hash,
+                            Json(scores_json),
+                            promotion_state,
+                            supersedes_memory_id,
+                            expires_at,
+                            derivation_version,
+                            confidence,
+                            Json(explanation_json),
+                            generation_trace_id,
+                        ),
+                    )
+                    row = await cur.fetchone()
+                    for event_type in ("created", "promoted"):
+                        await cur.execute(
+                            """
+                            INSERT INTO memory_events (memory_id, owner_id, event_type, reason_json)
+                            VALUES (%s, %s, %s, %s::jsonb);
+                            """,
+                            (new_id, owner_id, event_type, Json({"request_id": request_id})),
+                        )
+                    return {
+                        "memory": self._memory_item_from_row(row),
+                        "created": True,
+                        "updated": False,
+                        "reinforced": False,
+                        "superseded": True,
+                        "events_appended": ["superseded", "created", "promoted"],
+                    }
+
+                await cur.execute(
+                    f"""
+                    SELECT {select_cols}
+                    FROM memory_items
+                    WHERE owner_id = %s AND source_ref_hash = %s AND status = 'active'
+                    LIMIT 1
+                    FOR UPDATE;
+                    """,
+                    (owner_id, source_ref_hash),
+                )
+                existing_row = await cur.fetchone()
+
+                if existing_row is None:
+                    await cur.execute(
+                        f"""
+                        INSERT INTO memory_items (
+                            owner_id, memory_type, summary, source_refs_json,
+                            source_ref_hash, scores_json, promotion_state, status,
+                            expires_at, derivation_version, confidence,
+                            explanation_json, generation_trace_id,
+                            last_reinforced_at
+                        ) VALUES (%s, %s, %s, %s::jsonb, %s, %s::jsonb, %s,
+                                  'active', %s, %s, %s, %s::jsonb, %s,
+                                  CASE WHEN %s THEN now() ELSE NULL END)
+                        RETURNING {select_cols};
+                        """,
+                        (
+                            owner_id,
+                            memory_type,
+                            summary,
+                            Json(source_refs_json),
+                            source_ref_hash,
+                            Json(scores_json),
+                            promotion_state,
+                            expires_at,
+                            derivation_version,
+                            confidence,
+                            Json(explanation_json),
+                            generation_trace_id,
+                            reinforce,
+                        ),
+                    )
+                    row = await cur.fetchone()
+                    memory_id = row[0]
+                    for event_type in ("created", "promoted"):
+                        await cur.execute(
+                            """
+                            INSERT INTO memory_events (memory_id, owner_id, event_type, reason_json)
+                            VALUES (%s, %s, %s, %s::jsonb);
+                            """,
+                            (memory_id, owner_id, event_type, Json({"request_id": request_id})),
+                        )
+                        events_appended.append(event_type)
+                    if reinforce:
+                        await cur.execute(
+                            """
+                            INSERT INTO memory_events (memory_id, owner_id, event_type, reason_json)
+                            VALUES (%s, %s, 'reinforced', %s::jsonb);
+                            """,
+                            (memory_id, owner_id, Json({"request_id": request_id, "source": "promote"})),
+                        )
+                        events_appended.append("reinforced")
+                    return {
+                        "memory": self._memory_item_from_row(row),
+                        "created": True,
+                        "updated": False,
+                        "reinforced": reinforce,
+                        "superseded": False,
+                        "events_appended": events_appended,
+                    }
+
+                existing = self._memory_item_from_row(existing_row)
+                changed = any(existing.get(k) != v for k, v in incoming_for_compare.items())
+                memory_id = existing_row[0]
+                if changed:
+                    await cur.execute(
+                        f"""
+                        UPDATE memory_items
+                        SET memory_type = %s,
+                            summary = %s,
+                            source_refs_json = %s::jsonb,
+                            scores_json = %s::jsonb,
+                            promotion_state = %s,
+                            expires_at = %s,
+                            confidence = %s,
+                            explanation_json = %s::jsonb,
+                            generation_trace_id = %s,
+                            updated_at = now()
+                        WHERE id = %s AND owner_id = %s
+                        RETURNING {select_cols};
+                        """,
+                        (
+                            memory_type,
+                            summary,
+                            Json(source_refs_json),
+                            Json(scores_json),
+                            promotion_state,
+                            expires_at,
+                            confidence,
+                            Json(explanation_json),
+                            generation_trace_id,
+                            memory_id,
+                            owner_id,
+                        ),
+                    )
+                    row = await cur.fetchone()
+                    await cur.execute(
+                        """
+                        INSERT INTO memory_events (memory_id, owner_id, event_type, reason_json)
+                        VALUES (%s, %s, 'updated', %s::jsonb);
+                        """,
+                        (memory_id, owner_id, Json({"request_id": request_id, "source": "promote"})),
+                    )
+                    events_appended.append("updated")
+                else:
+                    row = existing_row
+
+                if reinforce:
+                    await cur.execute(
+                        f"""
+                        UPDATE memory_items
+                        SET last_reinforced_at = now(),
+                            updated_at = now()
+                        WHERE id = %s AND owner_id = %s
+                        RETURNING {select_cols};
+                        """,
+                        (memory_id, owner_id),
+                    )
+                    row = await cur.fetchone()
+                    await cur.execute(
+                        """
+                        INSERT INTO memory_events (memory_id, owner_id, event_type, reason_json)
+                        VALUES (%s, %s, 'reinforced', %s::jsonb);
+                        """,
+                        (memory_id, owner_id, Json({"request_id": request_id, "source": "promote"})),
+                    )
+                    events_appended.append("reinforced")
+
+                return {
+                    "memory": self._memory_item_from_row(row),
+                    "created": False,
+                    "updated": changed,
+                    "reinforced": reinforce,
+                    "superseded": False,
+                    "events_appended": events_appended,
+                }
+
+    async def reinforce_memory_item(
+        self,
+        *,
+        memory_id: UUID,
+        owner_id: str,
+        scores_json: dict[str, Any],
+        reason_json: dict[str, Any],
+        request_id: str,
+    ) -> dict[str, Any] | None:
+        select_cols = """
+            id, owner_id, memory_type, summary, source_refs_json, source_ref_hash,
+            scores_json, promotion_state, status, supersedes_memory_id,
+            superseded_by_memory_id, last_reinforced_at, expires_at,
+            derivation_version, confidence, explanation_json, generation_trace_id,
+            created_at, updated_at
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"SELECT {select_cols} FROM memory_items WHERE id = %s AND owner_id = %s FOR UPDATE;",
+                    (memory_id, owner_id),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    return None
+                existing = self._memory_item_from_row(row)
+                merged_scores = {**(existing.get("scores_json") or {}), **scores_json}
+                await cur.execute(
+                    f"""
+                    UPDATE memory_items
+                    SET scores_json = %s::jsonb,
+                        last_reinforced_at = now(),
+                        updated_at = now()
+                    WHERE id = %s AND owner_id = %s
+                    RETURNING {select_cols};
+                    """,
+                    (Json(merged_scores), memory_id, owner_id),
+                )
+                updated_row = await cur.fetchone()
+                await cur.execute(
+                    """
+                    INSERT INTO memory_events (memory_id, owner_id, event_type, reason_json)
+                    VALUES (%s, %s, 'reinforced', %s::jsonb);
+                    """,
+                    (memory_id, owner_id, Json({**reason_json, "request_id": request_id})),
+                )
+        return self._memory_item_from_row(updated_row)
+
+    async def get_memory_debug(self, memory_id: UUID) -> dict[str, Any] | None:
+        select_cols = """
+            id, owner_id, memory_type, summary, source_refs_json, source_ref_hash,
+            scores_json, promotion_state, status, supersedes_memory_id,
+            superseded_by_memory_id, last_reinforced_at, expires_at,
+            derivation_version, confidence, explanation_json, generation_trace_id,
+            created_at, updated_at
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(f"SELECT {select_cols} FROM memory_items WHERE id = %s;", (memory_id,))
+                row = await cur.fetchone()
+                if row is None:
+                    return None
+                await cur.execute(
+                    """
+                    SELECT id, memory_id, owner_id, event_type, reason_json, created_at
+                    FROM memory_events
+                    WHERE memory_id = %s
+                    ORDER BY created_at ASC, id ASC;
+                    """,
+                    (memory_id,),
+                )
+                event_rows = await cur.fetchall()
+        return {
+            "memory": self._memory_item_from_row(row),
+            "events": [self._memory_event_from_row(event_row) for event_row in event_rows],
+        }
+
     async def create_trace(self, trace: dict[str, Any]) -> UUID:
         q = """
         INSERT INTO traces (

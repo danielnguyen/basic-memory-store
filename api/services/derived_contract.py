@@ -67,3 +67,19 @@ def proactive_suggestion_contract_view(row: dict[str, Any]) -> dict[str, Any]:
         "explanation": explanation.get("rationale") or explanation.get("explanation"),
         "generation_trace_id": explanation.get("generation_trace_id"),
     }
+
+def memory_item_contract_view(row: dict[str, Any]) -> dict[str, Any]:
+    explanation = row.get("explanation_json") if isinstance(row.get("explanation_json"), dict) else {}
+    return {
+        "derived_id": _required_existing_id(row, "memory_id", "id"),
+        "owner_id": row.get("owner_id"),
+        "derivation_type": row.get("memory_type") or "memory_item",
+        "source_refs": row.get("source_refs_json") or [],
+        "derivation_version": row.get("derivation_version") or DEFAULT_DERIVATION_VERSION,
+        "created_at": row.get("created_at"),
+        "status": row.get("status") or ACTIVE_STATUS,
+        "confidence": row.get("confidence"),
+        "explanation": explanation.get("rationale") or explanation.get("explanation"),
+        "expires_at": row.get("expires_at"),
+        "generation_trace_id": row.get("generation_trace_id"),
+    }

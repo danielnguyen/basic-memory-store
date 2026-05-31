@@ -22,6 +22,7 @@ from prompts.context import assemble_messages, build_artifact_context_block, bui
 from services.ingestion import ingest_files
 from services.retrieval import build_retrieval_bundle
 from services.proactive import evaluate_event as evaluate_proactive_event
+from services.memory_items import normalize_scores, normalize_source_refs, shape_memory_event, shape_memory_item, source_ref_hash
 
 from models import (
     ArtifactCompleteRequest,
@@ -52,6 +53,12 @@ from models import (
     ProactiveSuggestionListResponse,
     MessageCreateRequest,
     MessageCreateResponse,
+    MemoryDebugResponse,
+    MemoryEventItem,
+    MemoryItemResponse,
+    MemoryPromoteRequest,
+    MemoryPromoteResponse,
+    MemoryReinforceRequest,
     RetrieveRequest,
     RetrieveResponse,
     RetrieveHit,
@@ -1483,6 +1490,99 @@ async def evaluate_proactive(body: ProactiveEvaluateRequest, request: Request):
         event_log_id=body.event_log_id,
         created_count=len(suggestions),
         suggestions=[ProactiveSuggestionItem(**row) for row in suggestions],
+    )
+
+
+
+@app.post(
+    "/v1/internal/memory/promote",
+    response_model=MemoryPromoteResponse,
+    tags=["memory-internal"],
+    summary="Manually promote or update one derived memory item",
+)
+async def promote_memory(body: MemoryPromoteRequest, request: Request):
+    request_id = _require_matching_request_id(request, body.request_id)
+    raw_source_refs = [ref.model_dump(exclude_none=True) for ref in body.source_refs]
+    normalized_refs = normalize_source_refs(raw_source_refs)
+    supersedes_memory_id = None
+    if body.supersedes_memory_id is not None:
+        try:
+            supersedes_memory_id = UUID(body.supersedes_memory_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="supersedes_memory_id must be a UUID")
+
+    try:
+        result = await pg.promote_memory_item(
+            owner_id=body.owner_id,
+            memory_type=body.memory_type,
+            summary=body.summary,
+            source_refs_json=normalized_refs,
+            source_ref_hash=source_ref_hash(normalized_refs),
+            scores_json=normalize_scores(body.scores),
+            promotion_state="promoted",
+            confidence=body.confidence,
+            explanation_json=body.explanation,
+            generation_trace_id=body.generation_trace_id,
+            expires_at=body.expires_at.isoformat() if body.expires_at else None,
+            request_id=request_id,
+            reinforce=body.reinforce,
+            supersedes_memory_id=supersedes_memory_id,
+        )
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    return MemoryPromoteResponse(
+        request_id=request_id,
+        memory=MemoryItemResponse(**shape_memory_item(result["memory"])),
+        created=result["created"],
+        updated=result["updated"],
+        reinforced=result["reinforced"],
+        superseded=result["superseded"],
+        events_appended=result["events_appended"],
+    )
+
+
+@app.post(
+    "/v1/internal/memory/{memory_id}/reinforce",
+    response_model=MemoryItemResponse,
+    tags=["memory-internal"],
+    summary="Manually reinforce one derived memory item",
+)
+async def reinforce_memory(memory_id: str, body: MemoryReinforceRequest, request: Request):
+    request_id = _require_matching_request_id(request, body.request_id)
+    try:
+        mid = UUID(memory_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="memory_id must be a UUID")
+    row = await pg.reinforce_memory_item(
+        memory_id=mid,
+        owner_id=body.owner_id,
+        scores_json=normalize_scores(body.scores),
+        reason_json=body.reason,
+        request_id=request_id,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="memory not found")
+    return MemoryItemResponse(**shape_memory_item(row))
+
+
+@app.get(
+    "/v1/internal/memory/{memory_id}/debug",
+    response_model=MemoryDebugResponse,
+    tags=["memory-internal"],
+    summary="Inspect one derived memory item and its audit events",
+)
+async def debug_memory(memory_id: str):
+    try:
+        mid = UUID(memory_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="memory_id must be a UUID")
+    debug = await pg.get_memory_debug(mid)
+    if debug is None:
+        raise HTTPException(status_code=404, detail="memory not found")
+    return MemoryDebugResponse(
+        memory=MemoryItemResponse(**shape_memory_item(debug["memory"])),
+        events=[MemoryEventItem(**shape_memory_event(event)) for event in debug["events"]],
     )
 
 
