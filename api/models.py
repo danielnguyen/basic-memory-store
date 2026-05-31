@@ -412,6 +412,86 @@ class ProactiveEvaluateResponse(BaseModel):
     suggestions: List[ProactiveSuggestionItem] = Field(default_factory=list)
 
 
+# ---- Initiative (Cluster 10A / R23 MVP) ----
+
+InitiativeDecisionStatus = Literal["created", "suppressed", "no_op"]
+
+
+class InitiativeDecisionItem(BaseModel):
+    decision_id: str
+    initiative_event_id: str
+    owner_id: str
+    proactive_suggestion_id: Optional[str] = None
+    decision_status: InitiativeDecisionStatus
+    score: Optional[float] = None
+    reason_json: Dict[str, Any] = Field(default_factory=dict)
+    delivery_surface: Optional[str] = None
+    delivery_status: DeliveryStatus
+    suppression_reason: Optional[str] = None
+    cooldown_identity_key: Optional[str] = None
+    normalized_subject: Optional[str] = None
+    cooldown_until: Optional[str] = None
+    created_at: str
+
+
+class InitiativeEventItem(BaseModel):
+    initiative_event_id: str
+    owner_id: str
+    request_id: str
+    source_event_log_id: Optional[str] = None
+    trigger_type: str
+    trigger_ref_json: Dict[str, Any] = Field(default_factory=dict)
+    payload_json: Dict[str, Any] = Field(default_factory=dict)
+    created_at: str
+
+
+class InitiativeEvaluateRequest(BaseModel):
+    request_id: str
+    owner_id: str
+    event_log_id: str
+    surface: Optional[str] = None
+
+
+class InitiativeEvaluateResponse(BaseModel):
+    request_id: str
+    owner_id: str
+    event_log_id: str
+    initiative_event: Optional[InitiativeEventItem] = None
+    decisions: List[InitiativeDecisionItem] = Field(default_factory=list)
+    suggestions: List[ProactiveSuggestionItem] = Field(default_factory=list)
+    created_count: int
+
+
+class InitiativeFeedbackRequest(BaseModel):
+    owner_id: str
+    decision_id: str
+    feedback_type: FeedbackType
+    feedback_json: Dict[str, Any] = Field(default_factory=dict)
+
+
+class InitiativeFeedbackResponse(BaseModel):
+    feedback_id: str
+    decision_id: str
+    proactive_feedback_id: Optional[str] = None
+    owner_id: str
+    feedback_type: FeedbackType
+    feedback_json: Dict[str, Any] = Field(default_factory=dict)
+    created_at: str
+
+
+class InitiativeDetailResponse(BaseModel):
+    initiative_event: InitiativeEventItem
+    decisions: List[InitiativeDecisionItem] = Field(default_factory=list)
+
+
+class InitiativeDebugResponse(BaseModel):
+    request_id: str
+    initiative_event: Optional[InitiativeEventItem] = None
+    decisions: List[InitiativeDecisionItem] = Field(default_factory=list)
+    suggestions: List[ProactiveSuggestionItem] = Field(default_factory=list)
+    feedback: List[InitiativeFeedbackResponse] = Field(default_factory=list)
+
+
 # ---- Hygiene / Graph MVP ----
 
 class HygieneScanRequest(BaseModel):

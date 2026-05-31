@@ -728,6 +728,331 @@ class PostgresStore:
             "updated_at": str(row[8]),
         }
 
+    async def create_initiative_event(
+        self,
+        *,
+        owner_id: str,
+        request_id: str,
+        source_event_log_id: UUID | None,
+        trigger_type: str,
+        trigger_ref_json: dict[str, Any],
+        payload_json: dict[str, Any],
+    ) -> dict[str, Any]:
+        q = """
+        INSERT INTO initiative_events (
+            owner_id, request_id, source_event_log_id, trigger_type, trigger_ref_json, payload_json
+        )
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (owner_id, request_id) DO UPDATE
+            SET source_event_log_id = EXCLUDED.source_event_log_id,
+                trigger_type = EXCLUDED.trigger_type,
+                trigger_ref_json = EXCLUDED.trigger_ref_json,
+                payload_json = EXCLUDED.payload_json
+        RETURNING id, owner_id, request_id, source_event_log_id, trigger_type,
+                  trigger_ref_json, payload_json, created_at;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    q,
+                    (
+                        owner_id,
+                        request_id,
+                        source_event_log_id,
+                        trigger_type,
+                        Json(trigger_ref_json),
+                        Json(payload_json),
+                    ),
+                )
+                row = await cur.fetchone()
+        return {
+            "initiative_event_id": str(row[0]),
+            "owner_id": row[1],
+            "request_id": row[2],
+            "source_event_log_id": str(row[3]) if row[3] else None,
+            "trigger_type": row[4],
+            "trigger_ref_json": row[5] or {},
+            "payload_json": row[6] or {},
+            "created_at": str(row[7]),
+        }
+
+    async def create_initiative_decision(
+        self,
+        *,
+        initiative_event_id: UUID,
+        owner_id: str,
+        proactive_suggestion_id: UUID | None,
+        decision_status: str,
+        score: float | None,
+        reason_json: dict[str, Any],
+        delivery_surface: str | None,
+        delivery_status: str,
+        suppression_reason: str | None,
+        cooldown_identity_key: str | None,
+        normalized_subject: str | None,
+        cooldown_until: str | None,
+    ) -> dict[str, Any]:
+        q = """
+        INSERT INTO initiative_decisions (
+            initiative_event_id, owner_id, proactive_suggestion_id, decision_status, score,
+            reason_json, delivery_surface, delivery_status, suppression_reason,
+            cooldown_identity_key, normalized_subject, cooldown_until
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id, initiative_event_id, owner_id, proactive_suggestion_id, decision_status,
+                  score, reason_json, delivery_surface, delivery_status, suppression_reason,
+                  cooldown_identity_key, normalized_subject, cooldown_until, created_at;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    q,
+                    (
+                        initiative_event_id,
+                        owner_id,
+                        proactive_suggestion_id,
+                        decision_status,
+                        score,
+                        Json(reason_json),
+                        delivery_surface,
+                        delivery_status,
+                        suppression_reason,
+                        cooldown_identity_key,
+                        normalized_subject,
+                        cooldown_until,
+                    ),
+                )
+                row = await cur.fetchone()
+        return self._initiative_decision_from_row(row)
+
+    def _initiative_decision_from_row(self, row: Any) -> dict[str, Any]:
+        return {
+            "decision_id": str(row[0]),
+            "initiative_event_id": str(row[1]),
+            "owner_id": row[2],
+            "proactive_suggestion_id": str(row[3]) if row[3] else None,
+            "decision_status": row[4],
+            "score": float(row[5]) if row[5] is not None else None,
+            "reason_json": row[6] or {},
+            "delivery_surface": row[7],
+            "delivery_status": row[8],
+            "suppression_reason": row[9],
+            "cooldown_identity_key": row[10],
+            "normalized_subject": row[11],
+            "cooldown_until": str(row[12]) if row[12] else None,
+            "created_at": str(row[13]),
+        }
+
+    async def get_initiative_event(self, initiative_event_id: UUID) -> dict[str, Any] | None:
+        q = """
+        SELECT id, owner_id, request_id, source_event_log_id, trigger_type,
+               trigger_ref_json, payload_json, created_at
+        FROM initiative_events
+        WHERE id = %s
+        LIMIT 1;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (initiative_event_id,))
+                row = await cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "initiative_event_id": str(row[0]),
+            "owner_id": row[1],
+            "request_id": row[2],
+            "source_event_log_id": str(row[3]) if row[3] else None,
+            "trigger_type": row[4],
+            "trigger_ref_json": row[5] or {},
+            "payload_json": row[6] or {},
+            "created_at": str(row[7]),
+        }
+
+    async def get_initiative_event_by_request_id(self, request_id: str) -> dict[str, Any] | None:
+        q = """
+        SELECT id, owner_id, request_id, source_event_log_id, trigger_type,
+               trigger_ref_json, payload_json, created_at
+        FROM initiative_events
+        WHERE request_id = %s
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (request_id,))
+                row = await cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "initiative_event_id": str(row[0]),
+            "owner_id": row[1],
+            "request_id": row[2],
+            "source_event_log_id": str(row[3]) if row[3] else None,
+            "trigger_type": row[4],
+            "trigger_ref_json": row[5] or {},
+            "payload_json": row[6] or {},
+            "created_at": str(row[7]),
+        }
+
+    async def list_initiative_decisions(self, initiative_event_id: UUID) -> list[dict[str, Any]]:
+        q = """
+        SELECT id, initiative_event_id, owner_id, proactive_suggestion_id, decision_status,
+               score, reason_json, delivery_surface, delivery_status, suppression_reason,
+               cooldown_identity_key, normalized_subject, cooldown_until, created_at
+        FROM initiative_decisions
+        WHERE initiative_event_id = %s
+        ORDER BY created_at DESC, id DESC;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (initiative_event_id,))
+                rows = await cur.fetchall()
+        return [self._initiative_decision_from_row(row) for row in rows]
+
+    async def get_initiative_decision(self, decision_id: UUID) -> dict[str, Any] | None:
+        q = """
+        SELECT id, initiative_event_id, owner_id, proactive_suggestion_id, decision_status,
+               score, reason_json, delivery_surface, delivery_status, suppression_reason,
+               cooldown_identity_key, normalized_subject, cooldown_until, created_at
+        FROM initiative_decisions
+        WHERE id = %s
+        LIMIT 1;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (decision_id,))
+                row = await cur.fetchone()
+        if row is None:
+            return None
+        return self._initiative_decision_from_row(row)
+
+    async def get_recent_initiative_cooldown(
+        self,
+        *,
+        owner_id: str,
+        cooldown_identity_key: str,
+        cooldown_hours: float,
+    ) -> dict[str, Any] | None:
+        q = """
+        SELECT id, initiative_event_id, owner_id, proactive_suggestion_id, decision_status,
+               score, reason_json, delivery_surface, delivery_status, suppression_reason,
+               cooldown_identity_key, normalized_subject,
+               COALESCE(cooldown_until, created_at + (%s * interval '1 hour')) AS cooldown_until,
+               created_at
+        FROM initiative_decisions
+        WHERE owner_id = %s
+          AND cooldown_identity_key = %s
+          AND decision_status = 'created'
+          AND created_at > now() - (%s * interval '1 hour')
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (cooldown_hours, owner_id, cooldown_identity_key, cooldown_hours))
+                row = await cur.fetchone()
+        if row is None:
+            return None
+        return self._initiative_decision_from_row(row)
+
+    async def get_recent_negative_initiative_feedback(
+        self,
+        *,
+        owner_id: str,
+        cooldown_identity_key: str,
+        lookback_days: float,
+    ) -> dict[str, Any] | None:
+        q = """
+        SELECT f.id, f.decision_id, f.proactive_feedback_id, f.owner_id,
+               f.feedback_type, f.feedback_json, f.created_at
+        FROM initiative_feedback f
+        JOIN initiative_decisions d ON d.id = f.decision_id
+        WHERE f.owner_id = %s
+          AND d.cooldown_identity_key = %s
+          AND f.feedback_type IN ('dismissed', 'not_useful')
+          AND f.created_at > now() - (%s * interval '1 day')
+        ORDER BY f.created_at DESC, f.id DESC
+        LIMIT 1;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (owner_id, cooldown_identity_key, lookback_days))
+                row = await cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "feedback_id": str(row[0]),
+            "decision_id": str(row[1]),
+            "proactive_feedback_id": str(row[2]) if row[2] else None,
+            "owner_id": row[3],
+            "feedback_type": row[4],
+            "feedback_json": row[5] or {},
+            "created_at": str(row[6]),
+        }
+
+    async def record_initiative_feedback(
+        self,
+        *,
+        decision_id: UUID,
+        proactive_feedback_id: UUID | None,
+        owner_id: str,
+        feedback_type: str,
+        feedback_json: dict[str, Any],
+    ) -> dict[str, Any]:
+        q = """
+        INSERT INTO initiative_feedback (
+            decision_id, proactive_feedback_id, owner_id, feedback_type, feedback_json
+        )
+        VALUES (%s, %s, %s, %s, %s)
+        RETURNING id, decision_id, proactive_feedback_id, owner_id,
+                  feedback_type, feedback_json, created_at;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    q,
+                    (decision_id, proactive_feedback_id, owner_id, feedback_type, Json(feedback_json)),
+                )
+                row = await cur.fetchone()
+        return {
+            "feedback_id": str(row[0]),
+            "decision_id": str(row[1]),
+            "proactive_feedback_id": str(row[2]) if row[2] else None,
+            "owner_id": row[3],
+            "feedback_type": row[4],
+            "feedback_json": row[5] or {},
+            "created_at": str(row[6]),
+        }
+
+    async def list_initiative_feedback_for_event(
+        self,
+        initiative_event_id: UUID,
+    ) -> list[dict[str, Any]]:
+        q = """
+        SELECT f.id, f.decision_id, f.proactive_feedback_id, f.owner_id,
+               f.feedback_type, f.feedback_json, f.created_at
+        FROM initiative_feedback f
+        JOIN initiative_decisions d ON d.id = f.decision_id
+        WHERE d.initiative_event_id = %s
+        ORDER BY f.created_at DESC, f.id DESC;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (initiative_event_id,))
+                rows = await cur.fetchall()
+        return [
+            {
+                "feedback_id": str(row[0]),
+                "decision_id": str(row[1]),
+                "proactive_feedback_id": str(row[2]) if row[2] else None,
+                "owner_id": row[3],
+                "feedback_type": row[4],
+                "feedback_json": row[5] or {},
+                "created_at": str(row[6]),
+            }
+            for row in rows
+        ]
+
     async def upsert_memory_entity(
         self,
         *,

@@ -21,7 +21,7 @@ from storage.object_store import ObjectStoreClient
 from prompts.context import assemble_messages, build_artifact_context_block, build_context_block
 from services.ingestion import ingest_files
 from services.retrieval import build_retrieval_bundle
-from services.proactive import evaluate_event as evaluate_proactive_event
+from services.proactive import evaluate_event as evaluate_initiative_event
 from services.memory_items import normalize_scores, normalize_source_refs, shape_memory_event, shape_memory_item, source_ref_hash
 from services.episodes import DEFAULT_DERIVATION_VERSION as EPISODE_DERIVATION_VERSION, episode_key, normalize_json_list, normalize_json_map, normalize_source_refs as normalize_episode_source_refs, shape_episode, shape_episode_event, shape_episode_link, source_ref_hash as episode_source_ref_hash
 from services.recall import select_recall_decision, shape_recall_decision
@@ -43,6 +43,12 @@ from models import (
     ConversationResolveResponse,
     EventIngestRequest,
     EventIngestResponse,
+    InitiativeDebugResponse,
+    InitiativeDetailResponse,
+    InitiativeEvaluateRequest,
+    InitiativeEvaluateResponse,
+    InitiativeFeedbackRequest,
+    InitiativeFeedbackResponse,
     ProactiveDeliveryAttemptRequest,
     ProactiveDeliveryAttemptResponse,
     ProactiveEvaluateRequest,
@@ -1473,6 +1479,131 @@ async def record_proactive_delivery_attempt(suggestion_id: str, body: ProactiveD
 
 
 @app.post(
+    "/v1/initiative/evaluate",
+    response_model=InitiativeEvaluateResponse,
+    tags=["initiative"],
+    dependencies=[Depends(require_api_key)],
+    summary="Evaluate one ingested event against initiative scoring and delivery policy",
+)
+async def evaluate_initiative(body: InitiativeEvaluateRequest, request: Request):
+    _require_matching_request_id(request, body.request_id)
+    try:
+        event_log_id = UUID(body.event_log_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="event_log_id must be a UUID")
+
+    result = await evaluate_initiative_event(
+        pg=pg,
+        qdrant=qdrant,
+        settings=settings,
+        request_id=body.request_id,
+        owner_id=body.owner_id,
+        event_log_id=event_log_id,
+        surface=body.surface,
+    )
+    logging.info(
+        "initiative_evaluate_completed",
+        extra={
+            "owner_id": body.owner_id,
+            "event_log_id": body.event_log_id,
+            "created_count": result["created_count"],
+        },
+    )
+    return InitiativeEvaluateResponse(**result)
+
+
+@app.post(
+    "/v1/initiative/feedback",
+    response_model=InitiativeFeedbackResponse,
+    tags=["initiative"],
+    dependencies=[Depends(require_api_key)],
+    summary="Record feedback for one initiative decision",
+)
+async def record_initiative_feedback(body: InitiativeFeedbackRequest):
+    try:
+        decision_id = UUID(body.decision_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="decision_id must be a UUID")
+
+    decision = await pg.get_initiative_decision(decision_id)
+    if decision is None or decision["owner_id"] != body.owner_id:
+        raise HTTPException(status_code=404, detail="initiative decision not found")
+
+    proactive_feedback_id = None
+    proactive_suggestion_id = decision.get("proactive_suggestion_id")
+    if proactive_suggestion_id:
+        reason = body.feedback_json.get("reason") if isinstance(body.feedback_json, dict) else None
+        proactive_feedback = await pg.record_proactive_feedback(
+            suggestion_id=UUID(proactive_suggestion_id),
+            owner_id=body.owner_id,
+            feedback_type=body.feedback_type,
+            reason=reason,
+        )
+        proactive_feedback_id = proactive_feedback["feedback_id"]
+
+    row = await pg.record_initiative_feedback(
+        decision_id=decision_id,
+        proactive_feedback_id=UUID(proactive_feedback_id) if proactive_feedback_id else None,
+        owner_id=body.owner_id,
+        feedback_type=body.feedback_type,
+        feedback_json=body.feedback_json,
+    )
+    logging.info(
+        "initiative_feedback_recorded",
+        extra={"owner_id": body.owner_id, "decision_id": body.decision_id, "feedback_type": body.feedback_type},
+    )
+    return InitiativeFeedbackResponse(**row)
+
+
+@app.get(
+    "/v1/initiative/debug/{request_id}",
+    response_model=InitiativeDebugResponse,
+    tags=["initiative"],
+    dependencies=[Depends(require_api_key)],
+    summary="Get initiative debug and explainability details by request id",
+)
+async def get_initiative_debug(request_id: str):
+    event = await pg.get_initiative_event_by_request_id(request_id)
+    if event is None:
+        return InitiativeDebugResponse(request_id=request_id)
+    decisions = await pg.list_initiative_decisions(UUID(event["initiative_event_id"]))
+    suggestions = []
+    for decision in decisions:
+        proactive_suggestion_id = decision.get("proactive_suggestion_id")
+        if proactive_suggestion_id:
+            suggestion = await pg.get_proactive_suggestion(UUID(proactive_suggestion_id))
+            if suggestion is not None:
+                suggestions.append(ProactiveSuggestionItem(**suggestion))
+    feedback = await pg.list_initiative_feedback_for_event(UUID(event["initiative_event_id"]))
+    return InitiativeDebugResponse(
+        request_id=request_id,
+        initiative_event=event,
+        decisions=decisions,
+        suggestions=suggestions,
+        feedback=feedback,
+    )
+
+
+@app.get(
+    "/v1/initiative/{initiative_event_id}",
+    response_model=InitiativeDetailResponse,
+    tags=["initiative"],
+    dependencies=[Depends(require_api_key)],
+    summary="Get one initiative event and its decisions",
+)
+async def get_initiative(initiative_event_id: str):
+    try:
+        iid = UUID(initiative_event_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="initiative_event_id must be a UUID")
+    event = await pg.get_initiative_event(iid)
+    if event is None:
+        raise HTTPException(status_code=404, detail="initiative event not found")
+    decisions = await pg.list_initiative_decisions(iid)
+    return InitiativeDetailResponse(initiative_event=event, decisions=decisions)
+
+
+@app.post(
     "/v1/internal/proactive/evaluate",
     response_model=ProactiveEvaluateResponse,
     tags=["proactive"],
@@ -1486,14 +1617,16 @@ async def evaluate_proactive(body: ProactiveEvaluateRequest, request: Request):
     except ValueError:
         raise HTTPException(status_code=400, detail="event_log_id must be a UUID")
 
-    suggestions = await evaluate_proactive_event(
+    result = await evaluate_initiative_event(
         pg=pg,
         qdrant=qdrant,
         settings=settings,
+        request_id=body.request_id,
         owner_id=body.owner_id,
         event_log_id=event_log_id,
         surface=body.surface,
     )
+    suggestions = result["suggestions"]
     logging.info("proactive_evaluate_completed", extra={"owner_id": body.owner_id, "event_log_id": body.event_log_id, "created_count": len(suggestions)})
     return ProactiveEvaluateResponse(
         request_id=body.request_id,
