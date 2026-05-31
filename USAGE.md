@@ -39,7 +39,8 @@ Use Basic Memory Store direct chat endpoints only for legacy compatibility, smok
 - **Clients are stateless.**
 - **Basic Memory Store owns memory state**: conversations, messages, retrieval scope, artifacts, traces, and proactive suggestion state.
 - Clients decide *when* to widen memory scope.
-- The server enforces *how* memory is retrieved and applied.
+- Basic Memory Store enforces retrieval semantics.
+- chat-orchestrator decides how retrieved context is applied to normal chat turns.
 
 ---
 
