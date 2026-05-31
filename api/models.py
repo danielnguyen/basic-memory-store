@@ -662,6 +662,81 @@ class EpisodeDebugResponse(BaseModel):
     events: List[EpisodeEventItem] = Field(default_factory=list)
 
 
+# ---- Cluster 9C / R22 recall selection ----
+
+RecallCandidateType = Literal["memory_item", "episode", "message", "artifact", "event", "derived_text"]
+RecallDecisionValue = Literal["mention", "suppress", "implicit_only"]
+RecallMentionStrategy = Literal["none", "implicit", "light_callback", "explicit_callback"]
+
+
+class RecallSourceRef(BaseModel):
+    ref_type: str = Field(..., min_length=1, max_length=64)
+    ref_id: str = Field(..., min_length=1, max_length=160)
+    support_kind: str = Field(default="direct", min_length=1, max_length=64)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class RecallContext(BaseModel):
+    scene_id: Optional[str] = Field(default=None, max_length=160)
+    surface: Optional[str] = Field(default=None, max_length=80)
+    urgency: Optional[str] = Field(default=None, max_length=80)
+    sensitivity: Optional[str] = Field(default=None, max_length=80)
+
+
+class RecallCandidate(BaseModel):
+    candidate_id: str = Field(..., min_length=1, max_length=160)
+    candidate_type: RecallCandidateType
+    title: Optional[str] = Field(default=None, max_length=400)
+    summary: Optional[str] = Field(default=None, max_length=4000)
+    source_refs: List[RecallSourceRef] = Field(default_factory=list, max_length=50)
+    relevance_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    salience_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    recency_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class RecallSelectRequest(BaseModel):
+    request_id: str = Field(..., min_length=1, max_length=160)
+    owner_id: str = Field(..., min_length=1, max_length=160)
+    context: RecallContext = Field(default_factory=RecallContext)
+    candidates: List[RecallCandidate] = Field(..., min_length=1, max_length=100)
+
+
+class RecallDecisionItem(BaseModel):
+    id: str
+    request_id: str
+    owner_id: str
+    candidate_id: str
+    candidate_type: RecallCandidateType
+    candidate_ref: Dict[str, Any] = Field(default_factory=dict)
+    source_refs: List[Dict[str, Any]] = Field(default_factory=list)
+    context: Dict[str, Any] = Field(default_factory=dict)
+    relevance_score: Optional[float] = None
+    salience_score: Optional[float] = None
+    recency_score: Optional[float] = None
+    mentionability_score: float
+    decision: RecallDecisionValue
+    mention_strategy: RecallMentionStrategy
+    prompt_eligible: bool
+    reason: Dict[str, Any] = Field(default_factory=dict)
+    created_at: str
+
+
+class RecallSelectResponse(BaseModel):
+    request_id: str
+    owner_id: str
+    decision_count: int
+    decisions: List[RecallDecisionItem] = Field(default_factory=list)
+
+
+class RecallDebugResponse(BaseModel):
+    request_id: str
+    owner_id: str
+    context: Dict[str, Any] = Field(default_factory=dict)
+    decision_count: int
+    decisions: List[RecallDecisionItem] = Field(default_factory=list)
+
+
 # ---- Traces ----
 
 class TraceCreateRequest(BaseModel):

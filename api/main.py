@@ -24,6 +24,7 @@ from services.retrieval import build_retrieval_bundle
 from services.proactive import evaluate_event as evaluate_proactive_event
 from services.memory_items import normalize_scores, normalize_source_refs, shape_memory_event, shape_memory_item, source_ref_hash
 from services.episodes import DEFAULT_DERIVATION_VERSION as EPISODE_DERIVATION_VERSION, episode_key, normalize_json_list, normalize_json_map, normalize_source_refs as normalize_episode_source_refs, shape_episode, shape_episode_event, shape_episode_link, source_ref_hash as episode_source_ref_hash
+from services.recall import select_recall_decision, shape_recall_decision
 
 from models import (
     ArtifactCompleteRequest,
@@ -68,6 +69,10 @@ from models import (
     MemoryPromoteRequest,
     MemoryPromoteResponse,
     MemoryReinforceRequest,
+    RecallDebugResponse,
+    RecallDecisionItem,
+    RecallSelectRequest,
+    RecallSelectResponse,
     RetrieveRequest,
     RetrieveResponse,
     RetrieveHit,
@@ -79,9 +84,6 @@ from models import (
     RetrievalDebugHit,
     RetrieveBundleRequest,
     RetrieveBundleResponse,
-    RetrievalBundle,
-    RetrievalMessageItem,
-    ObservedMetadata,
     ArtifactRef,
     FileIngestionRequest,
     FileIngestionResponse,
@@ -1690,6 +1692,56 @@ async def debug_episode(episode_id: str):
         episode=EpisodeItemResponse(**shape_episode(debug["episode"])),
         links=[EpisodeLinkItem(**shape_episode_link(link)) for link in debug["links"]],
         events=[EpisodeEventItem(**shape_episode_event(event)) for event in debug["events"]],
+    )
+
+
+@app.post(
+    "/v1/internal/recall/select",
+    response_model=RecallSelectResponse,
+    tags=["recall-internal"],
+    summary="Deterministically select mentionability for explicitly supplied recall candidates",
+)
+async def select_recall(body: RecallSelectRequest, request: Request):
+    request_id = _require_matching_request_id(request, body.request_id)
+    context = body.context.model_dump(exclude_none=True)
+    decisions = [
+        select_recall_decision(
+            context=context,
+            candidate=candidate.model_dump(exclude_none=True),
+        )
+        for candidate in body.candidates
+    ]
+    rows = await pg.persist_recall_decisions(
+        request_id=request_id,
+        owner_id=body.owner_id,
+        decisions=decisions,
+    )
+    shaped = [RecallDecisionItem(**shape_recall_decision(row)) for row in rows]
+    return RecallSelectResponse(
+        request_id=request_id,
+        owner_id=body.owner_id,
+        decision_count=len(shaped),
+        decisions=shaped,
+    )
+
+
+@app.get(
+    "/v1/internal/recall/debug/{request_id}",
+    response_model=RecallDebugResponse,
+    tags=["recall-internal"],
+    summary="Inspect persisted recall selection decisions for one request",
+)
+async def debug_recall(request_id: str, owner_id: str):
+    rows = await pg.get_recall_debug(request_id=request_id, owner_id=owner_id)
+    if not rows:
+        raise HTTPException(status_code=404, detail="recall decisions not found")
+    shaped = [RecallDecisionItem(**shape_recall_decision(row)) for row in rows]
+    return RecallDebugResponse(
+        request_id=request_id,
+        owner_id=owner_id,
+        context=shaped[0].context,
+        decision_count=len(shaped),
+        decisions=shaped,
     )
 
 
