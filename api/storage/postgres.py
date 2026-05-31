@@ -2191,6 +2191,123 @@ class PostgresStore:
             "events": [self._episode_event_from_row(event_row) for event_row in event_rows],
         }
 
+    def _recall_decision_from_row(self, row: tuple[Any, ...]) -> dict[str, Any]:
+        return {
+            "id": str(row[0]),
+            "request_id": row[1],
+            "owner_id": row[2],
+            "candidate_id": row[3],
+            "candidate_type": row[4],
+            "candidate_ref_json": row[5] or {},
+            "source_refs_json": row[6] or [],
+            "scene_id": row[7],
+            "surface": row[8],
+            "urgency": row[9],
+            "sensitivity": row[10],
+            "relevance_score": row[11],
+            "salience_score": row[12],
+            "recency_score": row[13],
+            "mentionability_score": row[14],
+            "decision": row[15],
+            "mention_strategy": row[16],
+            "prompt_eligible": row[17],
+            "reason_json": row[18] or {},
+            "created_at": str(row[19]),
+        }
+
+    async def persist_recall_decisions(
+        self,
+        *,
+        request_id: str,
+        owner_id: str,
+        decisions: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        select_cols = """
+            id, request_id, owner_id, candidate_id, candidate_type,
+            candidate_ref_json, source_refs_json, scene_id, surface,
+            urgency, sensitivity, relevance_score, salience_score,
+            recency_score, mentionability_score, decision, mention_strategy,
+            prompt_eligible, reason_json, created_at
+        """
+        out: list[dict[str, Any]] = []
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                for item in decisions:
+                    await cur.execute(
+                        f"""
+                        INSERT INTO recall_decisions (
+                            request_id, owner_id, candidate_id, candidate_type,
+                            candidate_ref_json, source_refs_json, scene_id, surface,
+                            urgency, sensitivity, relevance_score, salience_score,
+                            recency_score, mentionability_score, decision,
+                            mention_strategy, prompt_eligible, reason_json
+                        ) VALUES (
+                            %s, %s, %s, %s,
+                            %s::jsonb, %s::jsonb, %s, %s,
+                            %s, %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s, %s::jsonb
+                        )
+                        ON CONFLICT (request_id, owner_id, candidate_type, candidate_id)
+                        DO UPDATE SET
+                            candidate_ref_json = EXCLUDED.candidate_ref_json,
+                            source_refs_json = EXCLUDED.source_refs_json,
+                            scene_id = EXCLUDED.scene_id,
+                            surface = EXCLUDED.surface,
+                            urgency = EXCLUDED.urgency,
+                            sensitivity = EXCLUDED.sensitivity,
+                            relevance_score = EXCLUDED.relevance_score,
+                            salience_score = EXCLUDED.salience_score,
+                            recency_score = EXCLUDED.recency_score,
+                            mentionability_score = EXCLUDED.mentionability_score,
+                            decision = EXCLUDED.decision,
+                            mention_strategy = EXCLUDED.mention_strategy,
+                            prompt_eligible = EXCLUDED.prompt_eligible,
+                            reason_json = EXCLUDED.reason_json
+                        RETURNING {select_cols};
+                        """,
+                        (
+                            request_id,
+                            owner_id,
+                            item["candidate_id"],
+                            item["candidate_type"],
+                            Json(item.get("candidate_ref_json") or {}),
+                            Json(item.get("source_refs_json") or []),
+                            item.get("scene_id"),
+                            item.get("surface"),
+                            item.get("urgency"),
+                            item.get("sensitivity"),
+                            item.get("relevance_score"),
+                            item.get("salience_score"),
+                            item.get("recency_score"),
+                            item["mentionability_score"],
+                            item["decision"],
+                            item["mention_strategy"],
+                            item["prompt_eligible"],
+                            Json(item.get("reason_json") or {}),
+                        ),
+                    )
+                    row = await cur.fetchone()
+                    out.append(self._recall_decision_from_row(row))
+        return out
+
+    async def get_recall_debug(self, *, request_id: str, owner_id: str) -> list[dict[str, Any]]:
+        q = """
+        SELECT id, request_id, owner_id, candidate_id, candidate_type,
+               candidate_ref_json, source_refs_json, scene_id, surface,
+               urgency, sensitivity, relevance_score, salience_score,
+               recency_score, mentionability_score, decision, mention_strategy,
+               prompt_eligible, reason_json, created_at
+        FROM recall_decisions
+        WHERE request_id = %s AND owner_id = %s
+        ORDER BY created_at ASC, id ASC;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (request_id, owner_id))
+                rows = await cur.fetchall()
+        return [self._recall_decision_from_row(row) for row in rows]
+
     async def create_trace(self, trace: dict[str, Any]) -> UUID:
         q = """
         INSERT INTO traces (
