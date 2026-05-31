@@ -463,6 +463,97 @@ class ProfileResolveResponse(BaseModel):
     tool_policy: Dict[str, Any]
 
 
+# ---- Cluster 9A / R20 memory promotion ----
+
+MemoryEventType = Literal[
+    "created",
+    "updated",
+    "reinforced",
+    "superseded",
+    "expired",
+    "promoted",
+    "suppressed",
+    "decayed",
+    "state_changed",
+]
+
+
+class MemorySourceRef(BaseModel):
+    ref_type: str = Field(..., min_length=1, max_length=64)
+    ref_id: str = Field(..., min_length=1, max_length=160)
+    support_kind: str = Field(default="direct", min_length=1, max_length=64)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class MemoryItemResponse(BaseModel):
+    memory_id: str
+    owner_id: str
+    memory_type: str
+    summary: str
+    source_refs: List[Dict[str, Any]] = Field(default_factory=list)
+    source_ref_hash: str
+    scores: Dict[str, Any] = Field(default_factory=dict)
+    promotion_state: str
+    status: str
+    supersedes_memory_id: Optional[str] = None
+    superseded_by_memory_id: Optional[str] = None
+    last_reinforced_at: Optional[str] = None
+    expires_at: Optional[str] = None
+    derivation_version: str
+    confidence: Optional[float] = None
+    explanation: Dict[str, Any] = Field(default_factory=dict)
+    generation_trace_id: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+class MemoryPromoteRequest(BaseModel):
+    request_id: str = Field(..., min_length=1, max_length=160)
+    owner_id: str = Field(..., min_length=1, max_length=160)
+    memory_type: str = Field(..., min_length=1, max_length=64)
+    summary: str = Field(..., min_length=1, max_length=4000)
+    source_refs: List[MemorySourceRef] = Field(..., min_length=1, max_length=50)
+    scores: Dict[str, Any] = Field(default_factory=dict)
+    promotion_state: Literal["candidate", "promoted", "suppressed", "decayed"] = "promoted"
+    confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    explanation: Dict[str, Any] = Field(default_factory=dict)
+    generation_trace_id: Optional[str] = Field(default=None, max_length=160)
+    expires_at: Optional[datetime] = None
+    reinforce: bool = False
+    supersedes_memory_id: Optional[str] = None
+
+
+class MemoryPromoteResponse(BaseModel):
+    request_id: str
+    memory: MemoryItemResponse
+    created: bool
+    updated: bool
+    reinforced: bool
+    superseded: bool
+    events_appended: List[MemoryEventType] = Field(default_factory=list)
+
+
+class MemoryReinforceRequest(BaseModel):
+    request_id: str = Field(..., min_length=1, max_length=160)
+    owner_id: str = Field(..., min_length=1, max_length=160)
+    scores: Dict[str, Any] = Field(default_factory=dict)
+    reason: Dict[str, Any] = Field(default_factory=dict)
+
+
+class MemoryEventItem(BaseModel):
+    event_id: str
+    memory_id: str
+    owner_id: str
+    event_type: MemoryEventType
+    reason: Dict[str, Any] = Field(default_factory=dict)
+    created_at: str
+
+
+class MemoryDebugResponse(BaseModel):
+    memory: MemoryItemResponse
+    events: List[MemoryEventItem] = Field(default_factory=list)
+
+
 # ---- Traces ----
 
 class TraceCreateRequest(BaseModel):
