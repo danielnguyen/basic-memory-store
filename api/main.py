@@ -23,6 +23,7 @@ from services.ingestion import ingest_files
 from services.retrieval import build_retrieval_bundle
 from services.proactive import evaluate_event as evaluate_proactive_event
 from services.memory_items import normalize_scores, normalize_source_refs, shape_memory_event, shape_memory_item, source_ref_hash
+from services.episodes import DEFAULT_DERIVATION_VERSION as EPISODE_DERIVATION_VERSION, episode_key, normalize_json_list, normalize_json_map, normalize_source_refs as normalize_episode_source_refs, shape_episode, shape_episode_event, shape_episode_link, source_ref_hash as episode_source_ref_hash
 
 from models import (
     ArtifactCompleteRequest,
@@ -53,6 +54,14 @@ from models import (
     ProactiveSuggestionListResponse,
     MessageCreateRequest,
     MessageCreateResponse,
+    EpisodeCreateRequest,
+    EpisodeCreateResponse,
+    EpisodeDebugResponse,
+    EpisodeEventItem,
+    EpisodeItemResponse,
+    EpisodeLinkItem,
+    EpisodeLinkRequest,
+    EpisodeLinkResponse,
     MemoryDebugResponse,
     MemoryEventItem,
     MemoryItemResponse,
@@ -1583,6 +1592,104 @@ async def debug_memory(memory_id: str):
     return MemoryDebugResponse(
         memory=MemoryItemResponse(**shape_memory_item(debug["memory"])),
         events=[MemoryEventItem(**shape_memory_event(event)) for event in debug["events"]],
+    )
+
+
+
+@app.post(
+    "/v1/internal/episodes",
+    response_model=EpisodeCreateResponse,
+    tags=["episodes-internal"],
+    summary="Manually create or update one derived episode",
+)
+async def create_episode(body: EpisodeCreateRequest, request: Request):
+    request_id = _require_matching_request_id(request, body.request_id)
+    raw_source_refs = [ref.model_dump(exclude_none=True) for ref in body.source_refs]
+    normalized_refs = normalize_episode_source_refs(raw_source_refs)
+    trigger = normalize_json_map(body.trigger)
+    time_window = normalize_json_map(body.time_window)
+    source_hash = episode_source_ref_hash(normalized_refs)
+    result = await pg.create_or_update_episode(
+        owner_id=body.owner_id,
+        title=body.title,
+        summary=body.summary,
+        episode_type=body.episode_type,
+        trigger_json=trigger,
+        outcome=body.outcome,
+        significance=body.significance,
+        unresolved_json=normalize_json_map(body.unresolved),
+        source_refs_json=normalized_refs,
+        source_ref_hash=source_hash,
+        episode_key=episode_key(
+            episode_type=body.episode_type,
+            source_ref_hash_value=source_hash,
+            trigger_json=trigger,
+            time_window_json=time_window,
+        ),
+        callback_candidates_json=normalize_json_list(body.callback_candidates),
+        time_window_json=time_window,
+        participants_json=normalize_json_list(body.participants),
+        confidence=body.confidence,
+        explanation_json=normalize_json_map(body.explanation),
+        generation_trace_id=body.generation_trace_id,
+        request_id=request_id,
+        derivation_version=EPISODE_DERIVATION_VERSION,
+    )
+    return EpisodeCreateResponse(
+        request_id=request_id,
+        episode=EpisodeItemResponse(**shape_episode(result["episode"])),
+        created=result["created"],
+        updated=result["updated"],
+    )
+
+
+@app.post(
+    "/v1/internal/episodes/{episode_id}/links",
+    response_model=EpisodeLinkResponse,
+    tags=["episodes-internal"],
+    summary="Manually create explicit episode links",
+)
+async def create_episode_links(episode_id: str, body: EpisodeLinkRequest, request: Request):
+    request_id = _require_matching_request_id(request, body.request_id)
+    try:
+        eid = UUID(episode_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="episode_id must be a UUID")
+    result = await pg.create_episode_links(
+        episode_id=eid,
+        owner_id=body.owner_id,
+        links=[link.model_dump() for link in body.links],
+        request_id=request_id,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="episode not found")
+    return EpisodeLinkResponse(
+        request_id=request_id,
+        episode_id=result["episode_id"],
+        created_count=result["created_count"],
+        existing_count=result["existing_count"],
+        links=[EpisodeLinkItem(**shape_episode_link(link)) for link in result["links"]],
+    )
+
+
+@app.get(
+    "/v1/internal/episodes/{episode_id}/debug",
+    response_model=EpisodeDebugResponse,
+    tags=["episodes-internal"],
+    summary="Inspect one derived episode, its links, and lifecycle events",
+)
+async def debug_episode(episode_id: str):
+    try:
+        eid = UUID(episode_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="episode_id must be a UUID")
+    debug = await pg.get_episode_debug(eid)
+    if debug is None:
+        raise HTTPException(status_code=404, detail="episode not found")
+    return EpisodeDebugResponse(
+        episode=EpisodeItemResponse(**shape_episode(debug["episode"])),
+        links=[EpisodeLinkItem(**shape_episode_link(link)) for link in debug["links"]],
+        events=[EpisodeEventItem(**shape_episode_event(event)) for event in debug["events"]],
     )
 
 
