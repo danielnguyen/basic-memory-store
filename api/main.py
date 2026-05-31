@@ -1562,8 +1562,8 @@ async def record_initiative_feedback(body: InitiativeFeedbackRequest):
     dependencies=[Depends(require_api_key)],
     summary="Get initiative debug and explainability details by request id",
 )
-async def get_initiative_debug(request_id: str):
-    event = await pg.get_initiative_event_by_request_id(request_id)
+async def get_initiative_debug(request_id: str, owner_id: str):
+    event = await pg.get_initiative_event_by_request_id(owner_id=owner_id, request_id=request_id)
     if event is None:
         return InitiativeDebugResponse(request_id=request_id)
     decisions = await pg.list_initiative_decisions(UUID(event["initiative_event_id"]))

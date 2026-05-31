@@ -236,6 +236,32 @@ async def evaluate_event(
         },
         payload_json=event_log.get("payload_json") or {},
     )
+    existing_decisions = await pg.list_initiative_decisions(UUID(initiative_event["initiative_event_id"]))
+    if existing_decisions:
+        suggestions = []
+        for decision in existing_decisions:
+            proactive_suggestion_id = decision.get("proactive_suggestion_id")
+            if proactive_suggestion_id:
+                suggestion = await pg.get_proactive_suggestion(UUID(proactive_suggestion_id))
+                if suggestion is not None:
+                    suggestions.append(suggestion)
+        logging.info(
+            "initiative_evaluate_replayed",
+            extra={
+                "owner_id": owner_id,
+                "event_log_id": str(event_log_id),
+                "request_id": request_id,
+                "decision_count": len(existing_decisions),
+            },
+        )
+        return _evaluation_response(
+            request_id,
+            owner_id,
+            event_log_id,
+            initiative_event,
+            existing_decisions,
+            suggestions,
+        )
 
     prefs = await pg.get_proactive_prefs(owner_id)
     if not prefs or not prefs.get("enabled"):

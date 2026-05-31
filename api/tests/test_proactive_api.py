@@ -204,9 +204,9 @@ class FakePG:
         row = self.initiative_events.get(str(initiative_event_id))
         return row.copy() if row else None
 
-    async def get_initiative_event_by_request_id(self, request_id):
+    async def get_initiative_event_by_request_id(self, *, owner_id, request_id):
         for row in reversed(list(self.initiative_events.values())):
-            if row["request_id"] == request_id:
+            if row["owner_id"] == owner_id and row["request_id"] == request_id:
                 return row.copy()
         return None
 
@@ -586,3 +586,56 @@ def test_feedback_remains_user_feedback_only(monkeypatch):
 def awaitable(coro):
     import asyncio
     return asyncio.run(coro)
+
+
+def test_legacy_proactive_retry_reuses_existing_request_decision(monkeypatch):
+    fake_pg = FakePG()
+    match_id = uuid.uuid4()
+    fake_pg.message_snippets[str(match_id)] = {
+        "message_id": str(match_id),
+        "conversation_id": str(uuid.uuid4()),
+        "role": "assistant",
+        "content": "We discussed auth regressions in this repo last month.",
+        "metadata": {},
+        "created_at": "2026-03-20T00:00:00+00:00",
+    }
+    fake_qdrant = FakeQdrant(search_hits=[types.SimpleNamespace(message_id=str(match_id), score=0.82)])
+    client, fake_pg, _ = _client(monkeypatch, fake_pg=fake_pg, fake_qdrant=fake_qdrant)
+    try:
+        client.put(
+            "/v1/proactive/preferences",
+            headers={"X-API-Key": "testkey"},
+            json={
+                "owner_id": "owner",
+                "enabled": True,
+                "allowed_surfaces_json": ["telegram"],
+                "rule_prefs_json": {"git": {"min_score": 0.3}},
+            },
+        )
+        event_log_id = str(uuid.uuid4())
+        fake_pg.event_logs[event_log_id] = {
+            "event_log_id": event_log_id,
+            "owner_id": "owner",
+            "source_type": "git",
+            "source_event_id": "git-retry",
+            "event_type": "push",
+            "payload_json": {"summary": "auth flow refactor", "repo": "basic-memory-store", "branch": "main"},
+            "conversation_id": str(uuid.uuid4()),
+            "message_id": str(uuid.uuid4()),
+        }
+        first = client.post(
+            "/v1/internal/proactive/evaluate",
+            headers=_headers("rid-legacy-retry"),
+            json={"request_id": "rid-legacy-retry", "owner_id": "owner", "event_log_id": event_log_id},
+        )
+        second = client.post(
+            "/v1/internal/proactive/evaluate",
+            headers=_headers("rid-legacy-retry"),
+            json={"request_id": "rid-legacy-retry", "owner_id": "owner", "event_log_id": event_log_id},
+        )
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert first.json() == second.json()
+        assert len(fake_pg.initiative_decisions) == 1
+    finally:
+        client.close()

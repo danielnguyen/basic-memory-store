@@ -171,6 +171,54 @@ def test_initiative_cooldown_suppresses_same_subject_only(monkeypatch):
         client.close()
 
 
+def test_initiative_evaluate_is_idempotent_for_same_request_id(monkeypatch):
+    fake_pg = FakePG()
+    match_id = uuid.uuid4()
+    fake_pg.message_snippets[str(match_id)] = {
+        "message_id": str(match_id),
+        "conversation_id": str(uuid.uuid4()),
+        "role": "assistant",
+        "content": "We discussed auth regressions in this repo last month.",
+        "metadata": {},
+        "created_at": "2026-03-20T00:00:00+00:00",
+    }
+    fake_qdrant = FakeQdrant(search_hits=[types.SimpleNamespace(message_id=str(match_id), score=0.82)])
+    client, fake_pg, _ = _client(monkeypatch, fake_pg=fake_pg, fake_qdrant=fake_qdrant)
+    try:
+        _enable(client, rule_prefs={"git": {"min_score": 0.3}})
+        event_log_id = _git_event(fake_pg)
+        first = client.post(
+            "/v1/initiative/evaluate",
+            headers=_headers("rid-idempotent"),
+            json={
+                "request_id": "rid-idempotent",
+                "owner_id": "owner",
+                "event_log_id": event_log_id,
+                "surface": "telegram",
+            },
+        )
+        second = client.post(
+            "/v1/initiative/evaluate",
+            headers=_headers("rid-idempotent"),
+            json={
+                "request_id": "rid-idempotent",
+                "owner_id": "owner",
+                "event_log_id": event_log_id,
+                "surface": "telegram",
+            },
+        )
+        assert first.status_code == 200
+        assert second.status_code == 200
+        first_body = first.json()
+        second_body = second.json()
+        assert first_body == second_body
+        assert second_body["created_count"] == 1
+        assert len(fake_pg.initiative_decisions) == 1
+        assert len(fake_pg.suggestions) == 1
+    finally:
+        client.close()
+
+
 def test_initiative_feedback_links_to_proactive_feedback_and_debug(monkeypatch):
     client, fake_pg, _ = _client(monkeypatch)
     try:
@@ -201,6 +249,7 @@ def test_initiative_feedback_links_to_proactive_feedback_and_debug(monkeypatch):
         debug = client.get(
             "/v1/initiative/debug/rid-feedback",
             headers={"X-API-Key": "testkey"},
+            params={"owner_id": "owner"},
         )
         assert debug.status_code == 200
         body = debug.json()
@@ -208,5 +257,53 @@ def test_initiative_feedback_links_to_proactive_feedback_and_debug(monkeypatch):
         assert body["decisions"][0]["decision_id"] == decision_id
         assert body["suggestions"][0]["suggestion_id"] == evaluated.json()["suggestions"][0]["suggestion_id"]
         assert body["feedback"][0]["feedback_type"] == "not_useful"
+    finally:
+        client.close()
+
+
+def test_initiative_debug_is_owner_scoped(monkeypatch):
+    client, fake_pg, _ = _client(monkeypatch)
+    try:
+        _enable(client)
+        owner_event_id = _portfolio_event(fake_pg, owner_id="owner", drift=0.09)
+        other_event_id = _portfolio_event(fake_pg, owner_id="other", drift=0.11)
+        client.put(
+            "/v1/proactive/preferences",
+            headers={"X-API-Key": "testkey"},
+            json={
+                "owner_id": "other",
+                "enabled": True,
+                "allowed_surfaces_json": ["telegram"],
+                "rule_prefs_json": {},
+            },
+        )
+        owner_eval = client.post(
+            "/v1/initiative/evaluate",
+            headers=_headers("rid-shared"),
+            json={"request_id": "rid-shared", "owner_id": "owner", "event_log_id": owner_event_id},
+        )
+        other_eval = client.post(
+            "/v1/initiative/evaluate",
+            headers={"X-API-Key": "testkey", "X-Request-ID": "rid-shared"},
+            json={"request_id": "rid-shared", "owner_id": "other", "event_log_id": other_event_id},
+        )
+        assert owner_eval.status_code == 200
+        assert other_eval.status_code == 200
+
+        owner_debug = client.get(
+            "/v1/initiative/debug/rid-shared",
+            headers={"X-API-Key": "testkey"},
+            params={"owner_id": "owner"},
+        )
+        other_debug = client.get(
+            "/v1/initiative/debug/rid-shared",
+            headers={"X-API-Key": "testkey"},
+            params={"owner_id": "other"},
+        )
+        assert owner_debug.status_code == 200
+        assert other_debug.status_code == 200
+        assert owner_debug.json()["initiative_event"]["owner_id"] == "owner"
+        assert other_debug.json()["initiative_event"]["owner_id"] == "other"
+        assert owner_debug.json()["initiative_event"]["initiative_event_id"] != other_debug.json()["initiative_event"]["initiative_event_id"]
     finally:
         client.close()

@@ -868,18 +868,23 @@ class PostgresStore:
             "created_at": str(row[7]),
         }
 
-    async def get_initiative_event_by_request_id(self, request_id: str) -> dict[str, Any] | None:
+    async def get_initiative_event_by_request_id(
+        self,
+        *,
+        owner_id: str,
+        request_id: str,
+    ) -> dict[str, Any] | None:
         q = """
         SELECT id, owner_id, request_id, source_event_log_id, trigger_type,
                trigger_ref_json, payload_json, created_at
         FROM initiative_events
-        WHERE request_id = %s
+        WHERE owner_id = %s AND request_id = %s
         ORDER BY created_at DESC, id DESC
         LIMIT 1;
         """
         async with self.pool.connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(q, (request_id,))
+                await cur.execute(q, (owner_id, request_id))
                 row = await cur.fetchone()
         if row is None:
             return None
