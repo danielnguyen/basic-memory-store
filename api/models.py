@@ -554,6 +554,114 @@ class MemoryDebugResponse(BaseModel):
     events: List[MemoryEventItem] = Field(default_factory=list)
 
 
+# ---- Cluster 9B / R21 episodes ----
+
+EpisodeEventType = Literal["created", "updated", "linked"]
+
+
+class EpisodeSourceRef(BaseModel):
+    ref_type: str = Field(..., min_length=1, max_length=64)
+    ref_id: str = Field(..., min_length=1, max_length=160)
+    support_kind: str = Field(default="direct", min_length=1, max_length=64)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class EpisodeItemResponse(BaseModel):
+    episode_id: str
+    owner_id: str
+    title: str
+    summary: str
+    episode_type: str
+    trigger: Dict[str, Any] = Field(default_factory=dict)
+    outcome: Optional[str] = None
+    significance: Optional[str] = None
+    unresolved: Dict[str, Any] = Field(default_factory=dict)
+    source_refs: List[Dict[str, Any]] = Field(default_factory=list)
+    source_ref_hash: str
+    episode_key: str
+    callback_candidates: List[Any] = Field(default_factory=list)
+    time_window: Dict[str, Any] = Field(default_factory=dict)
+    participants: List[Any] = Field(default_factory=list)
+    status: str
+    derivation_version: str
+    confidence: Optional[float] = None
+    explanation: Dict[str, Any] = Field(default_factory=dict)
+    generation_trace_id: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+class EpisodeCreateRequest(BaseModel):
+    request_id: str = Field(..., min_length=1, max_length=160)
+    owner_id: str = Field(..., min_length=1, max_length=160)
+    title: str = Field(..., min_length=1, max_length=400)
+    summary: str = Field(..., min_length=1, max_length=4000)
+    episode_type: str = Field(..., min_length=1, max_length=64)
+    source_refs: List[EpisodeSourceRef] = Field(..., min_length=1, max_length=50)
+    trigger: Dict[str, Any] = Field(default_factory=dict)
+    outcome: Optional[str] = Field(default=None, max_length=4000)
+    significance: Optional[str] = Field(default=None, max_length=4000)
+    unresolved: Dict[str, Any] = Field(default_factory=dict)
+    callback_candidates: List[Any] = Field(default_factory=list)
+    time_window: Dict[str, Any] = Field(default_factory=dict)
+    participants: List[Any] = Field(default_factory=list)
+    confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    explanation: Dict[str, Any] = Field(default_factory=dict)
+    generation_trace_id: Optional[str] = Field(default=None, max_length=160)
+
+
+class EpisodeCreateResponse(BaseModel):
+    request_id: str
+    episode: EpisodeItemResponse
+    created: bool
+    updated: bool
+
+
+class EpisodeLinkIn(BaseModel):
+    ref_type: str = Field(..., min_length=1, max_length=64)
+    ref_id: str = Field(..., min_length=1, max_length=160)
+    relationship: str = Field(..., min_length=1, max_length=64)
+
+
+class EpisodeLinkItem(BaseModel):
+    link_id: str
+    episode_id: str
+    owner_id: str
+    ref_type: str
+    ref_id: str
+    relationship: str
+    created_at: str
+
+
+class EpisodeLinkRequest(BaseModel):
+    request_id: str = Field(..., min_length=1, max_length=160)
+    owner_id: str = Field(..., min_length=1, max_length=160)
+    links: List[EpisodeLinkIn] = Field(..., min_length=1, max_length=50)
+
+
+class EpisodeLinkResponse(BaseModel):
+    request_id: str
+    episode_id: str
+    created_count: int
+    existing_count: int
+    links: List[EpisodeLinkItem] = Field(default_factory=list)
+
+
+class EpisodeEventItem(BaseModel):
+    event_id: str
+    episode_id: str
+    owner_id: str
+    event_type: EpisodeEventType
+    reason: Dict[str, Any] = Field(default_factory=dict)
+    created_at: str
+
+
+class EpisodeDebugResponse(BaseModel):
+    episode: EpisodeItemResponse
+    links: List[EpisodeLinkItem] = Field(default_factory=list)
+    events: List[EpisodeEventItem] = Field(default_factory=list)
+
+
 # ---- Traces ----
 
 class TraceCreateRequest(BaseModel):

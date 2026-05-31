@@ -1850,6 +1850,347 @@ class PostgresStore:
             "events": [self._memory_event_from_row(event_row) for event_row in event_rows],
         }
 
+
+    def _episode_from_row(self, row: tuple[Any, ...]) -> dict[str, Any]:
+        return {
+            "episode_id": str(row[0]),
+            "owner_id": row[1],
+            "title": row[2],
+            "summary": row[3],
+            "episode_type": row[4],
+            "trigger_json": row[5] or {},
+            "outcome": row[6],
+            "significance": row[7],
+            "unresolved_json": row[8] or {},
+            "source_refs_json": row[9] or [],
+            "source_ref_hash": row[10],
+            "episode_key": row[11],
+            "callback_candidates_json": row[12] or [],
+            "time_window_json": row[13] or {},
+            "participants_json": row[14] or [],
+            "status": row[15],
+            "derivation_version": row[16],
+            "confidence": row[17],
+            "explanation_json": row[18] or {},
+            "generation_trace_id": row[19],
+            "created_at": str(row[20]),
+            "updated_at": str(row[21]),
+        }
+
+    def _episode_link_from_row(self, row: tuple[Any, ...]) -> dict[str, Any]:
+        return {
+            "link_id": str(row[0]),
+            "episode_id": str(row[1]),
+            "owner_id": row[2],
+            "ref_type": row[3],
+            "ref_id": row[4],
+            "relationship": row[5],
+            "created_at": str(row[6]),
+        }
+
+    def _episode_event_from_row(self, row: tuple[Any, ...]) -> dict[str, Any]:
+        return {
+            "event_id": str(row[0]),
+            "episode_id": str(row[1]),
+            "owner_id": row[2],
+            "event_type": row[3],
+            "reason_json": row[4] or {},
+            "created_at": str(row[5]),
+        }
+
+    async def create_or_update_episode(
+        self,
+        *,
+        owner_id: str,
+        title: str,
+        summary: str,
+        episode_type: str,
+        trigger_json: dict[str, Any],
+        outcome: str | None,
+        significance: str | None,
+        unresolved_json: dict[str, Any],
+        source_refs_json: list[dict[str, Any]],
+        source_ref_hash: str,
+        episode_key: str,
+        callback_candidates_json: list[Any],
+        time_window_json: dict[str, Any],
+        participants_json: list[Any],
+        confidence: float | None,
+        explanation_json: dict[str, Any],
+        generation_trace_id: str | None,
+        request_id: str,
+        derivation_version: str = "r21-m0-v1",
+    ) -> dict[str, Any]:
+        select_cols = """
+            id, owner_id, title, summary, episode_type, trigger_json,
+            outcome, significance, unresolved_json, source_refs_json,
+            source_ref_hash, episode_key, callback_candidates_json,
+            time_window_json, participants_json, status, derivation_version,
+            confidence, explanation_json, generation_trace_id, created_at, updated_at
+        """
+        incoming_mutable = {
+            "title": title,
+            "summary": summary,
+            "outcome": outcome,
+            "significance": significance,
+            "unresolved_json": unresolved_json,
+            "callback_candidates_json": callback_candidates_json,
+            "participants_json": participants_json,
+            "confidence": confidence,
+            "explanation_json": explanation_json,
+            "generation_trace_id": generation_trace_id,
+        }
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"""
+                    SELECT {select_cols}
+                    FROM episodes
+                    WHERE owner_id = %s AND episode_key = %s AND status = 'active'
+                    LIMIT 1
+                    FOR UPDATE;
+                    """,
+                    (owner_id, episode_key),
+                )
+                existing_row = await cur.fetchone()
+                if existing_row is None:
+                    await cur.execute(
+                        f"""
+                        INSERT INTO episodes (
+                            owner_id, title, summary, episode_type, trigger_json,
+                            outcome, significance, unresolved_json, source_refs_json,
+                            source_ref_hash, episode_key, callback_candidates_json,
+                            time_window_json, participants_json, status,
+                            derivation_version, confidence, explanation_json,
+                            generation_trace_id
+                        ) VALUES (
+                            %s, %s, %s, %s, %s::jsonb,
+                            %s, %s, %s::jsonb, %s::jsonb,
+                            %s, %s, %s::jsonb,
+                            %s::jsonb, %s::jsonb, 'active',
+                            %s, %s, %s::jsonb,
+                            %s
+                        ) RETURNING {select_cols};
+                        """,
+                        (
+                            owner_id,
+                            title,
+                            summary,
+                            episode_type,
+                            Json(trigger_json),
+                            outcome,
+                            significance,
+                            Json(unresolved_json),
+                            Json(source_refs_json),
+                            source_ref_hash,
+                            episode_key,
+                            Json(callback_candidates_json),
+                            Json(time_window_json),
+                            Json(participants_json),
+                            derivation_version,
+                            confidence,
+                            Json(explanation_json),
+                            generation_trace_id,
+                        ),
+                    )
+                    row = await cur.fetchone()
+                    episode_id = row[0]
+                    await cur.execute(
+                        """
+                        INSERT INTO episode_events (episode_id, owner_id, event_type, reason_json)
+                        VALUES (%s, %s, 'created', %s::jsonb);
+                        """,
+                        (episode_id, owner_id, Json({"request_id": request_id})),
+                    )
+                    return {
+                        "episode": self._episode_from_row(row),
+                        "created": True,
+                        "updated": False,
+                    }
+
+                existing = self._episode_from_row(existing_row)
+                changed = any(existing.get(k) != v for k, v in incoming_mutable.items())
+                if not changed:
+                    return {
+                        "episode": existing,
+                        "created": False,
+                        "updated": False,
+                    }
+
+                await cur.execute(
+                    f"""
+                    UPDATE episodes
+                    SET title = %s,
+                        summary = %s,
+                        outcome = %s,
+                        significance = %s,
+                        unresolved_json = %s::jsonb,
+                        callback_candidates_json = %s::jsonb,
+                        participants_json = %s::jsonb,
+                        confidence = %s,
+                        explanation_json = %s::jsonb,
+                        generation_trace_id = %s,
+                        updated_at = now()
+                    WHERE id = %s AND owner_id = %s
+                    RETURNING {select_cols};
+                    """,
+                    (
+                        title,
+                        summary,
+                        outcome,
+                        significance,
+                        Json(unresolved_json),
+                        Json(callback_candidates_json),
+                        Json(participants_json),
+                        confidence,
+                        Json(explanation_json),
+                        generation_trace_id,
+                        existing_row[0],
+                        owner_id,
+                    ),
+                )
+                row = await cur.fetchone()
+                await cur.execute(
+                    """
+                    INSERT INTO episode_events (episode_id, owner_id, event_type, reason_json)
+                    VALUES (%s, %s, 'updated', %s::jsonb);
+                    """,
+                    (existing_row[0], owner_id, Json({"request_id": request_id})),
+                )
+                return {
+                    "episode": self._episode_from_row(row),
+                    "created": False,
+                    "updated": True,
+                }
+
+    async def create_episode_links(
+        self,
+        *,
+        episode_id: UUID,
+        owner_id: str,
+        links: list[dict[str, Any]],
+        request_id: str,
+    ) -> dict[str, Any] | None:
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT id
+                    FROM episodes
+                    WHERE id = %s AND owner_id = %s
+                    FOR UPDATE;
+                    """,
+                    (episode_id, owner_id),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    return None
+
+                out_links: list[dict[str, Any]] = []
+                created_count = 0
+                existing_count = 0
+                created_refs: list[dict[str, Any]] = []
+                for link in links:
+                    await cur.execute(
+                        """
+                        INSERT INTO episode_links (episode_id, owner_id, ref_type, ref_id, relationship)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (episode_id, ref_type, ref_id, relationship) DO NOTHING
+                        RETURNING id, episode_id, owner_id, ref_type, ref_id, relationship, created_at;
+                        """,
+                        (episode_id, owner_id, link["ref_type"], link["ref_id"], link["relationship"]),
+                    )
+                    inserted = await cur.fetchone()
+                    if inserted is not None:
+                        created_count += 1
+                        created_refs.append(
+                            {
+                                "ref_type": link["ref_type"],
+                                "ref_id": link["ref_id"],
+                                "relationship": link["relationship"],
+                            }
+                        )
+                        out_links.append(self._episode_link_from_row(inserted))
+                        continue
+
+                    existing_count += 1
+                    await cur.execute(
+                        """
+                        SELECT id, episode_id, owner_id, ref_type, ref_id, relationship, created_at
+                        FROM episode_links
+                        WHERE episode_id = %s AND ref_type = %s AND ref_id = %s AND relationship = %s
+                        LIMIT 1;
+                        """,
+                        (episode_id, link["ref_type"], link["ref_id"], link["relationship"]),
+                    )
+                    existing_link = await cur.fetchone()
+                    if existing_link is not None:
+                        out_links.append(self._episode_link_from_row(existing_link))
+
+                if created_count > 0:
+                    await cur.execute(
+                        """
+                        INSERT INTO episode_events (episode_id, owner_id, event_type, reason_json)
+                        VALUES (%s, %s, 'linked', %s::jsonb);
+                        """,
+                        (
+                            episode_id,
+                            owner_id,
+                            Json({
+                                "request_id": request_id,
+                                "created_count": created_count,
+                                "links": created_refs,
+                            }),
+                        ),
+                    )
+
+        return {
+            "episode_id": str(episode_id),
+            "created_count": created_count,
+            "existing_count": existing_count,
+            "links": out_links,
+        }
+
+    async def get_episode_debug(self, episode_id: UUID) -> dict[str, Any] | None:
+        select_cols = """
+            id, owner_id, title, summary, episode_type, trigger_json,
+            outcome, significance, unresolved_json, source_refs_json,
+            source_ref_hash, episode_key, callback_candidates_json,
+            time_window_json, participants_json, status, derivation_version,
+            confidence, explanation_json, generation_trace_id, created_at, updated_at
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(f"SELECT {select_cols} FROM episodes WHERE id = %s;", (episode_id,))
+                row = await cur.fetchone()
+                if row is None:
+                    return None
+                await cur.execute(
+                    """
+                    SELECT id, episode_id, owner_id, ref_type, ref_id, relationship, created_at
+                    FROM episode_links
+                    WHERE episode_id = %s
+                    ORDER BY created_at ASC, id ASC;
+                    """,
+                    (episode_id,),
+                )
+                link_rows = await cur.fetchall()
+                await cur.execute(
+                    """
+                    SELECT id, episode_id, owner_id, event_type, reason_json, created_at
+                    FROM episode_events
+                    WHERE episode_id = %s
+                    ORDER BY created_at ASC, id ASC;
+                    """,
+                    (episode_id,),
+                )
+                event_rows = await cur.fetchall()
+        return {
+            "episode": self._episode_from_row(row),
+            "links": [self._episode_link_from_row(link_row) for link_row in link_rows],
+            "events": [self._episode_event_from_row(event_row) for event_row in event_rows],
+        }
+
     async def create_trace(self, trace: dict[str, Any]) -> UUID:
         q = """
         INSERT INTO traces (
