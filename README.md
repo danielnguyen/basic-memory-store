@@ -1,6 +1,6 @@
 # Basic Memory Store
 
-A minimal, durable, inspectable conversation memory service.
+A durable, inspectable memory substrate for conversational systems.
 
 **Disclaimers:**
 - AI and LLMs were used in the development of this repo.
@@ -8,7 +8,9 @@ A minimal, durable, inspectable conversation memory service.
 
 ## Motivation
 
-This was created with the intention of persisting conversational history and context, agnostic of LLMs (OpenAI, Anthropic, Ollama, etc) and clients (car, phone, Alexa, local UIs, scripts, etc). This is meant to be a basic and simple store, without any additional fancy capabilities.
+This repo exists to persist conversational history and context, independent of model providers (OpenAI, Anthropic, Ollama, etc.) and client surfaces (car, phone, voice, desktop, scripts, etc.). Its primary role is durable memory infrastructure: persistence, retrieval, artifacts, traces, proactive suggestion state, and ingestion.
+
+For normal chat application flows, clients should call `chat-orchestrator` `POST /v1/chat`, not Basic Memory Store `POST /v1/chat`. The Basic Memory Store direct chat endpoints remain available for compatibility, smoke testing, and substrate debugging.
 
 ---
 
@@ -73,22 +75,17 @@ BASIC-MEMORY-STORE/
 - Stores vectors in Qdrant
 - Retrieves relevant historical context
 - Ingests local text/code files into chunked artifact knowledge
-- Assembles prompts deterministically
-- Acts as a single “memory gateway” for all clients
+- Tracks artifact metadata and retrieval references
+- Stores traces and proactive suggestion state
+- Exposes explicit substrate APIs for conversation resolution, retrieval, ingestion, and inspection
 
-Primary endpoint:
+Recommended ownership:
 
-```
-POST /v1/chat
-```
+- Normal chat orchestration: `chat-orchestrator` `POST /v1/chat`
+- Memory substrate APIs: Basic Memory Store
+- Legacy/direct compatibility chat: Basic Memory Store `POST /v1/chat`
 
-Which:
-1. Persists incoming user messages
-2. Retrieves relevant past context
-3. Builds a controlled prompt
-4. Calls LiteLLM
-5. Persists the assistant response
-6. Returns the answer
+Use Basic Memory Store direct chat/orchestration endpoints only when you intentionally want substrate-level compatibility testing or debugging without going through `chat-orchestrator`.
 
 ---
 
@@ -332,7 +329,9 @@ x-api-key: <MEMORY_API_KEY>
 
 ---
 
-### Chat with memory
+### Legacy/direct chat with memory
+
+Normal chat clients should call `chat-orchestrator` `POST /v1/chat`. Use this Basic Memory Store endpoint only for legacy/direct compatibility, smoke tests, or substrate debugging.
 
 ```
 POST /v1/chat
@@ -353,7 +352,7 @@ x-api-key: <MEMORY_API_KEY>
 
 ---
 
-### Retrieve memories directly
+### Legacy/direct retrieval
 
 ```
 POST /v1/retrieve
@@ -457,7 +456,7 @@ POST /v1/orchestrate/chat
 GET /v1/traces/{request_id}
 ```
 
-`/v1/chat` remains unchanged for existing clients. Use `/v1/orchestrate/chat` when you want surface and artifact traceability.
+`/v1/chat` and `/v1/orchestrate/chat` remain available for existing direct clients. For normal chat application flows, route requests through `chat-orchestrator` `POST /v1/chat`. Use `/v1/orchestrate/chat` in Basic Memory Store only when you intentionally need direct substrate-level surface and artifact traceability.
 
 ---
 
@@ -495,7 +494,7 @@ Those can be layered later without changing the storage contract.
 
 ## Status
 
-v0.1 — minimal memory gateway
+v0.1 — durable memory substrate
 
 Built to be:
 - understandable

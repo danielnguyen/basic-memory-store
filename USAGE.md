@@ -10,10 +10,34 @@ The system is designed to be:
 
 ---
 
+## Current integration rule
+
+Normal chat clients should call `chat-orchestrator` `POST /v1/chat`, not Basic Memory Store `POST /v1/chat`.
+
+Use Basic Memory Store direct chat endpoints only for legacy compatibility, smoke testing, substrate debugging, or other intentional direct-mode workflows. Do not use Basic Memory Store `POST /v1/chat`, `POST /v1/orchestrate/chat`, or `POST /v1/retrieve` for new Telegram, voice, mobile, desktop, or Cluster 10+ chat flows.
+
+## API ownership
+
+| Capability | Owner / Endpoint |
+|------|------------------|
+| Normal chat | `chat-orchestrator` `POST /v1/chat` |
+| Conversation resolution | Basic Memory Store `POST /v1/conversations/resolve` |
+| Direct retrieval | Basic Memory Store `POST /v2/conversations/{id}/retrieve` |
+| Legacy retrieval | Basic Memory Store `POST /v1/conversations/{id}/retrieve` |
+| Message append/backfill | Basic Memory Store `POST /v1/conversations/{id}/messages` |
+| File ingestion | Basic Memory Store `POST /v1/ingestion/files` |
+| Artifact metadata | Basic Memory Store artifact endpoints |
+| Traces | Basic Memory Store `GET /v1/traces/{request_id}` |
+| Proactive suggestions | Basic Memory Store proactive endpoints |
+
+## Recommended normal flow
+
+`client -> BMS POST /v1/conversations/resolve -> chat-orchestrator POST /v1/chat -> BMS/cognitive-runtime/LiteLLM as needed`
+
 ## Core Principles
 
 - **Clients are stateless.**
-- **The memory service owns all state**: conversations, messages, retrieval scope, context.
+- **Basic Memory Store owns memory state**: conversations, messages, retrieval scope, artifacts, traces, and proactive suggestion state.
 - Clients decide *when* to widen memory scope.
 - The server enforces *how* memory is retrieved and applied.
 
@@ -68,6 +92,8 @@ POST /v1/conversations/resolve
 
 ## 2. Normal Conversational Turn (Default Behavior)
 
+Normal chat clients should use `chat-orchestrator` `POST /v1/chat` after resolving a conversation in Basic Memory Store. Basic Memory Store `POST /v1/chat` is legacy/direct mode only and should not be the default for new chat surfaces.
+
 **Examples**
 - “What device am I using?”
 - “What did we talk about earlier?”
@@ -76,7 +102,7 @@ POST /v1/conversations/resolve
 Append a user message, retrieve relevant context **from the current conversation**, and respond.
 
 ### API Call
-POST /v1/chat
+`chat-orchestrator` `POST /v1/chat`
 
 ### Request
 ```json
@@ -121,10 +147,10 @@ POST /v1/chat
 - “Do you remember what I said about my preferences?”
 
 ### Goal
-Widen retrieval beyond the current conversation.
+Widen retrieval beyond the current conversation while still using the normal chat entrypoint.
 
 ### API Call
-POST /v1/chat
+`chat-orchestrator` `POST /v1/chat`
 
 ### Request
 ```json
@@ -290,13 +316,13 @@ Notes:
 
 ---
 
-## 11. Orchestration + Traces (Additive)
+## 11. Legacy/direct orchestration + traces
 
 ### API Calls
 - POST /v1/orchestrate/chat
 - GET /v1/traces/{request_id}
 
-Use `/v1/orchestrate/chat` when you want explicit `surface` and `artifact_ids` in trace records while keeping `/v1/chat` compatibility unchanged.
+`POST /v1/orchestrate/chat` is a legacy/direct-mode Basic Memory Store endpoint. Do not use it for new Telegram, voice, mobile, desktop, or Cluster 10+ chat flows. Use it only when you intentionally need direct substrate-level orchestration and trace inspection.
 
 ---
 
@@ -313,16 +339,29 @@ Returns Prometheus exposition format including retrieval telemetry counters.
 
 | Scenario | API |
 |--------|-----|
-| Start / resume session | POST /v1/conversations/resolve |
-| Normal chat | POST /v1/chat |
-| Long-term memory search | POST /v1/chat (scope=owner) |
-| List conversations | GET /v1/conversations |
-| Manual message append | POST /v1/conversations/{id}/messages |
-| Tier-aware retrieval | POST /v1/conversations/{id}/retrieve |
-| File ingestion | POST /v1/ingestion/files |
-| Artifact metadata flow | POST /v1/artifacts/init + /complete + GET /v1/artifacts/{id} |
-| Explainability trace lookup | GET /v1/traces/{request_id} |
-| Prometheus metrics | GET /metrics |
+| Start / resume session | Basic Memory Store `POST /v1/conversations/resolve` |
+| Normal chat | `chat-orchestrator` `POST /v1/chat` |
+| Long-term memory search | `chat-orchestrator` `POST /v1/chat` with broader retrieval scope |
+| Legacy/direct chat | Basic Memory Store `POST /v1/chat` |
+| Legacy/direct orchestration | Basic Memory Store `POST /v1/orchestrate/chat` |
+| Legacy/direct retrieval | Basic Memory Store `POST /v1/retrieve` and `POST /v1/conversations/{id}/retrieve` |
+| Direct retrieval | Basic Memory Store `POST /v2/conversations/{id}/retrieve` |
+| List conversations | Basic Memory Store `GET /v1/conversations` |
+| Manual message append | Basic Memory Store `POST /v1/conversations/{id}/messages` |
+| File ingestion | Basic Memory Store `POST /v1/ingestion/files` |
+| Artifact metadata flow | Basic Memory Store `POST /v1/artifacts/init` + `/complete` + `GET /v1/artifacts/{id}` |
+| Explainability trace lookup | Basic Memory Store `GET /v1/traces/{request_id}` |
+| Prometheus metrics | Basic Memory Store `GET /metrics` |
+
+## 12. Legacy/direct-mode endpoints
+
+These Basic Memory Store endpoints still exist for compatibility and debugging, but they are not the recommended normal chat path:
+
+- `POST /v1/chat`
+- `POST /v1/orchestrate/chat`
+- `POST /v1/retrieve`
+
+Do not use them for new Telegram, voice, mobile, desktop, or Cluster 10+ chat flows. Normal chat clients should resolve the conversation in Basic Memory Store, then call `chat-orchestrator` `POST /v1/chat`.
 
 ---
 
