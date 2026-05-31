@@ -12,6 +12,9 @@ class FakePG:
         self.event_logs = {}
         self.suggestions = {}
         self.feedback = []
+        self.initiative_events = {}
+        self.initiative_decisions = {}
+        self.initiative_feedback = []
         self.message_snippets = {}
 
     async def open(self):
@@ -150,6 +153,118 @@ class FakePG:
             "delivered_at": row["delivered_at"],
             "updated_at": row["updated_at"],
         }
+
+    async def create_initiative_event(self, **kwargs):
+        key = (kwargs["owner_id"], kwargs["request_id"])
+        for row in self.initiative_events.values():
+            if (row["owner_id"], row["request_id"]) == key:
+                row.update({
+                    "source_event_log_id": str(kwargs["source_event_log_id"]) if kwargs["source_event_log_id"] else None,
+                    "trigger_type": kwargs["trigger_type"],
+                    "trigger_ref_json": kwargs["trigger_ref_json"],
+                    "payload_json": kwargs["payload_json"],
+                })
+                return row.copy()
+        initiative_event_id = str(uuid.uuid4())
+        row = {
+            "initiative_event_id": initiative_event_id,
+            "owner_id": kwargs["owner_id"],
+            "request_id": kwargs["request_id"],
+            "source_event_log_id": str(kwargs["source_event_log_id"]) if kwargs["source_event_log_id"] else None,
+            "trigger_type": kwargs["trigger_type"],
+            "trigger_ref_json": kwargs["trigger_ref_json"],
+            "payload_json": kwargs["payload_json"],
+            "created_at": "2026-04-06T00:00:00+00:00",
+        }
+        self.initiative_events[initiative_event_id] = row
+        return row.copy()
+
+    async def create_initiative_decision(self, **kwargs):
+        decision_id = str(uuid.uuid4())
+        row = {
+            "decision_id": decision_id,
+            "initiative_event_id": str(kwargs["initiative_event_id"]),
+            "owner_id": kwargs["owner_id"],
+            "proactive_suggestion_id": str(kwargs["proactive_suggestion_id"]) if kwargs["proactive_suggestion_id"] else None,
+            "decision_status": kwargs["decision_status"],
+            "score": kwargs["score"],
+            "reason_json": kwargs["reason_json"],
+            "delivery_surface": kwargs["delivery_surface"],
+            "delivery_status": kwargs["delivery_status"],
+            "suppression_reason": kwargs["suppression_reason"],
+            "cooldown_identity_key": kwargs["cooldown_identity_key"],
+            "normalized_subject": kwargs["normalized_subject"],
+            "cooldown_until": kwargs["cooldown_until"],
+            "created_at": "2026-04-06T00:00:00+00:00",
+        }
+        self.initiative_decisions[decision_id] = row
+        return row.copy()
+
+    async def get_initiative_event(self, initiative_event_id):
+        row = self.initiative_events.get(str(initiative_event_id))
+        return row.copy() if row else None
+
+    async def get_initiative_event_by_request_id(self, *, owner_id, request_id):
+        for row in reversed(list(self.initiative_events.values())):
+            if row["owner_id"] == owner_id and row["request_id"] == request_id:
+                return row.copy()
+        return None
+
+    async def list_initiative_decisions(self, initiative_event_id):
+        return [
+            row.copy()
+            for row in self.initiative_decisions.values()
+            if row["initiative_event_id"] == str(initiative_event_id)
+        ]
+
+    async def get_initiative_decision(self, decision_id):
+        row = self.initiative_decisions.get(str(decision_id))
+        return row.copy() if row else None
+
+    async def get_recent_initiative_cooldown(self, *, owner_id, cooldown_identity_key, cooldown_hours):
+        if cooldown_hours <= 0:
+            return None
+        for row in reversed(list(self.initiative_decisions.values())):
+            if (
+                row["owner_id"] == owner_id
+                and row["cooldown_identity_key"] == cooldown_identity_key
+                and row["decision_status"] == "created"
+            ):
+                return row.copy()
+        return None
+
+    async def get_recent_negative_initiative_feedback(self, *, owner_id, cooldown_identity_key, lookback_days):
+        for feedback in reversed(self.initiative_feedback):
+            decision = self.initiative_decisions.get(feedback["decision_id"])
+            if (
+                feedback["owner_id"] == owner_id
+                and feedback["feedback_type"] in {"dismissed", "not_useful"}
+                and decision
+                and decision["cooldown_identity_key"] == cooldown_identity_key
+            ):
+                return feedback.copy()
+        return None
+
+    async def record_initiative_feedback(self, *, decision_id, proactive_feedback_id, owner_id, feedback_type, feedback_json):
+        feedback = {
+            "feedback_id": str(uuid.uuid4()),
+            "decision_id": str(decision_id),
+            "proactive_feedback_id": str(proactive_feedback_id) if proactive_feedback_id else None,
+            "owner_id": owner_id,
+            "feedback_type": feedback_type,
+            "feedback_json": dict(feedback_json),
+            "created_at": "2026-04-06T00:00:00+00:00",
+        }
+        self.initiative_feedback.append(feedback)
+        return feedback.copy()
+
+    async def list_initiative_feedback_for_event(self, initiative_event_id):
+        decision_ids = {
+            row["decision_id"]
+            for row in self.initiative_decisions.values()
+            if row["initiative_event_id"] == str(initiative_event_id)
+        }
+        return [feedback.copy() for feedback in self.initiative_feedback if feedback["decision_id"] in decision_ids]
 
 
 class FakeQdrant:
@@ -471,3 +586,56 @@ def test_feedback_remains_user_feedback_only(monkeypatch):
 def awaitable(coro):
     import asyncio
     return asyncio.run(coro)
+
+
+def test_legacy_proactive_retry_reuses_existing_request_decision(monkeypatch):
+    fake_pg = FakePG()
+    match_id = uuid.uuid4()
+    fake_pg.message_snippets[str(match_id)] = {
+        "message_id": str(match_id),
+        "conversation_id": str(uuid.uuid4()),
+        "role": "assistant",
+        "content": "We discussed auth regressions in this repo last month.",
+        "metadata": {},
+        "created_at": "2026-03-20T00:00:00+00:00",
+    }
+    fake_qdrant = FakeQdrant(search_hits=[types.SimpleNamespace(message_id=str(match_id), score=0.82)])
+    client, fake_pg, _ = _client(monkeypatch, fake_pg=fake_pg, fake_qdrant=fake_qdrant)
+    try:
+        client.put(
+            "/v1/proactive/preferences",
+            headers={"X-API-Key": "testkey"},
+            json={
+                "owner_id": "owner",
+                "enabled": True,
+                "allowed_surfaces_json": ["telegram"],
+                "rule_prefs_json": {"git": {"min_score": 0.3}},
+            },
+        )
+        event_log_id = str(uuid.uuid4())
+        fake_pg.event_logs[event_log_id] = {
+            "event_log_id": event_log_id,
+            "owner_id": "owner",
+            "source_type": "git",
+            "source_event_id": "git-retry",
+            "event_type": "push",
+            "payload_json": {"summary": "auth flow refactor", "repo": "basic-memory-store", "branch": "main"},
+            "conversation_id": str(uuid.uuid4()),
+            "message_id": str(uuid.uuid4()),
+        }
+        first = client.post(
+            "/v1/internal/proactive/evaluate",
+            headers=_headers("rid-legacy-retry"),
+            json={"request_id": "rid-legacy-retry", "owner_id": "owner", "event_log_id": event_log_id},
+        )
+        second = client.post(
+            "/v1/internal/proactive/evaluate",
+            headers=_headers("rid-legacy-retry"),
+            json={"request_id": "rid-legacy-retry", "owner_id": "owner", "event_log_id": event_log_id},
+        )
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert first.json() == second.json()
+        assert len(fake_pg.initiative_decisions) == 1
+    finally:
+        client.close()
