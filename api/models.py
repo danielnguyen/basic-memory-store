@@ -45,7 +45,7 @@ class RetrievalOptions(BaseModel):
 # ---- Conversations ----
 
 class ConversationCreateRequest(BaseModel):
-    owner_id: str = Field(..., description="Principal who owns this memory space.", examples=["daniel"])
+    owner_id: str = Field(..., description="Principal who owns this memory space.", examples=["owner_123"])
     client_id: Optional[str] = Field(default=None, description="Device/client source.", examples=["car"])
     title: Optional[str] = Field(default=None, description="Optional human title.", examples=["general chat"])
 
@@ -72,7 +72,7 @@ class ConversationListResponse(BaseModel):
 
 
 class ConversationResolveRequest(BaseModel):
-    owner_id: str = Field(..., examples=["daniel"])
+    owner_id: str = Field(..., examples=["owner_123"])
     client_id: Optional[str] = Field(default=None, examples=["car"])
     title: Optional[str] = Field(default=None, description="Optional title for newly created conversations.")
     idle_ttl_s: int = Field(default=1800, ge=60, le=86400, description="Reuse convo if active within this TTL (seconds).")
@@ -86,7 +86,7 @@ class ConversationResolveResponse(BaseModel):
 # ---- Messages ----
 
 class MessageCreateRequest(BaseModel):
-    owner_id: str = Field(..., examples=["daniel"])
+    owner_id: str = Field(..., examples=["owner_123"])
     role: Role = Field(..., examples=["user"])
     content: str = Field(..., examples=["Hello world"])
     client_id: Optional[str] = Field(default=None, examples=["phone"])
@@ -144,7 +144,7 @@ class ArtifactResponse(BaseModel):
 # ---- Retrieval (legacy) ----
 
 class RetrieveRequest(BaseModel):
-    owner_id: str = Field(..., examples=["daniel"])
+    owner_id: str = Field(..., examples=["owner_123"])
     client_id: Optional[str] = Field(
         default=None,
         examples=["unit"],
@@ -212,7 +212,7 @@ class TieredRetrieveResponse(BaseModel):
     persona: List[OverlayItem]
 
 
-# ---- Retrieval bundle (R04/R11 MVP) ----
+# ---- Retrieval bundle ----
 
 class RetrieveBundleRequest(BaseModel):
     request_id: str
@@ -284,7 +284,7 @@ class FileIngestionResponse(BaseModel):
     status: Literal["completed"]
 
 
-# ---- Event Ingest (Cluster 5 / R12 MVP) ----
+# ---- Event ingest ----
 
 class EventEntityIn(BaseModel):
     entity_type: str
@@ -312,7 +312,7 @@ class EventIngestResponse(BaseModel):
     entity_ids: List[str] = Field(default_factory=list)
 
 
-# ---- Proactive (Cluster 6 / R16 MVP) ----
+# ---- Proactive ----
 
 SuggestionStatus = Literal["pending", "dismissed", "accepted", "expired"]
 DeliveryStatus = Literal["not_attempted", "delivered", "failed"]
@@ -412,7 +412,7 @@ class ProactiveEvaluateResponse(BaseModel):
     suggestions: List[ProactiveSuggestionItem] = Field(default_factory=list)
 
 
-# ---- Initiative (Cluster 10A / R23 MVP) ----
+# ---- Initiative ----
 
 InitiativeDecisionStatus = Literal["created", "suppressed", "no_op"]
 
@@ -492,7 +492,7 @@ class InitiativeDebugResponse(BaseModel):
     feedback: List[InitiativeFeedbackResponse] = Field(default_factory=list)
 
 
-# ---- Hygiene / Graph MVP ----
+# ---- Hygiene / Graph ----
 
 class HygieneScanRequest(BaseModel):
     owner_id: str
@@ -543,7 +543,7 @@ class ProfileResolveResponse(BaseModel):
     tool_policy: Dict[str, Any]
 
 
-# ---- Cluster 9A / R20 memory promotion ----
+# ---- Memory promotion ----
 
 MemoryEventType = Literal[
     "created",
@@ -634,7 +634,7 @@ class MemoryDebugResponse(BaseModel):
     events: List[MemoryEventItem] = Field(default_factory=list)
 
 
-# ---- Cluster 9B / R21 episodes ----
+# ---- Episodes ----
 
 EpisodeEventType = Literal["created", "updated", "linked"]
 
@@ -865,7 +865,7 @@ class TraceResponse(BaseModel):
 # ---- Chat ----
 
 class ChatRequest(BaseModel):
-    owner_id: str = Field(..., examples=["daniel"])
+    owner_id: str = Field(..., examples=["owner_123"])
     conversation_id: Optional[str] = Field(
         default=None,
         description="If omitted, a new conversation is created automatically.",
