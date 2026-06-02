@@ -99,6 +99,7 @@ from models import (
     HygieneScanResponse,
     ProfileResolveRequest,
     ProfileResolveResponse,
+    SurfaceContext,
     TraceCreateRequest,
     TraceCreateResponse,
     TraceResponse,
@@ -246,6 +247,87 @@ def _retrieval_artifact_k() -> int:
 
 def _retrieval_artifact_max_snippet_chars() -> int:
     return int(getattr(settings, "retrieval_artifact_max_snippet_chars", 500))
+
+
+def _normalize_surface_type(value: str | None) -> str | None:
+    if not value:
+        return None
+    normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized in {"", "unknown"}:
+        return None
+    return normalized
+
+
+def _resolve_surface_behavior(surface: str | None, surface_context: SurfaceContext | None) -> dict[str, Any]:
+    legacy_surface = _normalize_surface_type(surface)
+    nested_surface = _normalize_surface_type(surface_context.surface_type) if surface_context else None
+    resolved_surface = nested_surface or legacy_surface or "chat"
+
+    interaction_mode = surface_context.interaction_mode if surface_context and surface_context.interaction_mode else None
+    spoken_output = surface_context.spoken_output if surface_context and surface_context.spoken_output is not None else None
+    active_task_mode = bool(surface_context.active_task_mode) if surface_context and surface_context.active_task_mode is not None else False
+    latency_preference = surface_context.latency_preference if surface_context and surface_context.latency_preference else "normal"
+    verbosity_target = surface_context.verbosity_target if surface_context and surface_context.verbosity_target else None
+    allows_expansion = surface_context.allows_expansion if surface_context and surface_context.allows_expansion is not None else True
+    output_format = surface_context.output_format if surface_context and surface_context.output_format else None
+
+    if interaction_mode is None:
+        interaction_mode = "voice_mediated" if resolved_surface in {"voice", "car", "alexa"} else "text"
+    if spoken_output is None:
+        spoken_output = interaction_mode == "voice_mediated" or resolved_surface in {"voice", "car", "alexa"}
+    if output_format is None:
+        output_format = "speech" if spoken_output else "plain_text"
+    if verbosity_target is None:
+        verbosity_target = "short" if active_task_mode else "normal"
+
+    compatibility_note = None
+    if nested_surface and legacy_surface and nested_surface != legacy_surface:
+        compatibility_note = {
+            "kind": "surface_type_override",
+            "top_level_surface": legacy_surface,
+            "surface_context_surface_type": nested_surface,
+            "resolved_surface_type": resolved_surface,
+        }
+
+    return {
+        "surface_type": resolved_surface,
+        "interaction_mode": interaction_mode,
+        "spoken_output": spoken_output,
+        "active_task_mode": active_task_mode,
+        "latency_preference": latency_preference,
+        "verbosity_target": verbosity_target,
+        "allows_expansion": allows_expansion,
+        "output_format": output_format,
+        "style_envelope": surface_context.style_envelope if surface_context else {},
+        "compatibility_note": compatibility_note,
+    }
+
+
+def _build_surface_instruction_block(surface_behavior: dict[str, Any]) -> str:
+    lines: list[str] = []
+
+    if surface_behavior["surface_type"] == "telegram":
+        lines.append("- Keep the response readable for asynchronous text messaging without forcing speech-style phrasing.")
+    if surface_behavior["spoken_output"]:
+        lines.append("- Shape the answer for spoken delivery with natural phrasing, short sentences, and minimal formatting.")
+    if surface_behavior["active_task_mode"]:
+        lines.append("- The user is in an active-task context, so lead with the answer and keep it brief, decisive, and low-distraction.")
+    elif surface_behavior["verbosity_target"] == "short":
+        lines.append("- Keep the answer concise.")
+    elif surface_behavior["verbosity_target"] == "detailed":
+        lines.append("- Provide a fuller explanation when it materially helps.")
+    if surface_behavior["allows_expansion"] is False:
+        lines.append("- Do not add optional elaboration unless the user asks for it.")
+    if surface_behavior["latency_preference"] in {"low", "lowest"}:
+        lines.append("- Prefer a direct answer with minimal preamble.")
+    if surface_behavior["output_format"] == "speech":
+        lines.append("- Write in plain speakable text and avoid markdown-heavy structure.")
+    elif surface_behavior["output_format"] == "markdown" and not surface_behavior["spoken_output"]:
+        lines.append("- Use only lightweight markdown formatting when it improves readability.")
+
+    if not lines:
+        return ""
+    return "Surface behavior guidance:\n" + "\n".join(lines)
 
 
 def _time_window_cutoff(time_window: str) -> datetime | None:
@@ -1068,6 +1150,7 @@ async def _run_chat(
     *,
     surface: str | None = None,
     artifact_ids: list[str] | None = None,
+    surface_behavior: dict[str, Any] | None = None,
 ) -> ChatResponse:
     request_started = time.perf_counter()
     owner_id = body.owner_id
@@ -1194,6 +1277,9 @@ async def _run_chat(
         "- If context conflicts, prefer newer timestamps.\n"
         "- Do not invent facts.\n"
     )
+    if surface_behavior:
+        surface_instruction_block = _build_surface_instruction_block(surface_behavior)
+        system_preamble += surface_instruction_block + "\n"
     message_context_block = build_context_block(retrieved=retrieved, max_chars=settings.max_context_chars)
     artifact_context_block = build_artifact_context_block(
         [
@@ -1282,7 +1368,27 @@ async def _run_chat(
                     "owner_id": owner_id,
                     "client_id": client_id,
                     "surface": surface or "chat",
-                    "profile": {},
+                    "profile": (
+                        {
+                            "surface_context": {
+                                "surface_type": surface_behavior["surface_type"],
+                                "interaction_mode": surface_behavior["interaction_mode"],
+                                "spoken_output": surface_behavior["spoken_output"],
+                                "active_task_mode": surface_behavior["active_task_mode"],
+                                "latency_preference": surface_behavior["latency_preference"],
+                                "verbosity_target": surface_behavior["verbosity_target"],
+                                "allows_expansion": surface_behavior["allows_expansion"],
+                                "output_format": surface_behavior["output_format"],
+                            },
+                            **(
+                                {"surface_compatibility_note": surface_behavior["compatibility_note"]}
+                                if surface_behavior["compatibility_note"]
+                                else {}
+                            ),
+                        }
+                        if surface_behavior
+                        else {}
+                    ),
                     "router_decision": {
                     "selected_model": settings.chat_model,
                     "rule_id": "default-chat-model",
@@ -1346,6 +1452,7 @@ async def chat(body: ChatRequest, request: Request):
     summary="Surface-aware orchestration entrypoint (additive wrapper over /v1/chat)",
 )
 async def orchestrate_chat(body: OrchestrateChatRequest, request: Request):
+    surface_behavior = _resolve_surface_behavior(body.surface, body.surface_context)
     base_req = ChatRequest(
         owner_id=body.owner_id,
         conversation_id=body.conversation_id,
@@ -1357,8 +1464,9 @@ async def orchestrate_chat(body: OrchestrateChatRequest, request: Request):
     resp = await _run_chat(
         base_req,
         request,
-        surface=body.surface,
+        surface=surface_behavior["surface_type"],
         artifact_ids=body.artifact_ids or [],
+        surface_behavior=surface_behavior,
     )
     return OrchestrateChatResponse(**resp.model_dump(), request_id=(getattr(request.state, "request_id", None) or ""))
 

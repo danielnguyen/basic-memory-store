@@ -898,9 +898,28 @@ class ChatResponse(BaseModel):
     debug: Optional[RetrievalDebug] = None
 
 
+InteractionMode = Literal["text", "voice_mediated"]
+LatencyPreference = Literal["normal", "low", "lowest"]
+VerbosityTarget = Literal["short", "normal", "detailed"]
+OutputFormat = Literal["plain_text", "markdown", "speech"]
+
+
+class SurfaceContext(BaseModel):
+    surface_type: Optional[str] = Field(default=None, min_length=1, max_length=80)
+    interaction_mode: Optional[InteractionMode] = None
+    spoken_output: Optional[bool] = None
+    active_task_mode: Optional[bool] = None
+    latency_preference: Optional[LatencyPreference] = None
+    verbosity_target: Optional[VerbosityTarget] = None
+    allows_expansion: Optional[bool] = None
+    output_format: Optional[OutputFormat] = None
+    style_envelope: Dict[str, Any] = Field(default_factory=dict)
+
+
 class OrchestrateChatRequest(ChatRequest):
     surface: str = "unknown"
     artifact_ids: Optional[List[str]] = None
+    surface_context: Optional[SurfaceContext] = None
 
 
 class OrchestrateChatResponse(ChatResponse):
