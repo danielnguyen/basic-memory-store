@@ -32,12 +32,12 @@ class RetrievalOptions(BaseModel):
     )
     time_window: TimeWindow = Field(
         default="all",
-        description="Spec-shaped time window control for retrieval candidate selection.",
+        description="Time window control for retrieval candidate selection.",
         examples=["30d"],
     )
     retrieval_mode: RetrievalMode = Field(
         default="balanced",
-        description="Spec-shaped retrieval mode controlling recency bias.",
+        description="Retrieval mode controlling recency bias.",
         examples=["balanced"],
     )
 
