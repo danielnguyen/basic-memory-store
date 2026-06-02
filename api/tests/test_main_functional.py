@@ -5,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main as main_module
+from models import OrchestrateChatRequest
 
 
 # -------------------------
@@ -382,6 +383,10 @@ def auth_headers():
     return {"X-API-Key": "testkey"}
 
 
+def _system_prompt_text() -> str:
+    return "\n".join(item["content"] for item in main_module.litellm.calls[-1]["messages"] if item["role"] == "system")
+
+
 # -------------------------
 # Tests
 # -------------------------
@@ -642,6 +647,141 @@ def test_orchestrate_chat_and_trace_read(client):
     trace = r2.json()
     assert trace["request_id"] == request_id
     assert trace["surface"] == "vscode"
+    assert trace["profile"]["surface_context"]["surface_type"] == "vscode"
+    assert trace["profile"]["surface_context"]["spoken_output"] is False
+
+
+def test_orchestrate_request_surface_context_is_optional():
+    req = OrchestrateChatRequest(
+        owner_id="owner",
+        client_id="client",
+        messages=[{"role": "user", "content": "ping"}],
+    )
+    assert req.surface_context is None
+    assert req.surface == "unknown"
+
+
+def test_resolve_surface_behavior_prefers_surface_context_surface_type():
+    req = OrchestrateChatRequest(
+        owner_id="owner",
+        client_id="client",
+        surface="vscode",
+        surface_context={"surface_type": "telegram", "spoken_output": False},
+        messages=[{"role": "user", "content": "ping"}],
+    )
+
+    resolved = main_module._resolve_surface_behavior(req.surface, req.surface_context)
+
+    assert resolved["surface_type"] == "telegram"
+    assert resolved["compatibility_note"] == {
+        "kind": "surface_type_override",
+        "top_level_surface": "vscode",
+        "surface_context_surface_type": "telegram",
+        "resolved_surface_type": "telegram",
+    }
+
+
+def test_orchestrate_chat_without_surface_context_keeps_default_prompt_shape(client):
+    r = client.post(
+        "/v1/orchestrate/chat",
+        headers=auth_headers(),
+        json={
+            "owner_id": "daniel",
+            "client_id": "vscode",
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    )
+    assert r.status_code == 200
+
+    prompt_text = _system_prompt_text()
+    assert "Surface behavior guidance:" not in prompt_text
+    assert "spoken delivery" not in prompt_text
+
+
+def test_orchestrate_chat_telegram_surface_stays_text_first(client):
+    r = client.post(
+        "/v1/orchestrate/chat",
+        headers=auth_headers(),
+        json={
+            "owner_id": "daniel",
+            "client_id": "telegram",
+            "messages": [{"role": "user", "content": "ping"}],
+            "surface_context": {
+                "surface_type": "telegram",
+                "interaction_mode": "text",
+                "spoken_output": False,
+                "output_format": "plain_text",
+            },
+        },
+    )
+    assert r.status_code == 200
+
+    prompt_text = _system_prompt_text()
+    assert "asynchronous text messaging" in prompt_text
+    assert "spoken delivery" not in prompt_text
+
+
+def test_orchestrate_chat_voice_surface_adds_spoken_active_task_guidance(client):
+    rid = "rid-voice-surface"
+    r = client.post(
+        "/v1/orchestrate/chat",
+        headers={**auth_headers(), "X-Request-ID": rid},
+        json={
+            "owner_id": "daniel",
+            "client_id": "car",
+            "messages": [{"role": "user", "content": "ping"}],
+            "surface_context": {
+                "surface_type": "car",
+                "interaction_mode": "voice_mediated",
+                "spoken_output": True,
+                "active_task_mode": True,
+                "allows_expansion": False,
+                "output_format": "speech",
+                "latency_preference": "low",
+            },
+        },
+    )
+    assert r.status_code == 200
+
+    prompt_text = _system_prompt_text()
+    assert "spoken delivery" in prompt_text
+    assert "active-task context" in prompt_text
+    assert "Do not add optional elaboration" in prompt_text
+
+    trace = client.get(f"/v1/traces/{rid}", headers=auth_headers()).json()
+    assert trace["surface"] == "car"
+    assert trace["profile"]["surface_context"]["spoken_output"] is True
+    assert trace["profile"]["surface_context"]["active_task_mode"] is True
+
+
+def test_orchestrate_chat_surface_context_overrides_legacy_surface(client):
+    rid = "rid-surface-override"
+    r = client.post(
+        "/v1/orchestrate/chat",
+        headers={**auth_headers(), "X-Request-ID": rid},
+        json={
+            "owner_id": "daniel",
+            "client_id": "vscode",
+            "surface": "vscode",
+            "messages": [{"role": "user", "content": "ping"}],
+            "surface_context": {
+                "surface_type": "telegram",
+                "interaction_mode": "text",
+                "spoken_output": False,
+            },
+        },
+    )
+    assert r.status_code == 200
+
+    trace = client.get(f"/v1/traces/{rid}", headers=auth_headers()).json()
+    assert trace["surface"] == "telegram"
+    assert trace["profile"]["surface_context"]["surface_type"] == "telegram"
+    assert trace["profile"]["surface_compatibility_note"] == {
+        "kind": "surface_type_override",
+        "top_level_surface": "vscode",
+        "surface_context_surface_type": "telegram",
+        "resolved_surface_type": "telegram",
+    }
 
 
 def test_v1_chat_includes_artifact_snippets_in_prompt(client, monkeypatch):
