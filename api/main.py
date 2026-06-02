@@ -1271,16 +1271,14 @@ async def _run_chat(
     artifact_snips = await pg.get_derived_text_snippets_by_ids(artifact_ids_for_prompt)
     recent = await pg.get_recent_messages(conversation_id=cid, limit=settings.recent_turns)
 
-    resolved_surface_behavior = surface_behavior or _resolve_surface_behavior(surface, None)
-
     system_preamble = (
         "You are a helpful assistant.\n"
         "- Use the provided context when relevant.\n"
         "- If context conflicts, prefer newer timestamps.\n"
         "- Do not invent facts.\n"
     )
-    surface_instruction_block = _build_surface_instruction_block(resolved_surface_behavior)
-    if surface_instruction_block:
+    if surface_behavior:
+        surface_instruction_block = _build_surface_instruction_block(surface_behavior)
         system_preamble += surface_instruction_block + "\n"
     message_context_block = build_context_block(retrieved=retrieved, max_chars=settings.max_context_chars)
     artifact_context_block = build_artifact_context_block(
@@ -1369,24 +1367,28 @@ async def _run_chat(
                     "conversation_id": cid,
                     "owner_id": owner_id,
                     "client_id": client_id,
-                    "surface": resolved_surface_behavior["surface_type"],
-                    "profile": {
-                        "surface_context": {
-                            "surface_type": resolved_surface_behavior["surface_type"],
-                            "interaction_mode": resolved_surface_behavior["interaction_mode"],
-                            "spoken_output": resolved_surface_behavior["spoken_output"],
-                            "active_task_mode": resolved_surface_behavior["active_task_mode"],
-                            "latency_preference": resolved_surface_behavior["latency_preference"],
-                            "verbosity_target": resolved_surface_behavior["verbosity_target"],
-                            "allows_expansion": resolved_surface_behavior["allows_expansion"],
-                            "output_format": resolved_surface_behavior["output_format"],
-                        },
-                        **(
-                            {"surface_compatibility_note": resolved_surface_behavior["compatibility_note"]}
-                            if resolved_surface_behavior["compatibility_note"]
-                            else {}
-                        ),
-                    },
+                    "surface": surface or "chat",
+                    "profile": (
+                        {
+                            "surface_context": {
+                                "surface_type": surface_behavior["surface_type"],
+                                "interaction_mode": surface_behavior["interaction_mode"],
+                                "spoken_output": surface_behavior["spoken_output"],
+                                "active_task_mode": surface_behavior["active_task_mode"],
+                                "latency_preference": surface_behavior["latency_preference"],
+                                "verbosity_target": surface_behavior["verbosity_target"],
+                                "allows_expansion": surface_behavior["allows_expansion"],
+                                "output_format": surface_behavior["output_format"],
+                            },
+                            **(
+                                {"surface_compatibility_note": surface_behavior["compatibility_note"]}
+                                if surface_behavior["compatibility_note"]
+                                else {}
+                            ),
+                        }
+                        if surface_behavior
+                        else {}
+                    ),
                     "router_decision": {
                     "selected_model": settings.chat_model,
                     "rule_id": "default-chat-model",

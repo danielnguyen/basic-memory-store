@@ -425,6 +425,27 @@ def test_v1_chat_happy_path(client):
     assert isinstance(body["retrieved_count"], int)
 
 
+def test_v1_chat_trace_profile_remains_unchanged(client):
+    rid = "rid-v1-chat"
+    r = client.post(
+        "/v1/chat",
+        headers={**auth_headers(), "X-Request-ID": rid},
+        json={
+            "owner_id": "daniel",
+            "client_id": "smoke",
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    )
+    assert r.status_code == 200
+
+    prompt_text = _system_prompt_text()
+    assert "Surface behavior guidance:" not in prompt_text
+
+    trace = client.get(f"/v1/traces/{rid}", headers=auth_headers()).json()
+    assert trace["surface"] == "chat"
+    assert trace["profile"] == {}
+
+
 def test_v1_retrieve_passes_exclude_ids(client, monkeypatch):
     # Arrange: make qdrant return one fake hit and ensure exclude ids are accepted
     hit_id = str(uuid.uuid4())
