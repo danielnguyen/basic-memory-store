@@ -742,7 +742,7 @@ class EpisodeDebugResponse(BaseModel):
     events: List[EpisodeEventItem] = Field(default_factory=list)
 
 
-# ---- Cluster 9C / R22 recall selection ----
+# ---- Recall selection ----
 
 RecallCandidateType = Literal["memory_item", "episode", "message", "artifact", "event", "derived_text"]
 RecallDecisionValue = Literal["mention", "suppress", "implicit_only"]
