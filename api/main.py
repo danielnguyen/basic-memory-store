@@ -365,7 +365,7 @@ def _score_item(
             recency_adjustment = 0.12 * boost
 
     conversation_boost = float(settings.retrieval_conversation_boost) if is_same_conversation else 0.0
-    # R08 mentions pinned overrides, but the current v2 retrieval bundle does not include pinned memories.
+    # The current v2 retrieval bundle does not include pinned memories.
     # Pinned memories remain exposed separately through the unchanged tiered retrieval path.
     pinned_bias = float(settings.retrieval_pinned_bias) if is_pinned else 0.0
     final_score = base_score + recency_adjustment + conversation_boost + pinned_bias - missing_score

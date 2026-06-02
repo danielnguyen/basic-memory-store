@@ -127,7 +127,7 @@ class Settings(BaseSettings):
     enable_graph_retrieval_expansion: bool = Field(default=False, alias="ENABLE_GRAPH_RETRIEVAL_EXPANSION")
     max_context_chars: int = Field(default=12000, alias="MAX_CONTEXT_CHARS", ge=1000, le=200000)
 
-    # --- R04/R11 ---
+    # --- Trace and profile settings ---
     require_request_id: bool = Field(default=True, alias="REQUIRE_REQUEST_ID")
     enforce_request_id_header_body_match: bool = Field(default=True, alias="ENFORCE_REQUEST_ID_HEADER_BODY_MATCH")
     enable_trace_storage: bool = Field(default=True, alias="ENABLE_TRACE_STORAGE")
@@ -136,7 +136,7 @@ class Settings(BaseSettings):
     enable_profile_resolve: bool = Field(default=True, alias="ENABLE_PROFILE_RESOLVE")
     default_profile_name: str = Field(default="dev", alias="DEFAULT_PROFILE_NAME")
 
-    # --- Artifact storage hooks (MVP-friendly; S3/MinIO integration can be added later) ---
+    # --- Artifact storage hooks (S3/MinIO integration can be added later) ---
     artifacts_object_prefix: str = Field(
         default="artifacts",
         alias="ARTIFACTS_OBJECT_PREFIX",
