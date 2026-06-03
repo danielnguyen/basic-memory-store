@@ -720,9 +720,10 @@ def test_orchestrate_chat_without_surface_context_keeps_default_prompt_shape(cli
 
 
 def test_orchestrate_chat_telegram_surface_stays_text_first(client):
+    rid = "rid-telegram-surface"
     r = client.post(
         "/v1/orchestrate/chat",
-        headers=auth_headers(),
+        headers={**auth_headers(), "X-Request-ID": rid},
         json={
             "owner_id": "daniel",
             "client_id": "telegram",
@@ -738,11 +739,17 @@ def test_orchestrate_chat_telegram_surface_stays_text_first(client):
     assert r.status_code == 200
 
     prompt_text = _system_prompt_text()
-    assert "asynchronous text messaging" in prompt_text
+    assert "Surface behavior guidance:" not in prompt_text
     assert "spoken delivery" not in prompt_text
 
+    trace = client.get(f"/v1/traces/{rid}", headers=auth_headers()).json()
+    assert trace["surface"] == "telegram"
+    assert trace["profile"]["surface_context"]["surface_type"] == "telegram"
+    assert trace["profile"]["surface_context"]["spoken_output"] is False
+    assert trace["profile"]["surface_context"]["interaction_mode"] == "text"
 
-def test_orchestrate_chat_voice_surface_adds_spoken_active_task_guidance(client):
+
+def test_orchestrate_chat_voice_surface_keeps_default_prompt_shape_and_preserves_trace(client):
     rid = "rid-voice-surface"
     r = client.post(
         "/v1/orchestrate/chat",
@@ -765,14 +772,18 @@ def test_orchestrate_chat_voice_surface_adds_spoken_active_task_guidance(client)
     assert r.status_code == 200
 
     prompt_text = _system_prompt_text()
-    assert "spoken delivery" in prompt_text
-    assert "active-task context" in prompt_text
-    assert "Do not add optional elaboration" in prompt_text
+    assert "Surface behavior guidance:" not in prompt_text
+    assert "spoken delivery" not in prompt_text
 
     trace = client.get(f"/v1/traces/{rid}", headers=auth_headers()).json()
     assert trace["surface"] == "car"
+    assert trace["profile"]["surface_context"]["surface_type"] == "car"
+    assert trace["profile"]["surface_context"]["interaction_mode"] == "voice_mediated"
     assert trace["profile"]["surface_context"]["spoken_output"] is True
     assert trace["profile"]["surface_context"]["active_task_mode"] is True
+    assert trace["profile"]["surface_context"]["allows_expansion"] is False
+    assert trace["profile"]["surface_context"]["output_format"] == "speech"
+    assert trace["profile"]["surface_context"]["latency_preference"] == "low"
 
 
 def test_orchestrate_chat_surface_context_overrides_legacy_surface(client):

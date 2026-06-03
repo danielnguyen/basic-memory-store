@@ -303,33 +303,6 @@ def _resolve_surface_behavior(surface: str | None, surface_context: SurfaceConte
     }
 
 
-def _build_surface_instruction_block(surface_behavior: dict[str, Any]) -> str:
-    lines: list[str] = []
-
-    if surface_behavior["surface_type"] == "telegram":
-        lines.append("- Keep the response readable for asynchronous text messaging without forcing speech-style phrasing.")
-    if surface_behavior["spoken_output"]:
-        lines.append("- Shape the answer for spoken delivery with natural phrasing, short sentences, and minimal formatting.")
-    if surface_behavior["active_task_mode"]:
-        lines.append("- The user is in an active-task context, so lead with the answer and keep it brief, decisive, and low-distraction.")
-    elif surface_behavior["verbosity_target"] == "short":
-        lines.append("- Keep the answer concise.")
-    elif surface_behavior["verbosity_target"] == "detailed":
-        lines.append("- Provide a fuller explanation when it materially helps.")
-    if surface_behavior["allows_expansion"] is False:
-        lines.append("- Do not add optional elaboration unless the user asks for it.")
-    if surface_behavior["latency_preference"] in {"low", "lowest"}:
-        lines.append("- Prefer a direct answer with minimal preamble.")
-    if surface_behavior["output_format"] == "speech":
-        lines.append("- Write in plain speakable text and avoid markdown-heavy structure.")
-    elif surface_behavior["output_format"] == "markdown" and not surface_behavior["spoken_output"]:
-        lines.append("- Use only lightweight markdown formatting when it improves readability.")
-
-    if not lines:
-        return ""
-    return "Surface behavior guidance:\n" + "\n".join(lines)
-
-
 def _time_window_cutoff(time_window: str) -> datetime | None:
     now = datetime.now(UTC)
     if time_window == "7d":
@@ -1277,9 +1250,6 @@ async def _run_chat(
         "- If context conflicts, prefer newer timestamps.\n"
         "- Do not invent facts.\n"
     )
-    if surface_behavior:
-        surface_instruction_block = _build_surface_instruction_block(surface_behavior)
-        system_preamble += surface_instruction_block + "\n"
     message_context_block = build_context_block(retrieved=retrieved, max_chars=settings.max_context_chars)
     artifact_context_block = build_artifact_context_block(
         [
