@@ -32,7 +32,9 @@ Use Basic Memory Store direct chat endpoints only for legacy compatibility, smok
 
 ## Recommended normal flow
 
-`client -> BMS POST /v1/conversations/resolve -> chat-orchestrator POST /v1/chat -> BMS/cognitive-runtime/LiteLLM as needed`
+`surface/client -> chat-orchestrator POST /v1/chat -> BMS/cognitive-runtime/LiteLLM as downstream services`
+
+Clients may still call Basic Memory Store `POST /v1/conversations/resolve` before `chat-orchestrator` `POST /v1/chat`, but Basic Memory Store remains a substrate service in the normal chat path rather than the primary chat entrypoint.
 
 ## Core Principles
 
