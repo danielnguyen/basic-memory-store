@@ -14,10 +14,3 @@ This repository exposes lightweight Prometheus metrics for operational visibilit
 
 - `GET /metrics`  
   Returns Prometheus exposition format (`text/plain`).
-
-## Future probes (suggested)
-
-- Request totals and latency histograms per endpoint.
-- LLM call latency and error counters by model/provider.
-- Retrieval hit-count and fallback counters.
-- Artifact lifecycle counters (`init`, `complete`, `failed`).
