@@ -1,22 +1,18 @@
-# Memory Service – User Scenarios & API Flow
+# Memory Service Usage
 
-This document describes the **expected user scenarios** and the **API calls** each client should make when interacting with the memory service.
+This document describes how operators and developers use the current Basic Memory Store API surface.
 
-The system is designed to be:
-- Stateless on the client side
-- Durable and authoritative on the server side
-- Explicit about memory scope (no hidden magic)
-- Suitable for multi-device use (voice, mobile, desktop, etc.)
+## Integration Rule
 
----
+Normal chat clients call `chat-orchestrator` `POST /v1/chat`.
 
-## Current integration rule
+Basic Memory Store direct chat endpoints remain available for compatibility workflows, direct smoke tests, and substrate debugging:
 
-Normal chat clients should call `chat-orchestrator` `POST /v1/chat`, not Basic Memory Store `POST /v1/chat`.
+- `POST /v1/chat`
+- `POST /v1/orchestrate/chat`
+- `POST /v1/retrieve`
 
-Use Basic Memory Store direct chat endpoints only for legacy compatibility, smoke testing, substrate debugging, or other intentional direct-mode workflows. Do not use Basic Memory Store `POST /v1/chat`, `POST /v1/orchestrate/chat`, or `POST /v1/retrieve` for new Telegram, voice, mobile, desktop, or Cluster 10+ chat flows.
-
-## API ownership
+## API Ownership
 
 | Capability | Owner / Endpoint |
 |------|------------------|
@@ -29,47 +25,38 @@ Use Basic Memory Store direct chat endpoints only for legacy compatibility, smok
 | Artifact metadata | Basic Memory Store artifact endpoints |
 | Traces | Basic Memory Store `GET /v1/traces/{request_id}` |
 | Proactive suggestions | Basic Memory Store proactive endpoints |
+| Metrics | Basic Memory Store `GET /metrics` |
 
-## Recommended normal flow
+## Normal Request Flow
 
-`surface/client -> chat-orchestrator POST /v1/chat -> BMS/cognitive-runtime/LiteLLM as downstream services`
+`surface/client -> chat-orchestrator POST /v1/chat -> basic-memory-store/cognitive-runtime/LiteLLM`
 
-Clients may still call Basic Memory Store `POST /v1/conversations/resolve` before `chat-orchestrator` `POST /v1/chat`, but Basic Memory Store remains a substrate service in the normal chat path rather than the primary chat entrypoint.
+Basic Memory Store remains the durable memory substrate in that path.
 
-## Core Principles
+## Core Behavior
 
-- **Clients are stateless.**
-- **Basic Memory Store owns memory state**: conversations, messages, retrieval scope, artifacts, traces, and proactive suggestion state.
-- Clients decide *when* to widen memory scope.
-- Basic Memory Store enforces retrieval semantics.
-- chat-orchestrator decides how retrieved context is applied to normal chat turns.
+- Clients stay stateless.
+- Basic Memory Store owns conversations, messages, retrieval scope, artifacts, traces, and proactive suggestion state.
+- Clients choose when to widen retrieval scope.
+- Retrieval semantics are enforced in Basic Memory Store.
+- `chat-orchestrator` decides how retrieved context is applied to a normal chat turn.
 
----
-
-## Identifiers Used in Examples
+## Example Identifiers
 
 - `owner_id`: `user_123`
 - `client_id`: `car`, `phone`, `desktop`, `voice`
 - Conversation IDs are UUIDs returned by the service.
-- Example content is intentionally generic.
 
----
+## Resolve Or Reuse A Conversation
 
-## 1. Start or Resume an Interaction (Any Client)
+API call:
 
-**Examples**
-- Voice assistant invocation
-- Car assistant request
-- Mobile app opens
-- Desktop app resumes
-
-### Goal
-Obtain the correct conversation ID without the client storing state.
-
-### API Call
+```text
 POST /v1/conversations/resolve
+```
 
-### Request
+Request:
+
 ```json
 {
   "owner_id": "user_123",
@@ -78,7 +65,8 @@ POST /v1/conversations/resolve
 }
 ```
 
-### Response
+Response:
+
 ```json
 {
   "conversation_id": "uuid",
@@ -86,28 +74,17 @@ POST /v1/conversations/resolve
 }
 ```
 
-### Behavior
-- Reuses the most recent conversation for `(owner_id, client_id)` if active.
-- Otherwise creates a new conversation.
-- Client does **not** need to persist conversation IDs long-term.
+Behavior:
 
----
+- Reuses the most recent active conversation for `(owner_id, client_id)`.
+- Creates a new conversation when no active one matches.
 
-## 2. Normal Conversational Turn (Default Behavior)
+## Normal Chat Turn
 
-Normal chat clients should use `chat-orchestrator` `POST /v1/chat` after resolving a conversation in Basic Memory Store. Basic Memory Store `POST /v1/chat` is legacy/direct mode only and should not be the default for new chat surfaces.
+Resolve the conversation in Basic Memory Store, then call `chat-orchestrator` `POST /v1/chat`.
 
-**Examples**
-- “What device am I using?”
-- “What did we talk about earlier?”
+Example request:
 
-### Goal
-Append a user message, retrieve relevant context **from the current conversation**, and respond.
-
-### API Call
-`chat-orchestrator` `POST /v1/chat`
-
-### Request
 ```json
 {
   "owner_id": "user_123",
@@ -124,55 +101,7 @@ Append a user message, retrieve relevant context **from the current conversation
 }
 ```
 
-### Server Behavior
-- Persist user message (Postgres)
-- Index message for retrieval (Qdrant, best-effort)
-- Retrieve context scoped to `owner_id + conversation_id`
-- If retrieval is weak/empty, fallback to a broader scope (owner) when configured
-- Assemble prompt and call LLM
-- Persist assistant response and index it (best-effort)
-
-### Response
-```json
-{
-  "conversation_id": "uuid",
-  "answer": "You are currently interacting from your car system.",
-  "retrieved_count": 6
-}
-```
-
----
-
-## 3. Long-Term Recall (“Search My Memory”)
-
-**Examples**
-- “Search my memory for previous discussions about travel”
-- “Do you remember what I said about my preferences?”
-
-### Goal
-Widen retrieval beyond the current conversation while still using the normal chat entrypoint.
-
-### API Call
-`chat-orchestrator` `POST /v1/chat`
-
-### Request
-```json
-{
-  "owner_id": "user_123",
-  "client_id": "phone",
-  "conversation_id": "uuid",
-  "messages": [
-    { "role": "user", "content": "Search my memory for previous travel discussions." }
-  ],
-  "retrieval": {
-    "scope": "owner",
-    "k": 12,
-    "min_score": 0.2
-  }
-}
-```
-
-### Retrieval Scopes
+Current retrieval scopes:
 
 | Scope | Retrieval Filter |
 |------|------------------|
@@ -180,41 +109,24 @@ Widen retrieval beyond the current conversation while still using the normal cha
 | client | owner + client |
 | owner | owner only |
 
----
+When `scope="conversation"` yields weak results, the service can perform a broader fallback retrieval pass. Explicit `client` or `owner` scope requests are respected as requested.
 
-## 4. Two-pass retrieval fallback (conversation → owner)
+## Conversation Listing And Recovery
 
-When `scope="conversation"` and the results are weak (empty, or fewer than ~half of `k`), the service may perform a second pass at a broader scope (typically `owner`) to improve recall.
+API call:
 
-Notes:
-- This fallback only happens for `scope="conversation"`.
-- If the client explicitly requests `scope="client"` or `scope="owner"`, that request is respected.
-- The service drops self-matches so `retrieved_count` stays meaningful.
-
----
-
-## 5. Multi-Device Usage
-
-Each device:
-- Uses a unique `client_id`
-- Has its own rolling conversation
-- Can still access shared memory via broader scopes
-
-Recommended defaults:
-- Use `scope="conversation"` for normal turns.
-- Use `scope="owner"` only when the user explicitly asks to “search memory”.
-
----
-
-## 6. Conversation Recovery & Introspection
-
-### API Call
+```text
 GET /v1/conversations
+```
 
-### Request
-`/v1/conversations?owner_id=user_123&client_id=car&limit=20`
+Example query:
 
-### Response
+```text
+/v1/conversations?owner_id=user_123&client_id=car&limit=20
+```
+
+Example response:
+
 ```json
 {
   "conversations": [
@@ -229,26 +141,33 @@ GET /v1/conversations
 }
 ```
 
----
+## Message Append And Backfill
 
-## 7. Direct Message Append (Optional)
+API call:
 
-### API Call
+```text
 POST /v1/conversations/{conversation_id}/messages
+```
 
-Use when:
-- you want to store messages without calling the LLM
-- you want to backfill history from another system
-- you want deterministic ingestion separate from chat
+Use this endpoint when you need to persist messages without invoking an LLM response path.
 
----
+## Retrieval Endpoints
 
-## 8. Tier-aware Retrieval (Additive)
+Direct retrieval:
 
-### API Call
+```text
+POST /v2/conversations/{conversation_id}/retrieve
+```
+
+Legacy retrieval shape:
+
+```text
 POST /v1/conversations/{conversation_id}/retrieve
+POST /v1/retrieve
+```
 
-### Request
+Example request:
+
 ```json
 {
   "owner_id": "user_123",
@@ -259,21 +178,24 @@ POST /v1/conversations/{conversation_id}/retrieve
 }
 ```
 
-### Response shape
-- `working`: recent conversation window
-- `semantic`: vector matches
-- `pinned`: pinned-memory overlay hooks
-- `policy`: policy overlay hooks
-- `persona`: persona overlay hooks
+Current response tiers can include:
 
----
+- `working`
+- `semantic`
+- `pinned`
+- `policy`
+- `persona`
 
-## 9. File Ingestion
+## File Ingestion
 
-### API Call
+API call:
+
+```text
 POST /v1/ingestion/files
+```
 
-### Request
+Example request:
+
 ```json
 {
   "owner_id": "user_123",
@@ -284,94 +206,86 @@ POST /v1/ingestion/files
 }
 ```
 
-### Behavior
-- discovers local text/code files under the provided paths
+Current behavior:
+
+- discovers local text and code files under the provided paths
 - applies configured extension and exclude-glob filters
 - chunks file contents
 - embeds chunk text and stores vectors in Qdrant
 - stores source attribution on `artifacts`
 
-### Notes
+Current constraints:
+
 - ingestion is not conversation-scoped
-- retrieval mixes artifact chunk hits alongside existing message retrieval
+- retrieval mixes artifact chunk hits with message retrieval
 - artifact refs are capped in retrieval output
-- repeated ingest of the same file may currently surface duplicate `artifact_refs`
+- repeated ingest of the same file can surface duplicate `artifact_refs`
 
----
+If your database needs the artifact-ingestion schema update, apply:
 
-## 10. Artifact Metadata Flow (Additive)
+```bash
+psql "$PG_DSN" -f db/migrations/20260402_artifact_ingestion_additive.sql
+```
 
-### Initialize upload
+## Artifact Metadata Flow
+
+Endpoints:
+
+```text
 POST /v1/artifacts/init
-
-### Complete upload
 POST /v1/artifacts/complete
-
-### Get artifact metadata
 GET /v1/artifacts/{artifact_id}
+```
 
-Notes:
-- Existing chat clients do not need to use these endpoints.
-- Object/blob upload is modeled as a presigned-url style flow.
-- With `OBJECT_STORE_ENABLED=true`, `upload_url` and `download_url` are real signed URLs from MinIO/S3.
-- With object-store disabled, these remain placeholder URLs for integration wiring.
-- If PUT signing includes `Content-Type`, clients must upload with the exact same `Content-Type` header.
+Current behavior:
 
----
+- upload and download are modeled as a presigned-URL flow
+- `OBJECT_STORE_ENABLED=true` returns real signed MinIO or S3-compatible URLs
+- object-store-disabled mode returns placeholder URLs for integration wiring
+- if a signed PUT requires `Content-Type`, the upload must send the exact same header
 
-## 11. Legacy/direct orchestration + traces
+## Direct Compatibility Endpoints
 
-### API Calls
-- POST /v1/orchestrate/chat
-- GET /v1/traces/{request_id}
+Endpoints:
 
-`POST /v1/orchestrate/chat` is a legacy/direct-mode Basic Memory Store endpoint. Do not use it for new Telegram, voice, mobile, desktop, or Cluster 10+ chat flows. Use it only when you intentionally need direct substrate-level orchestration and trace inspection.
+```text
+POST /v1/chat
+POST /v1/orchestrate/chat
+POST /v1/retrieve
+```
 
----
+These endpoints remain available for direct compatibility coverage and substrate debugging. For normal application chat flows, use `chat-orchestrator` `POST /v1/chat`.
 
-## 12. Ops Metrics
+## Traces And Metrics
 
-### API Call
+Trace lookup:
+
+```text
+GET /v1/traces/{request_id}
+```
+
+Metrics:
+
+```text
 GET /metrics
+```
 
-Returns Prometheus exposition format including retrieval telemetry counters.
+`GET /metrics` returns Prometheus exposition format. `GET /v1/traces/{request_id}` returns stored request trace data for operator inspection.
 
----
-
-## Summary: Scenarios → APIs
+## Scenario Summary
 
 | Scenario | API |
 |--------|-----|
-| Start / resume session | Basic Memory Store `POST /v1/conversations/resolve` |
+| Start or resume session | Basic Memory Store `POST /v1/conversations/resolve` |
 | Normal chat | `chat-orchestrator` `POST /v1/chat` |
 | Long-term memory search | `chat-orchestrator` `POST /v1/chat` with broader retrieval scope |
-| Legacy/direct chat | Basic Memory Store `POST /v1/chat` |
-| Legacy/direct orchestration | Basic Memory Store `POST /v1/orchestrate/chat` |
-| Legacy/direct retrieval | Basic Memory Store `POST /v1/retrieve` and `POST /v1/conversations/{id}/retrieve` |
+| Direct compatibility chat | Basic Memory Store `POST /v1/chat` |
+| Direct compatibility orchestration | Basic Memory Store `POST /v1/orchestrate/chat` |
 | Direct retrieval | Basic Memory Store `POST /v2/conversations/{id}/retrieve` |
+| Legacy retrieval | Basic Memory Store `POST /v1/retrieve` and `POST /v1/conversations/{id}/retrieve` |
 | List conversations | Basic Memory Store `GET /v1/conversations` |
-| Manual message append | Basic Memory Store `POST /v1/conversations/{id}/messages` |
+| Append messages | Basic Memory Store `POST /v1/conversations/{id}/messages` |
 | File ingestion | Basic Memory Store `POST /v1/ingestion/files` |
-| Artifact metadata flow | Basic Memory Store `POST /v1/artifacts/init` + `/complete` + `GET /v1/artifacts/{id}` |
-| Explainability trace lookup | Basic Memory Store `GET /v1/traces/{request_id}` |
-| Prometheus metrics | Basic Memory Store `GET /metrics` |
-
-## 12. Legacy/direct-mode endpoints
-
-These Basic Memory Store endpoints still exist for compatibility and debugging, but they are not the recommended normal chat path:
-
-- `POST /v1/chat`
-- `POST /v1/orchestrate/chat`
-- `POST /v1/retrieve`
-
-Do not use them for new Telegram, voice, mobile, desktop, or Cluster 10+ chat flows. Normal chat clients should resolve the conversation in Basic Memory Store, then call `chat-orchestrator` `POST /v1/chat`.
-
----
-
-## Design Rationale
-
-- Stateless clients
-- Centralized memory semantics
-- Explicit retrieval scope
-- No premature topic modeling
-- Easy future extensibility
+| Artifact metadata | Basic Memory Store `POST /v1/artifacts/init` + `/complete` + `GET /v1/artifacts/{id}` |
+| Trace lookup | Basic Memory Store `GET /v1/traces/{request_id}` |
+| Metrics | Basic Memory Store `GET /metrics` |
