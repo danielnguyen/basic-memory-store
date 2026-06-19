@@ -1019,6 +1019,7 @@ async def retrieve_tiered_v2(conversation_id: str, body: RetrieveBundleRequest, 
         raise HTTPException(status_code=404, detail="conversation_id not found")
 
     opts = body.retrieval or RetrievalOptions(k=settings.retrieval_k, min_score=0.25, scope="conversation")
+    include_artifacts = True if body.include_artifacts is None else body.include_artifacts
     bundle = await build_retrieval_bundle(
         pg=pg,
         qdrant=qdrant,
@@ -1028,6 +1029,7 @@ async def retrieve_tiered_v2(conversation_id: str, body: RetrieveBundleRequest, 
         client_id=convo.get("client_id"),
         query=body.query,
         opts=opts,
+        include_artifacts=include_artifacts,
     )
 
     return RetrieveBundleResponse(

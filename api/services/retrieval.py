@@ -226,6 +226,7 @@ async def build_retrieval_bundle(
     client_id: str | None,
     query: str,
     opts: RetrievalOptions,
+    include_artifacts: bool = True,
 ) -> RetrievalBundle:
     message_results = await retrieve_ranked_messages(
         pg=pg,
@@ -240,14 +241,18 @@ async def build_retrieval_bundle(
     )
     ranked_semantic = message_results["ranked_semantic"]
 
-    artifact_k = retrieval_artifact_k(settings)
-    artifact_hits = await qdrant.search_artifact_chunks(
-        owner_id=owner_id,
-        query=query,
-        k=artifact_k,
-        min_score=opts.min_score,
-        client_id=(client_id if opts.scope == "client" else None),
-    ) if artifact_k > 0 else []
+    artifact_k = retrieval_artifact_k(settings) if include_artifacts else 0
+    artifact_hits = (
+        await qdrant.search_artifact_chunks(
+            owner_id=owner_id,
+            query=query,
+            k=artifact_k,
+            min_score=opts.min_score,
+            client_id=(client_id if opts.scope == "client" else None),
+        )
+        if artifact_k > 0
+        else []
+    )
 
     artifact_ids: list[UUID] = []
     artifact_score_by_id: dict[str, float] = {}
@@ -333,6 +338,7 @@ async def build_retrieval_bundle(
         ),
         retrieval_debug={
             **message_results["retrieval_debug"],
+            "artifacts_included": include_artifacts,
             "artifact_candidates": len(artifact_snips),
             "artifact_ranked": len(ranked_artifacts),
             "graph_expansion_applied": False,

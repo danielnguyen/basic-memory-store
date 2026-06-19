@@ -1,7 +1,8 @@
 import types
 import uuid
 
-from fastapi.testclient import TestClient
+import httpx
+import pytest
 
 import main as main_module
 
@@ -79,6 +80,7 @@ class FakePG:
 class FakeQdrant:
     def __init__(self, *, message_scores=None):
         self.message_scores = message_scores or [0.77]
+        self.artifact_search_calls = []
 
     def ping(self):
         return True
@@ -90,6 +92,7 @@ class FakeQdrant:
         ]
 
     async def search_artifact_chunks(self, **kwargs):
+        self.artifact_search_calls.append(kwargs)
         return [
             types.SimpleNamespace(
                 derived_text_id=str(uuid.uuid4()),
@@ -108,7 +111,27 @@ class FakeQdrant:
         ]
 
 
-def test_retrieve_bundle_shape(monkeypatch):
+async def _post_retrieve_bundle(
+    *,
+    conversation_id: str,
+    request_id: str,
+    body: dict[str, object],
+):
+    async with main_module.app.router.lifespan_context(main_module.app):
+        transport = httpx.ASGITransport(app=main_module.app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.post(
+                f"/v2/conversations/{conversation_id}/retrieve",
+                headers={"X-API-Key": "testkey", "X-Request-ID": request_id},
+                json=body,
+            )
+
+
+@pytest.mark.asyncio
+async def test_retrieve_bundle_shape(monkeypatch):
     fake_pg = FakePG()
     fake_qdrant = FakeQdrant()
     fake_settings = types.SimpleNamespace(
@@ -128,43 +151,41 @@ def test_retrieve_bundle_shape(monkeypatch):
     monkeypatch.setattr(main_module, "pg", fake_pg, raising=True)
     monkeypatch.setattr(main_module, "qdrant", fake_qdrant, raising=True)
 
-    client = TestClient(main_module.app)
-    try:
-        rid = "rid-1"
-        conversation_id = str(uuid.uuid4())
-        r = client.post(
-            f"/v2/conversations/{conversation_id}/retrieve",
-            headers={"X-API-Key": "testkey", "X-Request-ID": rid},
-            json={"request_id": rid, "owner_id": "owner", "query": "hello"},
-        )
-        assert r.status_code == 200
-        body = r.json()
-        assert body["request_id"] == rid
-        assert body["conversation_id"] == conversation_id
-        assert body["bundle"]["recent"][0]["content"] == "recent snippet"
-        assert body["bundle"]["semantic"][0]["content"] == "semantic result 0"
-        assert body["bundle"]["semantic"][0]["score"] >= 0.77
-        assert body["bundle"]["semantic"][0]["score_details"]["semantic_score"] == 0.77
-        assert body["bundle"]["artifact_refs"][0]["file_path"] == "api/helpers.py"
-        assert len(body["bundle"]["artifact_refs"]) == 1
-        assert body["bundle"]["observed_metadata"] == {
-            "mime_types": ["text/plain"],
-            "has_artifacts": True,
-            "has_code_like_content": True,
-            "estimated_chars": len("recent snippetsemantic result 0def important_helper(): passdef important_helper(): pass"),
-        }
-        assert body["bundle"]["token_estimate_total"] == len("recent snippetsemantic result 0def important_helper(): passdef important_helper(): pass") // 4
-        assert body["bundle"]["retrieval_debug"]["time_window"] == "all"
-        assert body["bundle"]["retrieval_debug"]["retrieval_mode"] == "balanced"
-        assert "pinned memories are not part of the v2 ranked bundle" in body["bundle"]["retrieval_debug"]["pinned_handling"]
-    finally:
-        client.close()
+    rid = "rid-1"
+    conversation_id = str(uuid.uuid4())
+    r = await _post_retrieve_bundle(
+        conversation_id=conversation_id,
+        request_id=rid,
+        body={"request_id": rid, "owner_id": "owner", "query": "hello"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["request_id"] == rid
+    assert body["conversation_id"] == conversation_id
+    assert body["bundle"]["recent"][0]["content"] == "recent snippet"
+    assert body["bundle"]["semantic"][0]["content"] == "semantic result 0"
+    assert body["bundle"]["semantic"][0]["score"] >= 0.77
+    assert body["bundle"]["semantic"][0]["score_details"]["semantic_score"] == 0.77
+    assert body["bundle"]["artifact_refs"][0]["file_path"] == "api/helpers.py"
+    assert len(body["bundle"]["artifact_refs"]) == 1
+    assert body["bundle"]["observed_metadata"] == {
+        "mime_types": ["text/plain"],
+        "has_artifacts": True,
+        "has_code_like_content": True,
+        "estimated_chars": len("recent snippetsemantic result 0def important_helper(): passdef important_helper(): pass"),
+    }
+    assert body["bundle"]["token_estimate_total"] == len("recent snippetsemantic result 0def important_helper(): passdef important_helper(): pass") // 4
+    assert body["bundle"]["retrieval_debug"]["time_window"] == "all"
+    assert body["bundle"]["retrieval_debug"]["retrieval_mode"] == "balanced"
+    assert body["bundle"]["retrieval_debug"]["artifacts_included"] is True
+    assert "pinned memories are not part of the v2 ranked bundle" in body["bundle"]["retrieval_debug"]["pinned_handling"]
 
 
-def test_retrieve_bundle_recent_mode_with_30d_window(monkeypatch):
+@pytest.mark.asyncio
+async def test_retrieve_bundle_recent_mode_with_30d_window(monkeypatch):
     fake_pg = FakePG(
         message_times=[
-            "2026-05-20T00:00:00+00:00",
+            "2026-06-10T00:00:00+00:00",
             "2025-10-01T00:00:00+00:00",
         ]
     )
@@ -186,33 +207,30 @@ def test_retrieve_bundle_recent_mode_with_30d_window(monkeypatch):
     monkeypatch.setattr(main_module, "pg", fake_pg, raising=True)
     monkeypatch.setattr(main_module, "qdrant", fake_qdrant, raising=True)
 
-    client = TestClient(main_module.app)
-    try:
-        rid = "rid-recent"
-        conversation_id = str(uuid.uuid4())
-        r = client.post(
-            f"/v2/conversations/{conversation_id}/retrieve",
-            headers={"X-API-Key": "testkey", "X-Request-ID": rid},
-            json={
-                "request_id": rid,
-                "owner_id": "owner",
-                "query": "hello",
-                "retrieval": {"time_window": "30d", "retrieval_mode": "recent"},
-            },
-        )
-        assert r.status_code == 200
-        body = r.json()
-        assert body["bundle"]["retrieval_debug"]["time_window"] == "30d"
-        assert body["bundle"]["retrieval_debug"]["retrieval_mode"] == "recent"
-        assert body["bundle"]["retrieval_debug"]["semantic_candidates"] == 2
-        assert body["bundle"]["retrieval_debug"]["semantic_ranked"] == 1
-        assert len(body["bundle"]["semantic"]) == 1
-        assert body["bundle"]["semantic"][0]["content"] == "semantic result 0"
-    finally:
-        client.close()
+    rid = "rid-recent"
+    conversation_id = str(uuid.uuid4())
+    r = await _post_retrieve_bundle(
+        conversation_id=conversation_id,
+        request_id=rid,
+        body={
+            "request_id": rid,
+            "owner_id": "owner",
+            "query": "hello",
+            "retrieval": {"time_window": "30d", "retrieval_mode": "recent"},
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["bundle"]["retrieval_debug"]["time_window"] == "30d"
+    assert body["bundle"]["retrieval_debug"]["retrieval_mode"] == "recent"
+    assert body["bundle"]["retrieval_debug"]["semantic_candidates"] == 2
+    assert body["bundle"]["retrieval_debug"]["semantic_ranked"] == 1
+    assert len(body["bundle"]["semantic"]) == 1
+    assert body["bundle"]["semantic"][0]["content"] == "semantic result 0"
 
 
-def test_retrieve_bundle_historical_mode_with_older_content(monkeypatch):
+@pytest.mark.asyncio
+async def test_retrieve_bundle_historical_mode_with_older_content(monkeypatch):
     fake_pg = FakePG(
         message_times=[
             "2026-03-25T00:00:00+00:00",
@@ -237,25 +255,142 @@ def test_retrieve_bundle_historical_mode_with_older_content(monkeypatch):
     monkeypatch.setattr(main_module, "pg", fake_pg, raising=True)
     monkeypatch.setattr(main_module, "qdrant", fake_qdrant, raising=True)
 
-    client = TestClient(main_module.app)
-    try:
-        rid = "rid-historical"
-        conversation_id = str(uuid.uuid4())
-        r = client.post(
-            f"/v2/conversations/{conversation_id}/retrieve",
-            headers={"X-API-Key": "testkey", "X-Request-ID": rid},
-            json={
-                "request_id": rid,
-                "owner_id": "owner",
-                "query": "hello",
-                "retrieval": {"time_window": "all", "retrieval_mode": "historical"},
-            },
-        )
-        assert r.status_code == 200
-        body = r.json()
-        assert body["bundle"]["retrieval_debug"]["retrieval_mode"] == "historical"
-        assert len(body["bundle"]["semantic"]) == 2
-        assert body["bundle"]["semantic"][1]["created_at"] == "2024-01-01T00:00:00+00:00"
-        assert body["bundle"]["semantic"][1]["score_details"]["semantic_score"] == 0.74
-    finally:
-        client.close()
+    rid = "rid-historical"
+    conversation_id = str(uuid.uuid4())
+    r = await _post_retrieve_bundle(
+        conversation_id=conversation_id,
+        request_id=rid,
+        body={
+            "request_id": rid,
+            "owner_id": "owner",
+            "query": "hello",
+            "retrieval": {"time_window": "all", "retrieval_mode": "historical"},
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["bundle"]["retrieval_debug"]["retrieval_mode"] == "historical"
+    assert len(body["bundle"]["semantic"]) == 2
+    assert body["bundle"]["semantic"][1]["created_at"] == "2024-01-01T00:00:00+00:00"
+    assert body["bundle"]["semantic"][1]["score_details"]["semantic_score"] == 0.74
+
+
+@pytest.mark.asyncio
+async def test_retrieve_bundle_skips_artifact_search_when_include_artifacts_false(monkeypatch):
+    fake_pg = FakePG()
+    fake_qdrant = FakeQdrant()
+    fake_settings = types.SimpleNamespace(
+        memory_api_key="testkey",
+        require_request_id=True,
+        enforce_request_id_header_body_match=True,
+        retrieval_k=8,
+        retrieval_recent_half_life_days=14,
+        retrieval_balanced_half_life_days=45,
+        retrieval_historical_half_life_days=365,
+        retrieval_conversation_boost=0.08,
+        retrieval_pinned_bias=0.12,
+        retrieval_missing_penalty_cap=0.15,
+        recent_turns=10,
+    )
+    monkeypatch.setattr(main_module, "settings", fake_settings, raising=True)
+    monkeypatch.setattr(main_module, "pg", fake_pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", fake_qdrant, raising=True)
+
+    rid = "rid-no-artifacts"
+    conversation_id = str(uuid.uuid4())
+    r = await _post_retrieve_bundle(
+        conversation_id=conversation_id,
+        request_id=rid,
+        body={
+            "request_id": rid,
+            "owner_id": "owner",
+            "query": "hello",
+            "include_artifacts": False,
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["bundle"]["semantic"][0]["content"] == "semantic result 0"
+    assert body["bundle"]["artifact_refs"] == []
+    assert body["bundle"]["observed_metadata"]["has_artifacts"] is False
+    assert body["bundle"]["retrieval_debug"]["artifacts_included"] is False
+    assert fake_qdrant.artifact_search_calls == []
+
+
+@pytest.mark.asyncio
+async def test_retrieve_bundle_explicit_include_artifacts_true_keeps_artifact_search(monkeypatch):
+    fake_pg = FakePG()
+    fake_qdrant = FakeQdrant()
+    fake_settings = types.SimpleNamespace(
+        memory_api_key="testkey",
+        require_request_id=True,
+        enforce_request_id_header_body_match=True,
+        retrieval_k=8,
+        retrieval_recent_half_life_days=14,
+        retrieval_balanced_half_life_days=45,
+        retrieval_historical_half_life_days=365,
+        retrieval_conversation_boost=0.08,
+        retrieval_pinned_bias=0.12,
+        retrieval_missing_penalty_cap=0.15,
+        recent_turns=10,
+    )
+    monkeypatch.setattr(main_module, "settings", fake_settings, raising=True)
+    monkeypatch.setattr(main_module, "pg", fake_pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", fake_qdrant, raising=True)
+
+    rid = "rid-explicit-artifacts"
+    conversation_id = str(uuid.uuid4())
+    r = await _post_retrieve_bundle(
+        conversation_id=conversation_id,
+        request_id=rid,
+        body={
+            "request_id": rid,
+            "owner_id": "owner",
+            "query": "hello",
+            "include_artifacts": True,
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["bundle"]["artifact_refs"]) == 1
+    assert body["bundle"]["retrieval_debug"]["artifacts_included"] is True
+    assert len(fake_qdrant.artifact_search_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_retrieve_bundle_omitted_include_artifacts_remains_backward_compatible(monkeypatch):
+    fake_pg = FakePG()
+    fake_qdrant = FakeQdrant()
+    fake_settings = types.SimpleNamespace(
+        memory_api_key="testkey",
+        require_request_id=True,
+        enforce_request_id_header_body_match=True,
+        retrieval_k=8,
+        retrieval_recent_half_life_days=14,
+        retrieval_balanced_half_life_days=45,
+        retrieval_historical_half_life_days=365,
+        retrieval_conversation_boost=0.08,
+        retrieval_pinned_bias=0.12,
+        retrieval_missing_penalty_cap=0.15,
+        recent_turns=10,
+    )
+    monkeypatch.setattr(main_module, "settings", fake_settings, raising=True)
+    monkeypatch.setattr(main_module, "pg", fake_pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", fake_qdrant, raising=True)
+
+    rid = "rid-default-artifacts"
+    conversation_id = str(uuid.uuid4())
+    r = await _post_retrieve_bundle(
+        conversation_id=conversation_id,
+        request_id=rid,
+        body={
+            "request_id": rid,
+            "owner_id": "owner",
+            "query": "hello",
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["bundle"]["artifact_refs"]) == 1
+    assert body["bundle"]["retrieval_debug"]["artifacts_included"] is True
+    assert len(fake_qdrant.artifact_search_calls) == 1
