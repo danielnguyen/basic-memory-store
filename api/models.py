@@ -219,7 +219,7 @@ class RetrieveBundleRequest(BaseModel):
     owner_id: str
     query: str
     retrieval: Optional[RetrievalOptions] = None
-    include_artifacts: bool = False
+    include_artifacts: Optional[bool] = None
 
 
 class ArtifactRef(BaseModel):

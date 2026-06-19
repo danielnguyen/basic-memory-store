@@ -203,13 +203,6 @@ def _require_matching_request_id(request: Request, body_request_id: str) -> str:
     return body_request_id
 
 
-def _request_field_was_provided(model: Any, field_name: str) -> bool:
-    fields_set = getattr(model, "model_fields_set", None)
-    if fields_set is None:
-        fields_set = getattr(model, "__fields_set__", set())
-    return field_name in fields_set
-
-
 def _sanitize_object_key_component(name: str) -> str:
     cleaned = name.strip()
     cleaned = cleaned.replace("\\", "_").replace("/", "_")
@@ -1026,11 +1019,7 @@ async def retrieve_tiered_v2(conversation_id: str, body: RetrieveBundleRequest, 
         raise HTTPException(status_code=404, detail="conversation_id not found")
 
     opts = body.retrieval or RetrievalOptions(k=settings.retrieval_k, min_score=0.25, scope="conversation")
-    include_artifacts = (
-        body.include_artifacts
-        if _request_field_was_provided(body, "include_artifacts")
-        else True
-    )
+    include_artifacts = True if body.include_artifacts is None else body.include_artifacts
     bundle = await build_retrieval_bundle(
         pg=pg,
         qdrant=qdrant,
