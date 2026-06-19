@@ -1667,7 +1667,7 @@ class PostgresStore:
 
     async def get_recent_message_items(self, conversation_id: UUID, limit: int = 10) -> list[dict[str, Any]]:
         q = """
-        SELECT id, conversation_id, role, content, created_at
+        SELECT id, conversation_id, role, content, metadata, created_at
         FROM messages
         WHERE conversation_id = %s
         ORDER BY created_at DESC
@@ -1685,10 +1685,68 @@ class PostgresStore:
                 "conversation_id": str(r[1]),
                 "role": r[2],
                 "content": r[3],
-                "created_at": str(r[4]),
+                "metadata": r[4] or {},
+                "created_at": str(r[5]),
             }
             for r in rows
         ]
+
+    async def get_memory_items_for_source_refs(
+        self,
+        *,
+        owner_id: str,
+        source_refs: list[dict[str, str]],
+    ) -> dict[tuple[str, str], dict[str, Any]]:
+        normalized_refs: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for ref in source_refs:
+            ref_type = str(ref.get("ref_type") or "").strip()
+            ref_id = str(ref.get("ref_id") or "").strip()
+            if not ref_type or not ref_id:
+                continue
+            key = (ref_type, ref_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized_refs.append(key)
+
+        if not normalized_refs:
+            return {}
+
+        select_cols = """
+            id, owner_id, memory_type, summary, source_refs_json, source_ref_hash,
+            scores_json, promotion_state, status, supersedes_memory_id,
+            superseded_by_memory_id, last_reinforced_at, expires_at,
+            derivation_version, confidence, explanation_json, generation_trace_id,
+            created_at, updated_at
+        """
+        predicates = " OR ".join(["source_refs_json @> %s::jsonb"] * len(normalized_refs))
+        q = f"""
+        SELECT {select_cols}
+        FROM memory_items
+        WHERE owner_id = %s
+          AND ({predicates})
+        ORDER BY updated_at DESC, created_at DESC;
+        """
+        params: list[Any] = [owner_id]
+        params.extend(Json([{"ref_type": ref_type, "ref_id": ref_id}]) for ref_type, ref_id in normalized_refs)
+
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, tuple(params))
+                rows = await cur.fetchall()
+
+        by_ref: dict[tuple[str, str], dict[str, Any]] = {}
+        wanted = set(normalized_refs)
+        for row in rows:
+            item = self._memory_item_from_row(row)
+            for ref in item.get("source_refs_json") or []:
+                ref_type = str(ref.get("ref_type") or "").strip()
+                ref_id = str(ref.get("ref_id") or "").strip()
+                key = (ref_type, ref_id)
+                if key in wanted and key not in by_ref:
+                    by_ref[key] = item
+        return by_ref
 
     async def resolve_profile(
         self,

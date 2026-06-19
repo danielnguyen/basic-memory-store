@@ -1030,6 +1030,8 @@ async def retrieve_tiered_v2(conversation_id: str, body: RetrieveBundleRequest, 
         query=body.query,
         opts=opts,
         include_artifacts=include_artifacts,
+        allowed_memory_domains=body.allowed_memory_domains,
+        blocked_memory_domains=body.blocked_memory_domains,
     )
 
     return RetrieveBundleResponse(

@@ -220,6 +220,18 @@ class RetrieveBundleRequest(BaseModel):
     query: str
     retrieval: Optional[RetrievalOptions] = None
     include_artifacts: Optional[bool] = None
+    allowed_memory_domains: Optional[List[str]] = Field(default=None, max_length=16)
+    blocked_memory_domains: Optional[List[str]] = Field(default=None, max_length=16)
+
+
+class RetrievalSourceRef(BaseModel):
+    ref_type: str
+    ref_id: str
+
+
+class RetrievalPolicyMetadata(BaseModel):
+    memory_domains: List[str] = Field(default_factory=list)
+    sensitivity: Optional[str] = None
 
 
 class ArtifactRef(BaseModel):
@@ -229,6 +241,14 @@ class ArtifactRef(BaseModel):
     relevance_score: Optional[float] = None
     repo_name: Optional[str] = None
     score_details: Dict[str, Any] = Field(default_factory=dict)
+    source_ref: RetrievalSourceRef
+    policy_metadata: RetrievalPolicyMetadata = Field(default_factory=RetrievalPolicyMetadata)
+    freshness_state: str = "unknown_freshness"
+    last_verified_at: Optional[str] = None
+    source_kind: Optional[str] = None
+    confidence: Optional[float] = None
+    supersedes: Optional[str] = None
+    superseded_by: Optional[str] = None
 
 
 class RetrievalMessageItem(BaseModel):
@@ -239,6 +259,14 @@ class RetrievalMessageItem(BaseModel):
     created_at: str
     score: Optional[float] = None
     score_details: Dict[str, Any] = Field(default_factory=dict)
+    source_ref: RetrievalSourceRef
+    policy_metadata: RetrievalPolicyMetadata = Field(default_factory=RetrievalPolicyMetadata)
+    freshness_state: str = "unknown_freshness"
+    last_verified_at: Optional[str] = None
+    source_kind: Optional[str] = None
+    confidence: Optional[float] = None
+    supersedes: Optional[str] = None
+    superseded_by: Optional[str] = None
 
 
 class ObservedMetadata(BaseModel):
