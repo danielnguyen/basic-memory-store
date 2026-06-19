@@ -10,6 +10,16 @@ Role = Literal["user", "assistant", "system", "tool"]
 RetrievalScope = Literal["conversation", "client", "owner"]
 TimeWindow = Literal["7d", "30d", "90d", "all"]
 RetrievalMode = Literal["recent", "balanced", "historical"]
+RetrievalSourceType = Literal["message", "derived_text"]
+RetrievalFreshnessState = Literal[
+    "active",
+    "parked",
+    "stale",
+    "superseded",
+    "corrected",
+    "forgotten_or_demoted",
+    "unknown_freshness",
+]
 
 
 class MessageIn(BaseModel):
@@ -225,7 +235,7 @@ class RetrieveBundleRequest(BaseModel):
 
 
 class RetrievalSourceRef(BaseModel):
-    ref_type: str
+    ref_type: RetrievalSourceType
     ref_id: str
 
 
@@ -243,7 +253,7 @@ class ArtifactRef(BaseModel):
     score_details: Dict[str, Any] = Field(default_factory=dict)
     source_ref: RetrievalSourceRef
     policy_metadata: RetrievalPolicyMetadata = Field(default_factory=RetrievalPolicyMetadata)
-    freshness_state: str = "unknown_freshness"
+    freshness_state: RetrievalFreshnessState = "unknown_freshness"
     last_verified_at: Optional[str] = None
     source_kind: Optional[str] = None
     confidence: Optional[float] = None
@@ -261,7 +271,7 @@ class RetrievalMessageItem(BaseModel):
     score_details: Dict[str, Any] = Field(default_factory=dict)
     source_ref: RetrievalSourceRef
     policy_metadata: RetrievalPolicyMetadata = Field(default_factory=RetrievalPolicyMetadata)
-    freshness_state: str = "unknown_freshness"
+    freshness_state: RetrievalFreshnessState = "unknown_freshness"
     last_verified_at: Optional[str] = None
     source_kind: Optional[str] = None
     confidence: Optional[float] = None
