@@ -18,6 +18,7 @@ async def fake_runner(*, settings, conversation_id, opts, **kwargs):
                 snippet="def entrypoint(): pass",
                 relevance_score=0.8,
                 repo_name="basic-memory-store",
+                source_ref={"ref_type": "derived_text", "ref_id": "derived-text-fixture-1"},
             )
         ]
     return RetrievalBundle(
@@ -30,6 +31,7 @@ async def fake_runner(*, settings, conversation_id, opts, **kwargs):
                 content="semantic note",
                 created_at="2026-01-01T00:00:00+00:00",
                 score=0.9,
+                source_ref={"ref_type": "message", "ref_id": "message-1"},
             )
         ],
         artifact_refs=artifacts,
