@@ -12,8 +12,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from dotenv import load_dotenv
 import psycopg
 from psycopg import sql
+from psycopg.conninfo import conninfo_to_dict
 from psycopg.rows import dict_row
 
 
@@ -25,8 +27,9 @@ LOCK_RETRY_SECONDS = 0.5
 EXPECTED_EXTENSIONS = {"pgcrypto"}
 MANAGED_FILENAME_RE = re.compile(r"^(?P<version>\d{14})_(?P<name>[a-z0-9]+(?:_[a-z0-9]+)*)\.sql$")
 REDACT_URI_RE = re.compile(r"(postgres(?:ql)?://)([^:@/]+)(?::([^@/]*))?@")
-REDACT_PASSWORD_KV_RE = re.compile(r"(password=)([^ \t]+)", re.IGNORECASE)
+REDACT_CONNINFO_KV_RE = re.compile(r"\b(user|password|host|hostaddr)=([^ \t]+)", re.IGNORECASE)
 IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+API_DIR = Path(__file__).resolve().parents[1]
 
 
 class MigrationError(RuntimeError):
@@ -46,6 +49,24 @@ class ManagedMigration:
 
 def compute_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def api_env_path() -> Path:
+    return API_DIR / ".env"
+
+
+def resolve_dsn(explicit: str | None = None, *, env_path: Path | None = None) -> str | None:
+    if explicit:
+        return explicit
+
+    exported = os.environ.get("PG_DSN")
+    if exported:
+        return exported
+
+    dotenv_path = env_path or api_env_path()
+    if dotenv_path.is_file():
+        load_dotenv(dotenv_path=dotenv_path, override=False)
+    return os.environ.get("PG_DSN")
 
 
 def find_db_dir(explicit: str | None = None) -> Path:
@@ -104,8 +125,16 @@ def redact_dsn(value: str, dsn: str | None) -> str:
     redacted = value
     if dsn:
         redacted = redacted.replace(dsn, "<redacted-dsn>")
+        try:
+            conninfo = conninfo_to_dict(dsn)
+        except psycopg.Error:
+            conninfo = {}
+        for key in ("user", "password", "host", "hostaddr"):
+            token = conninfo.get(key)
+            if token:
+                redacted = redacted.replace(str(token), f"<redacted-{key}>")
     redacted = REDACT_URI_RE.sub(r"\1<redacted>@", redacted)
-    redacted = REDACT_PASSWORD_KV_RE.sub(r"\1<redacted>", redacted)
+    redacted = REDACT_CONNINFO_KV_RE.sub(r"\1=<redacted>", redacted)
     return redacted
 
 
@@ -115,6 +144,7 @@ def normalize_sql_text(value: str, schema_names: Iterable[str] = ()) -> str:
     for schema_name in schema_names:
         normalized = re.sub(rf"\b{re.escape(schema_name)}\.", "", normalized)
     normalized = normalized.replace("public.", "")
+    normalized = normalized.replace("pg_catalog.", "")
     normalized = re.sub(r"\s+", " ", normalized)
     normalized = re.sub(r"\(\s+", "(", normalized)
     normalized = re.sub(r"\s+\)", ")", normalized)
@@ -694,7 +724,7 @@ def run_adopt_baseline(conn: psycopg.Connection[Any], db_dir: Path) -> dict[str,
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Basic Memory Store schema migration lifecycle runner.")
     parser.add_argument("command", choices=["status", "check", "adopt-baseline", "upgrade"])
-    parser.add_argument("--dsn", default=os.environ.get("PG_DSN"), help="PostgreSQL DSN. Defaults to PG_DSN.")
+    parser.add_argument("--dsn", default=None, help="PostgreSQL DSN. Defaults to PG_DSN.")
     parser.add_argument("--db-dir", default=None, help="Override the db directory root.")
     return parser
 
@@ -705,11 +735,11 @@ def connect(dsn: str) -> psycopg.Connection[Any]:
 
 def main() -> int:
     args = build_parser().parse_args()
-    if not args.dsn:
+    dsn = resolve_dsn(args.dsn)
+    if not dsn:
         print_json({"ok": False, "error": "PG_DSN is required."})
         return 2
 
-    dsn = args.dsn
     try:
         db_dir = find_db_dir(args.db_dir)
         with connect(dsn) as conn:

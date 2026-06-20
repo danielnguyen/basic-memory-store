@@ -13,6 +13,8 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 import pytest
 import yaml
 
+from tools import schema_migrations
+
 
 ROOT = Path(__file__).resolve().parents[2]
 API_DIR = ROOT / "api"
@@ -34,6 +36,35 @@ RECENT_TABLES = [
     "memory_events",
     "memory_items",
 ]
+ADVERSARIAL_BASELINE_SQL = """
+CREATE TABLE IF NOT EXISTS comparator_parent (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  code TEXT NOT NULL UNIQUE,
+  alt_code TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS comparator_child (
+  owner_id TEXT NOT NULL,
+  surface TEXT NOT NULL,
+  client_id TEXT NOT NULL,
+  parent_code TEXT,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  score INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (owner_id, surface, client_id),
+  UNIQUE (surface, parent_code),
+  CONSTRAINT comparator_child_parent_code_fk
+    FOREIGN KEY (parent_code) REFERENCES comparator_parent(code) ON DELETE SET NULL,
+  CHECK (score >= 0)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_comparator_child_status_created
+  ON comparator_child(status, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_comparator_child_parent_active
+  ON comparator_child(parent_code, created_at DESC)
+  WHERE status = 'active';
+"""
 
 
 def admin_dsn() -> str:
@@ -48,13 +79,11 @@ def can_connect(dsn: str) -> bool:
     except psycopg.Error:
         return False
 
-
-pytestmark = pytest.mark.skipif(not can_connect(admin_dsn()), reason="PostgreSQL 16 test instance is not available")
-
-
 @pytest.fixture
 def pg_database() -> str:
     admin = admin_dsn()
+    if not can_connect(admin):
+        pytest.skip("PostgreSQL 16 test instance is not available")
     params = conninfo_to_dict(admin)
     base_dbname = params.get("dbname") or "postgres"
     dbname = f"schema_test_{uuid4().hex[:12]}"
@@ -89,6 +118,22 @@ def run_cli(command: str, *, dsn: str, db_dir: Path) -> subprocess.CompletedProc
     env["BMS_DB_DIR"] = str(db_dir)
     return subprocess.run(
         [sys.executable, "-m", "tools.schema_migrations", command, "--dsn", dsn, "--db-dir", str(db_dir)],
+        cwd=API_DIR,
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+
+def run_cli_without_dsn(*, command: str, db_dir: Path, env_overrides: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env.pop("PG_DSN", None)
+    env["BMS_DB_DIR"] = str(db_dir)
+    if env_overrides:
+        env.update(env_overrides)
+    return subprocess.run(
+        [sys.executable, "-m", "tools.schema_migrations", command, "--db-dir", str(db_dir)],
         cwd=API_DIR,
         text=True,
         capture_output=True,
@@ -195,6 +240,18 @@ def write_managed_migration(db_dir: Path, filename: str, sql_text: str) -> Path:
     return path
 
 
+def write_env_file(path: Path, dsn: str) -> None:
+    path.write_text(f"PG_DSN={dsn}\n", encoding="utf-8")
+
+
+def append_to_baseline(db_dir: Path, sql_text: str) -> None:
+    baseline_path = db_dir / "baseline.sql"
+    baseline_path.write_text(
+        baseline_path.read_text(encoding="utf-8") + "\n" + sql_text.strip() + "\n",
+        encoding="utf-8",
+    )
+
+
 def rename_first_constraint(dsn: str, table_name: str, contype: str, new_name: str) -> None:
     with psycopg.connect(dsn) as conn:
         row = conn.execute(
@@ -235,6 +292,90 @@ def drop_first_constraint(dsn: str, table_name: str, contype: str) -> None:
         assert row is not None
         conn.execute(f'ALTER TABLE "{table_name}" DROP CONSTRAINT "{row[0]}"')
         conn.commit()
+
+
+def seed_adversarial_baseline_without_ledger(dsn: str, db_dir: Path) -> None:
+    append_to_baseline(db_dir, ADVERSARIAL_BASELINE_SQL)
+    seed_baseline_without_ledger(dsn, db_dir)
+
+
+def test_explicit_dsn_wins_over_exported_pg_dsn(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    write_env_file(env_file, "postgresql://from-dotenv:dotenvpass@dotenv-host:5432/dotenv_db")
+    monkeypatch.setenv("PG_DSN", "postgresql://from-env:envpass@env-host:5432/env_db")
+
+    resolved = schema_migrations.resolve_dsn(
+        "postgresql://from-flag:flagpass@flag-host:5432/flag_db",
+        env_path=env_file,
+    )
+
+    assert resolved == "postgresql://from-flag:flagpass@flag-host:5432/flag_db"
+
+
+def test_exported_pg_dsn_wins_over_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    write_env_file(env_file, "postgresql://from-dotenv:dotenvpass@dotenv-host:5432/dotenv_db")
+    monkeypatch.setenv("PG_DSN", "postgresql://from-env:envpass@env-host:5432/env_db")
+
+    resolved = schema_migrations.resolve_dsn(None, env_path=env_file)
+
+    assert resolved == "postgresql://from-env:envpass@env-host:5432/env_db"
+
+
+def test_dotenv_is_used_when_no_explicit_or_exported_dsn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_file = tmp_path / ".env"
+    write_env_file(env_file, "postgresql://from-dotenv:dotenvpass@dotenv-host:5432/dotenv_db")
+    monkeypatch.delenv("PG_DSN", raising=False)
+
+    resolved = schema_migrations.resolve_dsn(None, env_path=env_file)
+
+    assert resolved == "postgresql://from-dotenv:dotenvpass@dotenv-host:5432/dotenv_db"
+    assert os.environ["PG_DSN"] == "postgresql://from-dotenv:dotenvpass@dotenv-host:5432/dotenv_db"
+
+
+def test_missing_dotenv_and_missing_pg_dsn_keep_safe_error(
+    monkeypatch: pytest.MonkeyPatch, temp_db_dir: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("PG_DSN", raising=False)
+    monkeypatch.setattr(schema_migrations, "api_env_path", lambda: tmp_path / "missing.env")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["schema_migrations.py", "status", "--db-dir", str(temp_db_dir)],
+    )
+
+    exit_code = schema_migrations.main()
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert json.loads(captured.out.strip()) == {"error": "PG_DSN is required.", "ok": False}
+
+
+@pytest.mark.parametrize(
+    ("bad_dsn", "secret_parts"),
+    [
+        (
+            "postgresql://demo:supersecret!@127.0.0.1:1/does_not_exist",
+            ["demo", "supersecret!", "127.0.0.1"],
+        ),
+        (
+            "host=127.0.0.1 port=1 dbname=does_not_exist user=demo password=s3cr3t!value",
+            ["demo", "s3cr3t!value", "127.0.0.1"],
+        ),
+    ],
+)
+def test_status_and_errors_redact_uri_and_keyword_dsn_credentials(
+    temp_db_dir: Path, bad_dsn: str, secret_parts: list[str]
+) -> None:
+    completed = run_cli("status", dsn=bad_dsn, db_dir=temp_db_dir)
+    combined = completed.stdout + completed.stderr
+
+    assert completed.returncode != 0
+    assert bad_dsn not in combined
+    for secret in secret_parts:
+        assert secret not in combined
 
 
 def test_empty_database_installs_baseline_and_records_it(pg_database: str, temp_db_dir: Path) -> None:
@@ -363,6 +504,116 @@ def test_semantically_identical_constraints_with_different_names_are_accepted(
     rename_first_constraint(pg_database, "messages", "f", "messages_conversation_fk_custom")
     payload = run_cli_ok("adopt-baseline", dsn=pg_database, db_dir=temp_db_dir)
     assert payload["adopted_baseline"] is True
+
+
+def test_schema_qualified_defaults_and_whitespace_equivalence_are_accepted(
+    pg_database: str, temp_db_dir: Path
+) -> None:
+    seed_baseline_without_ledger(pg_database, temp_db_dir)
+    execute_sql(
+        pg_database,
+        """
+        ALTER TABLE messages ALTER COLUMN created_at SET DEFAULT pg_catalog.now();
+        ALTER TABLE proactive_prefs ALTER COLUMN allowed_surfaces_json SET DEFAULT ( '[]' :: jsonb );
+        """,
+    )
+
+    payload = run_cli_ok("adopt-baseline", dsn=pg_database, db_dir=temp_db_dir)
+
+    assert payload["adopted_baseline"] is True
+
+
+def test_unexpected_application_owned_table_fails_adoption(pg_database: str, temp_db_dir: Path) -> None:
+    seed_baseline_without_ledger(pg_database, temp_db_dir)
+    execute_sql(pg_database, "CREATE TABLE rogue_application_table(id integer);")
+
+    payload = run_cli_fail("adopt-baseline", dsn=pg_database, db_dir=temp_db_dir)
+
+    assert "unexpected tables" in str(payload["error"]).lower()
+
+
+def test_composite_primary_key_mismatch_fails_adoption(pg_database: str, temp_db_dir: Path) -> None:
+    seed_baseline_without_ledger(pg_database, temp_db_dir)
+    execute_sql(
+        pg_database,
+        """
+        ALTER TABLE surface_profile_defaults DROP CONSTRAINT surface_profile_defaults_pkey;
+        ALTER TABLE surface_profile_defaults ADD PRIMARY KEY (owner_id, client_id, surface);
+        """,
+    )
+
+    payload = run_cli_fail("adopt-baseline", dsn=pg_database, db_dir=temp_db_dir)
+
+    assert "primary key mismatch" in str(payload["error"]).lower()
+
+
+def test_unique_standalone_index_with_equivalent_definition_is_accepted(
+    pg_database: str, temp_db_dir: Path
+) -> None:
+    seed_adversarial_baseline_without_ledger(pg_database, temp_db_dir)
+    execute_sql(
+        pg_database,
+        """
+        DROP INDEX idx_comparator_child_status_created;
+        CREATE UNIQUE INDEX comparator_child_status_created_alt
+          ON comparator_child ( status , created_at DESC );
+        """,
+    )
+
+    payload = run_cli_ok("adopt-baseline", dsn=pg_database, db_dir=temp_db_dir)
+
+    assert payload["adopted_baseline"] is True
+
+
+def test_changed_partial_index_predicate_fails_adoption(pg_database: str, temp_db_dir: Path) -> None:
+    seed_adversarial_baseline_without_ledger(pg_database, temp_db_dir)
+    execute_sql(
+        pg_database,
+        """
+        DROP INDEX idx_comparator_child_parent_active;
+        CREATE INDEX idx_comparator_child_parent_active
+          ON comparator_child(parent_code, created_at DESC)
+          WHERE status = 'inactive';
+        """,
+    )
+
+    payload = run_cli_fail("adopt-baseline", dsn=pg_database, db_dir=temp_db_dir)
+
+    assert "index mismatch" in str(payload["error"]).lower()
+
+
+def test_index_sort_direction_mismatch_fails_adoption(pg_database: str, temp_db_dir: Path) -> None:
+    seed_baseline_without_ledger(pg_database, temp_db_dir)
+    execute_sql(
+        pg_database,
+        """
+        DROP INDEX idx_messages_owner_time;
+        CREATE INDEX idx_messages_owner_time ON messages(owner_id, created_at ASC);
+        """,
+    )
+
+    payload = run_cli_fail("adopt-baseline", dsn=pg_database, db_dir=temp_db_dir)
+
+    assert "index mismatch" in str(payload["error"]).lower()
+
+
+def test_foreign_key_referenced_columns_and_on_delete_are_validated(
+    pg_database: str, temp_db_dir: Path
+) -> None:
+    seed_adversarial_baseline_without_ledger(pg_database, temp_db_dir)
+    execute_sql(
+        pg_database,
+        """
+        ALTER TABLE comparator_child DROP CONSTRAINT comparator_child_parent_code_fk;
+        ALTER TABLE comparator_child
+          ADD CONSTRAINT comparator_child_parent_code_fk
+          FOREIGN KEY (parent_code) REFERENCES comparator_parent(alt_code) ON DELETE CASCADE;
+        """,
+    )
+
+    payload = run_cli_fail("adopt-baseline", dsn=pg_database, db_dir=temp_db_dir)
+
+    assert "foreign key mismatch" in str(payload["error"]).lower()
 
 
 def test_failed_adoption_leaves_no_ledger(pg_database: str, temp_db_dir: Path) -> None:
