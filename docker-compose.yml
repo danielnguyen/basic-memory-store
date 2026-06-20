@@ -23,7 +23,6 @@ services:
       - POSTGRES_DB=memory_db
     volumes:
       - "${_VOLUME_BASIC_MEMORY_STORE}/postgres_data:/var/lib/postgresql/data"
-      - "${_VOLUME_BASIC_MEMORY_STORE}/schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro"
     networks:
       - llm-memory-dmz
     # REMOVE ports to avoid host/LAN exposure
@@ -34,6 +33,20 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+
+  memory-db-migrate:
+    image: danielnguyen/basic-memory-store:latest
+    container_name: memory-db-migrate
+    restart: "no"
+    user: "1000:1000"
+    depends_on:
+      memory-db-postgres:
+        condition: service_healthy
+    command: ["python", "-m", "tools.schema_migrations", "upgrade"]
+    environment:
+      - PG_DSN=postgresql://memory_user:${POSTGRES_PASSWORD}@memory-db-postgres:5432/memory_db
+    networks:
+      - llm-memory-dmz
 
   memory-db-qdrant:
     image: qdrant/qdrant:latest-unprivileged
@@ -108,6 +121,8 @@ services:
     depends_on:
       memory-db-postgres:
         condition: service_healthy
+      memory-db-migrate:
+        condition: service_completed_successfully
       memory-db-qdrant:
         condition: service_healthy
       memory-minio:

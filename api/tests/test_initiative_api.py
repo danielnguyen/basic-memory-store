@@ -1,7 +1,10 @@
 import types
 import uuid
+from datetime import UTC, datetime, timedelta
 
 from test_proactive_api import FakePG, FakeQdrant, _client, _headers
+
+RECENT_MESSAGE_TS = (datetime.now(UTC) - timedelta(days=7)).isoformat()
 
 
 def _git_event(fake_pg, *, owner_id="owner", event_log_id=None, title="auth flow refactor"):
@@ -66,7 +69,7 @@ def test_initiative_evaluate_records_created_decision_and_suggestion(monkeypatch
         "role": "assistant",
         "content": "We discussed auth regressions in this repo last month.",
         "metadata": {},
-        "created_at": "2026-03-20T00:00:00+00:00",
+        "created_at": RECENT_MESSAGE_TS,
     }
     fake_qdrant = FakeQdrant(search_hits=[types.SimpleNamespace(message_id=str(match_id), score=0.82)])
     client, fake_pg, _ = _client(monkeypatch, fake_pg=fake_pg, fake_qdrant=fake_qdrant)
@@ -180,7 +183,7 @@ def test_initiative_evaluate_is_idempotent_for_same_request_id(monkeypatch):
         "role": "assistant",
         "content": "We discussed auth regressions in this repo last month.",
         "metadata": {},
-        "created_at": "2026-03-20T00:00:00+00:00",
+        "created_at": RECENT_MESSAGE_TS,
     }
     fake_qdrant = FakeQdrant(search_hits=[types.SimpleNamespace(message_id=str(match_id), score=0.82)])
     client, fake_pg, _ = _client(monkeypatch, fake_pg=fake_pg, fake_qdrant=fake_qdrant)

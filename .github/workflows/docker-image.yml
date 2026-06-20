@@ -36,7 +36,8 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: ./api
+          context: .
+          file: ./api/Dockerfile
           push: true
           tags: |
             danielnguyen/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.short_sha }}

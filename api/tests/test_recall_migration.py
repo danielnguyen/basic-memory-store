@@ -5,7 +5,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_recall_decisions_migration_is_additive_and_indexed():
-    migration = ROOT / "db" / "migrations" / "20260602_cluster9c_r22_recall_decisions_additive.sql"
+    migration = ROOT / "db" / "migrations" / "legacy" / "20260602_cluster9c_r22_recall_decisions_additive.sql"
     sql = migration.read_text()
 
     assert "CREATE TABLE IF NOT EXISTS recall_decisions" in sql

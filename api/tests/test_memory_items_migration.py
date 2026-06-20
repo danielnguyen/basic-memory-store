@@ -5,7 +5,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_cluster9a_migration_is_additive_and_has_active_idempotency_index():
-    migration = ROOT / "db" / "migrations" / "20260531_cluster9a_r20_memory_items_additive.sql"
+    migration = ROOT / "db" / "migrations" / "legacy" / "20260531_cluster9a_r20_memory_items_additive.sql"
     sql = migration.read_text(encoding="utf-8")
 
     assert "CREATE TABLE IF NOT EXISTS memory_items" in sql

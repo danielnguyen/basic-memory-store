@@ -2,7 +2,7 @@ SHELL := /usr/bin/env bash
 
 DEV_COMPOSE := docker-compose.dev.yml
 
-.PHONY: dev-up dev-down dev-reset dev-bootstrap dev-seed-profiles dev-logs dev-test dev-install dev-start dev-start-reload
+.PHONY: dev-up dev-down dev-reset dev-bootstrap dev-seed-profiles dev-logs dev-test dev-install dev-start dev-start-reload dev-migrate-status dev-migrate-check dev-migrate-adopt
 
 dev-up:
 	@docker compose -f $(DEV_COMPOSE) up -d
@@ -20,6 +20,15 @@ dev-reset:
 dev-bootstrap:
 	@./scripts/dev_bootstrap.sh
 
+dev-migrate-status:
+	@cd api && BMS_DB_DIR="$$(cd .. && pwd)/db" ./.venv/bin/python -m tools.schema_migrations status
+
+dev-migrate-check:
+	@cd api && BMS_DB_DIR="$$(cd .. && pwd)/db" ./.venv/bin/python -m tools.schema_migrations check
+
+dev-migrate-adopt:
+	@cd api && BMS_DB_DIR="$$(cd .. && pwd)/db" ./.venv/bin/python -m tools.schema_migrations adopt-baseline
+
 dev-seed-profiles:
 	@./scripts/dev_seed_profiles.sh
 
@@ -33,7 +42,7 @@ dev-install:
 	@cd api && ./.venv/bin/python -m pip install -r requirements.txt
 
 dev-start:
-	@cd api && ./.venv/bin/uvicorn main:app --host 0.0.0.0 --port "$${APP_PORT:-4321}"
+	@cd api && BMS_DB_DIR="$$(cd .. && pwd)/db" ./.venv/bin/python -m tools.schema_migrations check && ./.venv/bin/uvicorn main:app --host 0.0.0.0 --port "$${APP_PORT:-4321}"
 
 dev-start-reload:
-	@cd api && ./.venv/bin/uvicorn main:app --host 0.0.0.0 --port "$${APP_PORT:-4321}" --reload
+	@cd api && BMS_DB_DIR="$$(cd .. && pwd)/db" ./.venv/bin/python -m tools.schema_migrations check && ./.venv/bin/uvicorn main:app --host 0.0.0.0 --port "$${APP_PORT:-4321}" --reload
