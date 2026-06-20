@@ -252,6 +252,7 @@ class ArtifactRef(BaseModel):
     repo_name: Optional[str] = None
     score_details: Dict[str, Any] = Field(default_factory=dict)
     source_ref: RetrievalSourceRef
+    memory_id: Optional[str] = None
     policy_metadata: RetrievalPolicyMetadata = Field(default_factory=RetrievalPolicyMetadata)
     freshness_state: RetrievalFreshnessState = "unknown_freshness"
     last_verified_at: Optional[str] = None
@@ -270,6 +271,7 @@ class RetrievalMessageItem(BaseModel):
     score: Optional[float] = None
     score_details: Dict[str, Any] = Field(default_factory=dict)
     source_ref: RetrievalSourceRef
+    memory_id: Optional[str] = None
     policy_metadata: RetrievalPolicyMetadata = Field(default_factory=RetrievalPolicyMetadata)
     freshness_state: RetrievalFreshnessState = "unknown_freshness"
     last_verified_at: Optional[str] = None

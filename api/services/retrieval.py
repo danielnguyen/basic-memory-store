@@ -222,6 +222,7 @@ def _freshness_metadata(
 ) -> dict[str, Any]:
     if not isinstance(memory_item, dict):
         return {
+            "memory_id": None,
             "freshness_state": "unknown_freshness",
             "last_verified_at": None,
             "source_kind": source_kind,
@@ -236,6 +237,7 @@ def _freshness_metadata(
         confidence = None
 
     return {
+        "memory_id": memory_item.get("memory_id"),
         "freshness_state": _normalize_freshness_state(memory_item),
         "last_verified_at": str(last_verified_at) if last_verified_at else None,
         "source_kind": source_kind,
