@@ -894,7 +894,13 @@ def test_metrics_exposes_skipped_qdrant_counter(client, monkeypatch):
 
 
 def test_pinned_memories_migration_mentions_set_null_fk():
-    migration_path = Path(__file__).resolve().parents[2] / "db" / "migrations" / "20260214_pinned_memories_nullable.sql"
+    migration_path = (
+        Path(__file__).resolve().parents[2]
+        / "db"
+        / "migrations"
+        / "legacy"
+        / "20260214_pinned_memories_nullable.sql"
+    )
     sql = migration_path.read_text()
     assert "ALTER COLUMN conversation_id DROP NOT NULL" in sql
     assert "ON DELETE SET NULL" in sql

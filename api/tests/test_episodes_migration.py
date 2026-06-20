@@ -5,7 +5,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_cluster9b_migration_is_additive_and_has_episode_indexes():
-    migration = ROOT / "db" / "migrations" / "20260601_cluster9b_r21_episodes_additive.sql"
+    migration = ROOT / "db" / "migrations" / "legacy" / "20260601_cluster9b_r21_episodes_additive.sql"
     sql = migration.read_text(encoding="utf-8")
 
     assert "CREATE TABLE IF NOT EXISTS episodes" in sql

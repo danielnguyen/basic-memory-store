@@ -11,11 +11,18 @@ set -euo pipefail
 #   RUN_REINDEX=1 ./scripts/dev_bootstrap.sh
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCHEMA="${ROOT_DIR}/db/schema.sql"
+PYTHON_BIN="${PYTHON_BIN:-${ROOT_DIR}/api/.venv/bin/python}"
 
 PG_CONTAINER="${PG_CONTAINER:-pg-test}"
 PG_USER="${PG_USER:-memory_user}"
 PG_DB="${PG_DB:-memory_db}"
+PG_PASSWORD="${PG_PASSWORD:-pass}"
+PG_HOST="${PG_HOST:-127.0.0.1}"
+PG_PORT="${PG_PORT:-15432}"
+
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+  PYTHON_BIN="${PYTHON_FALLBACK:-python3}"
+fi
 
 echo "==> Waiting for Postgres (${PG_CONTAINER}) to be ready..."
 for i in {1..60}; do
@@ -30,14 +37,22 @@ if ! docker exec "${PG_CONTAINER}" pg_isready -U "${PG_USER}" -d "${PG_DB}" >/de
   exit 1
 fi
 
-echo "==> Applying schema: ${SCHEMA}"
-docker exec -i "${PG_CONTAINER}" psql -U "${PG_USER}" -d "${PG_DB}" < "${SCHEMA}"
+echo "==> Running schema upgrade via migration runner"
+(
+  cd "${ROOT_DIR}/api"
+  PG_DSN="postgresql://${PG_USER}:${PG_PASSWORD}@${PG_HOST}:${PG_PORT}/${PG_DB}" \
+  BMS_DB_DIR="${ROOT_DIR}/db" \
+  "${PYTHON_BIN}" -m tools.schema_migrations upgrade
+)
 
-echo "==> Schema applied."
+echo "==> Schema is current."
 
 if [[ "${RUN_REINDEX:-0}" == "1" ]]; then
   echo "==> Running dev reindex (optional)..."
-  python -m tools.reindex
+  (
+    cd "${ROOT_DIR}/api"
+    "${PYTHON_BIN}" -m tools.reindex
+  )
   echo "==> Reindex complete."
 fi
 

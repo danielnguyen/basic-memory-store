@@ -1,9 +1,12 @@
 import types
 import uuid
+from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
 
 import main as main_module
+
+RECENT_MESSAGE_TS = (datetime.now(UTC) - timedelta(days=7)).isoformat()
 
 
 class FakePG:
@@ -412,7 +415,7 @@ def test_git_event_creates_surface_aware_pending_suggestion(monkeypatch):
         "role": "assistant",
         "content": "We discussed auth regressions in this repo last month.",
         "metadata": {},
-        "created_at": "2026-03-20T00:00:00+00:00",
+        "created_at": RECENT_MESSAGE_TS,
     }
     fake_qdrant = FakeQdrant(search_hits=[types.SimpleNamespace(message_id=str(match_id), score=0.82)])
     client, fake_pg, _ = _client(monkeypatch, fake_pg=fake_pg, fake_qdrant=fake_qdrant)
@@ -597,7 +600,7 @@ def test_legacy_proactive_retry_reuses_existing_request_decision(monkeypatch):
         "role": "assistant",
         "content": "We discussed auth regressions in this repo last month.",
         "metadata": {},
-        "created_at": "2026-03-20T00:00:00+00:00",
+        "created_at": RECENT_MESSAGE_TS,
     }
     fake_qdrant = FakeQdrant(search_hits=[types.SimpleNamespace(message_id=str(match_id), score=0.82)])
     client, fake_pg, _ = _client(monkeypatch, fake_pg=fake_pg, fake_qdrant=fake_qdrant)

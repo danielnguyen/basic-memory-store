@@ -43,9 +43,42 @@ Core operating rules:
 
 This separation keeps memory ownership explicit and preserves cross-device traceability.
 
-## Current Data Model
+## Schema Lifecycle
 
-Authoritative schema lives in `db/schema.sql`.
+Frozen install baseline:
+
+- `db/baseline.sql` is the immutable cutover snapshot for fresh installs and explicit baseline adoption.
+
+Managed lifecycle:
+
+- `db/migrations/managed/` is the only executable migration directory for future schema changes.
+- Managed filenames must be unique and lexically sortable: `YYYYMMDDHHMMSS_domain_description.sql`.
+- Applied managed migrations and the frozen baseline are immutable.
+
+Historical evidence:
+
+- `db/migrations/legacy/` preserves historical SQL files for audit and operator reference only.
+- Legacy files are never replayed automatically.
+
+Lifecycle commands:
+
+```bash
+cd api
+python -m tools.schema_migrations status
+python -m tools.schema_migrations check
+python -m tools.schema_migrations adopt-baseline
+python -m tools.schema_migrations upgrade
+```
+
+Operational rules:
+
+- `upgrade` installs the frozen baseline into an empty database, then applies pending managed migrations.
+- `upgrade` refuses to guess about a non-empty untracked database and returns `adoption_required`.
+- `adopt-baseline` is the explicit enrollment path for an existing database that already matches the frozen baseline.
+- The runner records file checksums in `schema_migrations` and fails hard on checksum drift, missing files, invalid ordering, or unknown ledger state.
+- Migration and adoption operations are serialized with a PostgreSQL advisory lock.
+- Managed migrations are forward-only and transactional. Unsupported non-transactional SQL such as `CREATE INDEX CONCURRENTLY` is rejected.
+- Failed migrations roll back fully and do not leave a successful ledger row behind.
 
 Primary tables:
 
@@ -178,6 +211,13 @@ Swagger UI is available at `http://127.0.0.1:4321/docs` with `X-API-Key: dev-loc
 docker compose up -d --build
 ```
 
+Compose startup order:
+
+- PostgreSQL starts first.
+- `memory-db-migrate` runs `python -m tools.schema_migrations upgrade` once and must exit successfully.
+- `basic-memory-store` starts only after the migration service completes successfully.
+- The API container runs `python -m tools.schema_migrations check` before `uvicorn`, so checksum or schema drift prevents the service from listening.
+
 Smoke validation:
 
 ```bash
@@ -193,6 +233,11 @@ MEMORY_API_KEY=change_me BASE=http://127.0.0.1:4321 ./scripts/smoke-test.sh
 
 ## Current Operator Notes
 
+- Fresh install: run `python -m tools.schema_migrations upgrade` against an empty database.
+- Normal upgrade: deploy the new image and let the one-shot migration service run `upgrade`.
+- Existing database adoption: run `status`, then `adopt-baseline`, then `upgrade`.
+- Restored backup validation: restore into isolated PostgreSQL 16, run `status`, `adopt-baseline`, `upgrade`, `check`, and smoke-test the memory, episode, recall, and initiative paths before touching production.
+- Rollbacks are forward-only at the schema layer. Recover by restoring a PostgreSQL backup rather than attempting down migrations.
 - `GET /healthz` returns service status, time, and best-effort dependency status for Postgres and Qdrant.
 - `GET /metrics` exposes Prometheus-format counters.
 - `GET /v1/traces/{request_id}` exposes stored request traces.
@@ -203,5 +248,6 @@ MEMORY_API_KEY=change_me BASE=http://127.0.0.1:4321 ./scripts/smoke-test.sh
 
 - Back up the Postgres volume.
 - Back up the Qdrant volume if you want faster recovery, though it is rebuildable.
+- Before production adoption, take or verify a current PostgreSQL backup and validate the restored copy in isolation.
 
 Postgres alone is sufficient to recover authoritative memory state.

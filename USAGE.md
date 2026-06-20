@@ -41,6 +41,35 @@ Basic Memory Store remains the durable memory substrate in that path.
 - Retrieval semantics are enforced in Basic Memory Store.
 - `chat-orchestrator` decides how retrieved context is applied to a normal chat turn.
 
+## Schema Operations
+
+Basic Memory Store now uses a frozen baseline plus forward-only managed migrations.
+
+- `db/baseline.sql` is the immutable install and adoption snapshot.
+- `db/migrations/managed/` contains all future executable migrations.
+- `db/migrations/legacy/` contains historical SQL evidence only and is never replayed automatically.
+
+Runner commands:
+
+```bash
+cd api
+python -m tools.schema_migrations status
+python -m tools.schema_migrations check
+python -m tools.schema_migrations adopt-baseline
+python -m tools.schema_migrations upgrade
+```
+
+Behavior:
+
+- `status` is read-only and reports whether the database is empty, requires adoption, is current, has pending migrations, or has checksum or ledger errors.
+- `check` is the startup guard and succeeds only when the ledger exists, the baseline checksum matches, all applied migration checksums match, there are no unknown ledger rows, and there are no pending managed migrations.
+- `upgrade` installs the baseline into an empty database or applies pending managed migrations to a ledger-tracked database.
+- `upgrade` refuses to auto-enroll a non-empty untracked database.
+- `adopt-baseline` is the only supported path for enrolling an existing database or a restored production dump into the new ledger.
+- The runner uses a PostgreSQL advisory lock so only one migration actor changes schema state at a time.
+- Managed migrations are transactional and forward-only. Unsupported non-transactional statements such as `CREATE INDEX CONCURRENTLY` are rejected.
+- If a managed migration fails, its transaction rolls back fully and no success row is written to `schema_migrations`.
+
 ## Example Identifiers
 
 - `owner_id`: `user_123`
@@ -221,11 +250,7 @@ Current constraints:
 - artifact refs are capped in retrieval output
 - repeated ingest of the same file can surface duplicate `artifact_refs`
 
-If your database needs the artifact-ingestion schema update, apply:
-
-```bash
-psql "$PG_DSN" -f db/migrations/20260402_artifact_ingestion_additive.sql
-```
+Do not apply historical SQL files manually during normal operations. Use the migration runner instead.
 
 ## Artifact Metadata Flow
 
@@ -257,6 +282,21 @@ POST /v1/retrieve
 These endpoints remain available for direct compatibility coverage and substrate debugging. For normal application chat flows, use `chat-orchestrator` `POST /v1/chat`.
 
 ## Traces And Metrics
+
+## Production Adoption Runbook
+
+1. Take or verify a current PostgreSQL backup.
+2. Restore that backup into an isolated PostgreSQL 16 instance.
+3. Run `python -m tools.schema_migrations status`.
+4. Run `python -m tools.schema_migrations adopt-baseline`.
+5. Run `python -m tools.schema_migrations upgrade`.
+6. Run `python -m tools.schema_migrations check` and the Basic Memory Store smoke tests.
+7. Verify table, constraint, and index parity.
+8. Stop the live API for the maintenance window.
+9. Run `python -m tools.schema_migrations adopt-baseline` against live production.
+10. Deploy the new Compose stack and image.
+11. Verify the `memory-db-migrate` one-shot service completed successfully.
+12. Verify API health plus the memory, episode, recall, and initiative endpoints.
 
 Trace lookup:
 
