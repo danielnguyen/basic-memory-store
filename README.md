@@ -127,7 +127,7 @@ Requirements:
 
 ## Tests
 
-The canonical test command uses the repository Dockerfile, so host Python is not required:
+The canonical test command uses the repository Dockerfile, so Docker-backed tests do not require host Python or a local virtual environment:
 
 ```bash
 make test
@@ -145,7 +145,7 @@ These tests cover the migration lifecycle and schema assertions, including the `
 
 Live smoke scripts such as `scripts/validate_object_store.sh` and `scripts/validate_cluster6_r16.sh` require a disposable running stack. Do not point them at a deployed environment. The proactive smoke also requires local embedding capability; it must not be run with paid or external model credentials merely to validate this repository.
 
-For an optional host-local workflow, create the virtual environment with an explicit Python 3.12 interpreter:
+Host-local API development does require a validated Python 3.12 virtual environment. Create it with an explicit interpreter:
 
 ```bash
 make dev-setup PYTHON_BIN=/path/to/python3.12
@@ -194,13 +194,19 @@ INGEST_CHUNK_OVERLAP_CHARS=150
 
 Fast local bootstrap:
 
-1. Start dependencies and apply schema:
+1. Create or validate the local Python 3.12 environment:
+
+```bash
+make dev-setup PYTHON_BIN=/path/to/python3.12
+```
+
+2. Start dependencies and apply schema:
 
 ```bash
 make dev-up
 ```
 
-2. Start the API:
+3. Start the API:
 
 ```bash
 make dev-start

@@ -12,33 +12,9 @@ permissions:
 jobs:
   fake-api:
     runs-on: ubuntu-latest
-    env:
-      MEMORY_API_KEY: testkey
-      PG_DSN: postgresql://test:test@127.0.0.1:1/test
-      QDRANT_URL: http://127.0.0.1:1
-      LITELLM_BASE_URL: http://127.0.0.1:1
-      LITELLM_API_KEY: testkey
-      CHAT_MODEL: test-chat
-      EMBED_MODEL: test-embed
-      OBJECT_STORE_ENABLED: "false"
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install API dependencies
-        run: python -m pip install -r api/requirements.txt
-
-      - name: Verify test runtime
-        working-directory: api
-        run: |
-          python --version
-          python -c 'import psycopg, pytest; print("pytest=" + pytest.__version__); print("psycopg=" + psycopg.__version__)'
-
-      - name: Run fake/unit/API test group
-        working-directory: api
-        run: ./tests/run_test_group.sh fake
+      - name: Run canonical Docker-backed test group
+        run: make test
