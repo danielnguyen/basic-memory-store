@@ -125,6 +125,35 @@ Requirements:
 - Qdrant
 - LiteLLM
 
+## Tests
+
+The canonical test command uses the repository Dockerfile, so Docker-backed tests do not require host Python or a local virtual environment:
+
+```bash
+make test
+```
+
+This builds or reuses `basic-memory-store:test`, verifies Python 3.12 plus the checked-in pytest and psycopg dependencies, supplies deterministic test-only configuration, and runs the fake/unit/API group without live Postgres, Qdrant, LiteLLM, MinIO, private `.env` files, or external model credentials.
+
+PostgreSQL integration tests use a disposable PostgreSQL 16 container:
+
+```bash
+make test-postgres
+```
+
+These tests cover the migration lifecycle and schema assertions, including the `memory_entities` and `memory_edges` tables. They are separate from the regular fake/unit/API group.
+
+Live smoke scripts such as `scripts/validate_object_store.sh` and `scripts/validate_cluster6_r16.sh` require a disposable running stack. Do not point them at a deployed environment. The proactive smoke also requires local embedding capability; it must not be run with paid or external model credentials merely to validate this repository.
+
+Host-local API development does require a validated Python 3.12 virtual environment. Create it with an explicit interpreter:
+
+```bash
+make dev-setup PYTHON_BIN=/path/to/python3.12
+make dev-test
+```
+
+All local migration and API start targets validate that `api/.venv` uses Python 3.12. If an existing venv uses another version, move or remove it explicitly, then rerun `make dev-setup`; the setup command will not overwrite an incompatible venv.
+
 Config split:
 
 - local host-run config: `api/.env`
@@ -165,13 +194,19 @@ INGEST_CHUNK_OVERLAP_CHARS=150
 
 Fast local bootstrap:
 
-1. Start dependencies and apply schema:
+1. Create or validate the local Python 3.12 environment:
+
+```bash
+make dev-setup PYTHON_BIN=/path/to/python3.12
+```
+
+2. Start dependencies and apply schema:
 
 ```bash
 make dev-up
 ```
 
-2. Start the API:
+3. Start the API:
 
 ```bash
 make dev-start
