@@ -385,6 +385,8 @@ def test_empty_database_installs_baseline_and_records_it(pg_database: str, temp_
     assert payload["baseline_installed"] is True
     assert ledger_rows(pg_database) == [("schema_baseline_20260620", "baseline")]
     for table_name in (
+        "memory_entities",
+        "memory_edges",
         "memory_items",
         "memory_events",
         "episodes",

@@ -125,6 +125,35 @@ Requirements:
 - Qdrant
 - LiteLLM
 
+## Tests
+
+The canonical test command uses the repository Dockerfile, so host Python is not required:
+
+```bash
+make test
+```
+
+This builds or reuses `basic-memory-store:test`, verifies Python 3.12 plus the checked-in pytest and psycopg dependencies, supplies deterministic test-only configuration, and runs the fake/unit/API group without live Postgres, Qdrant, LiteLLM, MinIO, private `.env` files, or external model credentials.
+
+PostgreSQL integration tests use a disposable PostgreSQL 16 container:
+
+```bash
+make test-postgres
+```
+
+These tests cover the migration lifecycle and schema assertions, including the `memory_entities` and `memory_edges` tables. They are separate from the regular fake/unit/API group.
+
+Live smoke scripts such as `scripts/validate_object_store.sh` and `scripts/validate_cluster6_r16.sh` require a disposable running stack. Do not point them at a deployed environment. The proactive smoke also requires local embedding capability; it must not be run with paid or external model credentials merely to validate this repository.
+
+For an optional host-local workflow, create the virtual environment with an explicit Python 3.12 interpreter:
+
+```bash
+make dev-setup PYTHON_BIN=/path/to/python3.12
+make dev-test
+```
+
+All local migration and API start targets validate that `api/.venv` uses Python 3.12. If an existing venv uses another version, move or remove it explicitly, then rerun `make dev-setup`; the setup command will not overwrite an incompatible venv.
+
 Config split:
 
 - local host-run config: `api/.env`
