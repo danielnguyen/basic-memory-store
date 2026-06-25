@@ -78,7 +78,7 @@ class FakePG:
             "links": links,
         }
 
-    async def get_episode_debug(self, episode_id):
+    async def get_episode_debug(self, episode_id, owner_id):
         now = "2026-01-01T00:00:00+00:00"
         return {
             "episode": {
@@ -212,7 +212,7 @@ def test_episode_links_and_debug_endpoints(monkeypatch):
         assert pg.link_calls[0]["links"][0]["ref_type"] == "memory_item"
 
         debug = client.get(
-            f"/v1/internal/episodes/{episode_id}/debug",
+            f"/v1/internal/episodes/{episode_id}/debug?owner_id=owner",
             headers={"X-API-Key": "testkey"},
         )
         assert debug.status_code == 200

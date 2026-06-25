@@ -11,6 +11,7 @@ from services.retrieval import retrieve_ranked_messages
 
 GIT_RULE_KIND = "git_risk_scan"
 PORTFOLIO_RULE_KIND = "portfolio_drift_review"
+PROACTIVE_DERIVATION_VERSION = "proactive-rules-v1"
 DEFAULT_PORTFOLIO_DRIFT_THRESHOLD = 0.05
 DEFAULT_GIT_MIN_SCORE = 0.35
 DEFAULT_COOLDOWN_HOURS = 24.0
@@ -325,6 +326,7 @@ async def evaluate_event(
             delivery_surface=delivery_surface,
             conversation_id=UUID(event_log["conversation_id"]) if event_log.get("conversation_id") else None,
             settings=settings,
+            generation_trace_id=request_id,
         )
         return _evaluation_response(request_id, owner_id, event_log_id, initiative_event, [decision], [suggestion] if suggestion else [])
 
@@ -337,6 +339,7 @@ async def evaluate_event(
             prefs=prefs,
             profile=profile,
             delivery_surface=delivery_surface,
+            generation_trace_id=request_id,
         )
         return _evaluation_response(request_id, owner_id, event_log_id, initiative_event, [decision], [suggestion] if suggestion else [])
 
@@ -471,6 +474,7 @@ async def _evaluate_git_event(
     delivery_surface: str,
     conversation_id: UUID | None,
     settings: Any,
+    generation_trace_id: str,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     payload = event_log.get("payload_json") or {}
     normalized_subject = _normalized_git_subject(payload)
@@ -569,6 +573,8 @@ async def _evaluate_git_event(
         explanation_json={
             "rule": GIT_RULE_KIND,
             "because": "A recent git event matched prior discussion in time-aware retrieval.",
+            "derivation_version": PROACTIVE_DERIVATION_VERSION,
+            "generation_trace_id": generation_trace_id,
             "query": query,
             "matched_message_id": matched_snippet["message_id"],
             "score_details": score_details,
@@ -579,6 +585,18 @@ async def _evaluate_git_event(
             },
         },
         evidence_json={
+            "source_refs": [
+                {
+                    "ref_type": "event_log",
+                    "ref_id": event_log["event_log_id"],
+                    "support_kind": "direct",
+                },
+                {
+                    "ref_type": "message",
+                    "ref_id": matched_snippet["message_id"],
+                    "support_kind": "corroborating",
+                },
+            ],
             "source_event_log_id": event_log["event_log_id"],
             "source_event_id": event_log["source_event_id"],
             "event_type": event_log["event_type"],
@@ -590,7 +608,6 @@ async def _evaluate_git_event(
                 "message_id": matched_snippet["message_id"],
                 "conversation_id": matched_snippet["conversation_id"],
                 "created_at": matched_snippet["created_at"],
-                "content": matched_snippet["content"],
             },
         },
         target_surface=delivery_surface,
@@ -625,6 +642,7 @@ async def _evaluate_portfolio_event(
     prefs: dict[str, Any],
     profile: dict[str, Any],
     delivery_surface: str,
+    generation_trace_id: str,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     payload = event_log.get("payload_json") or {}
     normalized_subject = _normalized_portfolio_subject(payload, PORTFOLIO_RULE_KIND)
@@ -690,6 +708,8 @@ async def _evaluate_portfolio_event(
         explanation_json={
             "rule": PORTFOLIO_RULE_KIND,
             "because": "A portfolio event reported allocation drift above the configured threshold.",
+            "derivation_version": PROACTIVE_DERIVATION_VERSION,
+            "generation_trace_id": generation_trace_id,
             "observed_drift": drift,
             "threshold": threshold,
             "initiative": {
@@ -699,6 +719,13 @@ async def _evaluate_portfolio_event(
             },
         },
         evidence_json={
+            "source_refs": [
+                {
+                    "ref_type": "event_log",
+                    "ref_id": event_log["event_log_id"],
+                    "support_kind": "direct",
+                }
+            ],
             "source_event_log_id": event_log["event_log_id"],
             "source_event_id": event_log["source_event_id"],
             "event_type": event_log["event_type"],

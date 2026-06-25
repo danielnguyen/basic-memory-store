@@ -75,6 +75,16 @@ async def ingest_files(
                 text=str(chunk["text"]),
                 language=None,
                 derivation_params={
+                    "derivation_type": "chunk",
+                    "derivation_version": "file-chunk-v1",
+                    "status": "active",
+                    "source_refs": [
+                        {
+                            "ref_type": "artifact",
+                            "ref_id": artifact["artifact_id"],
+                            "support_kind": "direct",
+                        }
+                    ],
                     "chunk_index": chunk["chunk_index"],
                     "char_start": chunk["char_start"],
                     "char_end": chunk["char_end"],

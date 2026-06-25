@@ -8,6 +8,7 @@ def test_derived_text_contract_view_uses_existing_artifact_provenance():
         {
             "derived_text_id": "dt-1",
             "artifact_id": "a-1",
+            "owner_id": "owner",
             "kind": "chunk",
             "derivation_params": {"derivation_version": "chunk-v1"},
             "created_at": "2026-01-01T00:00:00+00:00",
@@ -19,6 +20,8 @@ def test_derived_text_contract_view_uses_existing_artifact_provenance():
     assert out["source_refs"] == [{"ref_type": "artifact", "ref_id": "a-1", "support_kind": "direct"}]
     assert out["derivation_version"] == "chunk-v1"
     assert out["status"] == "active"
+    assert out["generation_trace_id"] is None
+    assert out["compatibility_defaults"] == ["status"]
 
 
 def test_proactive_suggestion_contract_view_uses_event_source_ref():
@@ -44,3 +47,40 @@ def test_proactive_suggestion_contract_view_uses_event_source_ref():
 def test_derived_text_contract_view_rejects_missing_identifier():
     with pytest.raises(ValueError, match="missing an identifier"):
         derived_text_contract_view({"artifact_id": "a-1", "kind": "chunk"})
+
+
+@pytest.mark.parametrize(
+    "source_refs",
+    [
+        [],
+        [{"ref_type": "", "ref_id": "a-1"}],
+        [{"ref_type": "artifact", "ref_id": ""}],
+        [{"ref_type": "artifact", "ref_id": "a-1", "metadata": {"nested": {"text": "private"}}}],
+    ],
+)
+def test_derived_text_contract_view_rejects_or_drops_malformed_provenance(source_refs):
+    row = {
+        "derived_text_id": "dt-1",
+        "artifact_id": None,
+        "owner_id": "owner",
+        "kind": "chunk",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "derivation_params": {"source_refs": source_refs},
+    }
+    if source_refs and source_refs[0].get("metadata"):
+        assert derived_text_contract_view(row)["source_refs"][0].get("metadata") is None
+    else:
+        with pytest.raises(ValueError, match="source_ref"):
+            derived_text_contract_view(row)
+
+
+def test_contract_view_rejects_missing_owner():
+    with pytest.raises(ValueError, match="owner_id"):
+        derived_text_contract_view(
+            {
+                "derived_text_id": "dt-1",
+                "artifact_id": "a-1",
+                "kind": "chunk",
+                "created_at": "2026-01-01T00:00:00+00:00",
+            }
+        )

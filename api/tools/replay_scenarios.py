@@ -22,8 +22,9 @@ DEFAULT_CORPUS = Path(__file__).resolve().parents[1] / "replay" / "retrieval_sce
 
 
 class FixturePG:
-    def __init__(self, fixture: dict[str, Any]) -> None:
+    def __init__(self, fixture: dict[str, Any], owner_id: str) -> None:
         self.fixture = fixture
+        self.owner_id = owner_id
 
     async def get_message_snippets_by_ids(self, ids: list[UUID]) -> list[dict[str, Any]]:
         by_id = {item["message_id"]: item for item in self.fixture.get("message_sources", [])}
@@ -31,7 +32,20 @@ class FixturePG:
 
     async def get_derived_text_snippets_by_ids(self, ids: list[UUID]) -> list[dict[str, Any]]:
         by_id = {item["derived_text_id"]: item for item in self.fixture.get("artifact_sources", [])}
-        return [deepcopy(by_id[str(item)]) for item in ids if str(item) in by_id]
+        rows = [deepcopy(by_id[str(item)]) for item in ids if str(item) in by_id]
+        for row in rows:
+            row.setdefault("owner_id", self.owner_id)
+            row.setdefault("kind", "chunk")
+            params = row.setdefault("derivation_params", {})
+            params.setdefault(
+                "source_refs",
+                [{
+                    "ref_type": "artifact",
+                    "ref_id": row["artifact_id"],
+                    "support_kind": "direct",
+                }],
+            )
+        return rows
 
     async def get_recent_message_items(
         self,
@@ -151,7 +165,7 @@ async def run_scenario(scenario: dict[str, Any]) -> dict[str, Any]:
         recent_turns=10,
     )
     replay = await replay_raw_vs_augmented(
-        pg=FixturePG(fixture),
+        pg=FixturePG(fixture, request["owner_id"]),
         qdrant=FixtureQdrant(fixture),
         settings=settings,
         owner_id=request["owner_id"],

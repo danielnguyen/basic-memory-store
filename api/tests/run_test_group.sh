@@ -13,9 +13,12 @@ case "${1:-}" in
       tests/test_hygiene_api.py \
       tests/test_initiative_api.py \
       tests/test_proactive_api.py \
+      tests/test_derived_contract.py \
       tests/test_memory_items_service.py \
       tests/test_memory_lifecycle_service.py \
       tests/test_memory_items_api.py \
+      tests/test_episodes_service.py \
+      tests/test_episodes_api.py \
       tests/test_traces_api.py \
       tests/test_retrieval_replay.py
     ;;
@@ -26,6 +29,7 @@ case "${1:-}" in
       tests/test_recall_migration.py \
       tests/test_schema_migrations_integration.py \
       tests/test_memory_lifecycle_postgres.py \
+      tests/test_provenance_postgres_integration.py \
       tests/test_trace_postgres_integration.py
     ;;
   *)
