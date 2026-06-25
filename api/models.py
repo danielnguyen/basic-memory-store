@@ -867,10 +867,14 @@ class TraceCreateRequest(BaseModel):
     surface: str
     profile: Dict[str, Any]
     retrieval: Dict[str, Any]
+    prompt: Dict[str, Any] = Field(default_factory=dict)
     router_decision: Dict[str, Any]
     manual_override: Dict[str, Any] = Field(default_factory=dict)
     model_call: Dict[str, Any]
+    model_calls: List[Dict[str, Any]] = Field(default_factory=list)
     fallback: Dict[str, Any] = Field(default_factory=dict)
+    artifacts: Dict[str, Any] = Field(default_factory=dict)
+    references: List[Dict[str, Any]] = Field(default_factory=list)
     cost: Dict[str, Any] = Field(default_factory=dict)
     latency_ms: Optional[int] = None
     status: Literal["ok", "degraded", "failed"]
@@ -891,10 +895,14 @@ class TraceResponse(BaseModel):
     surface: str
     profile: Dict[str, Any]
     retrieval: Dict[str, Any]
+    prompt: Dict[str, Any] = Field(default_factory=dict)
     router_decision: Dict[str, Any]
     manual_override: Dict[str, Any]
     model_call: Dict[str, Any]
+    model_calls: List[Dict[str, Any]] = Field(default_factory=list)
     fallback: Dict[str, Any]
+    artifacts: Dict[str, Any] = Field(default_factory=dict)
+    references: List[Dict[str, Any]] = Field(default_factory=list)
     cost: Dict[str, Any]
     latency_ms: Optional[int] = None
     status: str

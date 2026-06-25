@@ -340,24 +340,39 @@ async def retrieve_ranked_messages(
     elif opts.scope == "client":
         client_filter = client_id
 
-    semantic_hits = await qdrant.search(
-        owner_id=owner_id,
-        query=query,
-        k=opts.k,
-        min_score=opts.min_score,
-        conversation_id=conversation_filter,
-        client_id=client_filter,
-        exclude_message_ids=exclude_message_ids,
-    )
+    vector_status = "ok"
+    fallback_to_raw_reasons: list[str] = []
+    try:
+        semantic_hits = await qdrant.search(
+            owner_id=owner_id,
+            query=query,
+            k=opts.k,
+            min_score=opts.min_score,
+            conversation_id=conversation_filter,
+            client_id=client_filter,
+            exclude_message_ids=exclude_message_ids,
+        )
+    except Exception:
+        logging.warning("Vector retrieval unavailable; continuing with canonical recent messages")
+        semantic_hits = []
+        vector_status = "unavailable"
+        fallback_to_raw_reasons.append("vector_unavailable")
     semantic_ids: list[UUID] = []
     semantic_score_by_id: dict[str, float] = {}
+    invalid_hit_ids = 0
     for hit in semantic_hits:
         message_id = _safe_uuid(getattr(hit, "message_id", None), context=context)
         if message_id is None:
+            invalid_hit_ids += 1
             continue
         semantic_ids.append(message_id)
         semantic_score_by_id[str(message_id)] = float(getattr(hit, "score", 0.0) or 0.0)
+    if invalid_hit_ids:
+        fallback_to_raw_reasons.append("malformed_vector_result")
     semantic_snips = await pg.get_message_snippets_by_ids(semantic_ids)
+    missing_source_count = max(0, len(semantic_ids) - len(semantic_snips))
+    if missing_source_count:
+        fallback_to_raw_reasons.append("missing_canonical_source")
 
     ranked_semantic: list[tuple[dict[str, Any], dict[str, float]]] = []
     for snippet in semantic_snips:
@@ -387,6 +402,10 @@ async def retrieve_ranked_messages(
             "retrieval_mode": opts.retrieval_mode,
             "semantic_candidates": len(semantic_snips),
             "semantic_ranked": len(ranked_semantic),
+            "vector_status": vector_status,
+            "semantic_invalid_hit_ids": invalid_hit_ids,
+            "semantic_missing_source_count": missing_source_count,
+            "fallback_to_raw_reasons": fallback_to_raw_reasons,
         },
     }
 
@@ -419,31 +438,47 @@ async def build_retrieval_bundle(
     ranked_semantic = message_results["ranked_semantic"]
 
     artifact_k = retrieval_artifact_k(settings) if include_artifacts else 0
-    artifact_hits = (
-        await qdrant.search_artifact_chunks(
-            owner_id=owner_id,
-            query=query,
-            k=artifact_k,
-            min_score=opts.min_score,
-            client_id=(client_id if opts.scope == "client" else None),
-        )
-        if artifact_k > 0
-        else []
-    )
+    artifact_status = "not_requested" if artifact_k == 0 else "ok"
+    artifact_omission_reasons: list[str] = []
+    if artifact_k > 0:
+        try:
+            artifact_hits = await qdrant.search_artifact_chunks(
+                owner_id=owner_id,
+                query=query,
+                k=artifact_k,
+                min_score=opts.min_score,
+                client_id=(client_id if opts.scope == "client" else None),
+            )
+        except Exception:
+            logging.warning("Artifact retrieval unavailable; continuing without artifact snippets")
+            artifact_hits = []
+            artifact_status = "unavailable"
+            artifact_omission_reasons.append("artifact_retrieval_unavailable")
+    else:
+        artifact_hits = []
 
     artifact_ids: list[UUID] = []
     artifact_score_by_id: dict[str, float] = {}
+    artifact_invalid_hit_ids = 0
     for hit in artifact_hits:
         derived_text_id = _safe_uuid(
             getattr(hit, "derived_text_id", None),
             context="retrieve_bundle_artifacts",
         )
         if derived_text_id is None:
+            artifact_invalid_hit_ids += 1
             continue
         artifact_ids.append(derived_text_id)
         artifact_score_by_id[str(derived_text_id)] = float(getattr(hit, "score", 0.0) or 0.0)
+    if artifact_invalid_hit_ids:
+        artifact_status = "degraded"
+        artifact_omission_reasons.append("malformed_artifact_result")
 
     artifact_snips = await pg.get_derived_text_snippets_by_ids(artifact_ids)
+    artifact_missing_source_count = max(0, len(artifact_ids) - len(artifact_snips))
+    if artifact_missing_source_count:
+        artifact_status = "degraded"
+        artifact_omission_reasons.append("missing_derivative_source")
     ranked_artifacts: list[tuple[dict[str, Any], dict[str, float]]] = []
     for snippet in artifact_snips:
         if not _in_time_window(snippet.get("created_at"), opts.time_window):
@@ -579,6 +614,10 @@ async def build_retrieval_bundle(
             "artifacts_included": include_artifacts,
             "artifact_candidates": len(artifact_snips),
             "artifact_ranked": len(ranked_artifacts),
+            "artifact_status": artifact_status,
+            "artifact_invalid_hit_ids": artifact_invalid_hit_ids,
+            "artifact_missing_source_count": artifact_missing_source_count,
+            "artifact_omission_reasons": artifact_omission_reasons,
             "graph_expansion_applied": False,
             "pinned_handling": "pinned memories are not part of the v2 ranked bundle; they remain available via the unchanged tiered retrieval path",
             "missing_score_note": "project heuristic; not an explicit spec term",

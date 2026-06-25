@@ -13,14 +13,16 @@ case "${1:-}" in
       tests/test_hygiene_api.py \
       tests/test_initiative_api.py \
       tests/test_proactive_api.py \
-      tests/test_traces_api.py
+      tests/test_traces_api.py \
+      tests/test_retrieval_replay.py
     ;;
   postgres)
     exec python -m pytest -q \
       tests/test_memory_items_migration.py \
       tests/test_episodes_migration.py \
       tests/test_recall_migration.py \
-      tests/test_schema_migrations_integration.py
+      tests/test_schema_migrations_integration.py \
+      tests/test_trace_postgres_integration.py
     ;;
   *)
     echo "Usage: $0 {fake|postgres}" >&2

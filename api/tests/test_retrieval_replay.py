@@ -1,10 +1,13 @@
+import json
+from pathlib import Path
 import types
 import uuid
 
 import pytest
 
 from models import ArtifactRef, ObservedMetadata, RetrievalBundle, RetrievalMessageItem, RetrievalOptions
-from services.retrieval_replay import replay_raw_vs_augmented
+from services.retrieval_replay import replay_raw_vs_augmented, structural_diff
+from tools.replay_scenarios import run_corpus
 
 
 async def fake_runner(*, settings, conversation_id, opts, **kwargs):
@@ -65,3 +68,56 @@ async def test_replay_raw_vs_augmented_is_deterministic_and_fake_friendly():
         "artifact_delta": 1,
         "token_delta": 20,
     }
+
+
+@pytest.mark.asyncio
+async def test_persisted_replay_corpus_matches_twice_from_clean_fixture_state():
+    corpus = Path(__file__).resolve().parents[1] / "replay" / "retrieval_scenarios.v1.json"
+
+    first, first_failures = await run_corpus(corpus)
+    second, second_failures = await run_corpus(corpus)
+
+    assert first_failures == []
+    assert second_failures == []
+    assert first == second
+    assert len(first) == 8
+
+
+def test_persisted_replay_corpus_covers_required_retrieval_matrix():
+    corpus = Path(__file__).resolve().parents[1] / "replay" / "retrieval_scenarios.v1.json"
+    payload = json.loads(corpus.read_text(encoding="utf-8"))
+    categories = {
+        category
+        for scenario in payload["scenarios"]
+        for category in scenario["categories"]
+    }
+
+    assert {
+        "positive",
+        "negative",
+        "stale",
+        "missing-source",
+        "malformed",
+        "dependency",
+        "derived-store",
+        "fallback",
+        "offline",
+        "local-routing",
+        "cross-service",
+    } <= categories
+
+
+def test_replay_snapshots_are_privacy_safe_and_structural_diff_is_readable():
+    corpus = Path(__file__).resolve().parents[1] / "replay" / "retrieval_scenarios.v1.json"
+    payload = corpus.read_text(encoding="utf-8")
+
+    assert "neutral recent fixture" in payload
+    expected_payloads = [scenario["expected"] for scenario in json.loads(payload)["scenarios"]]
+    serialized_expected = json.dumps(expected_payloads)
+    assert "neutral recent fixture" not in serialized_expected
+    assert "stale derivative fixture" not in serialized_expected
+    diff = structural_diff({"ids": ["a"]}, {"ids": ["b"]})
+    assert "--- expected" in diff
+    assert "+++ actual" in diff
+    assert '-    "a"' in diff
+    assert '+    "b"' in diff
