@@ -1,7 +1,9 @@
 # Database Lifecycle
 
-`baseline.sql` is the immutable cutover snapshot for fresh installs and explicit
-baseline adoption.
+`baseline.sql` is the current schema snapshot for fresh installs and explicit
+baseline adoption. Existing installations advance only through forward-managed
+migrations; prior enrolled baseline checksums remain recognized when a baseline
+snapshot is refreshed alongside a compatibility migration.
 
 `migrations/legacy/` contains historical SQL files preserved as upgrade evidence.
 They are never executed automatically.

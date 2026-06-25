@@ -596,6 +596,19 @@ MemoryEventType = Literal[
     "decayed",
     "state_changed",
 ]
+MemoryDurableStatus = Literal[
+    "active",
+    "parked",
+    "stale",
+    "contradicted",
+    "corrected",
+    "invalidated",
+    "superseded",
+    "expired",
+    "retracted",
+    "forgotten_or_demoted",
+    "rebuilding",
+]
 
 
 class MemorySourceRef(BaseModel):
@@ -615,6 +628,7 @@ class MemoryItemResponse(BaseModel):
     scores: Dict[str, Any] = Field(default_factory=dict)
     promotion_state: str
     status: str
+    freshness_state: RetrievalFreshnessState
     supersedes_memory_id: Optional[str] = None
     superseded_by_memory_id: Optional[str] = None
     last_reinforced_at: Optional[str] = None
@@ -658,6 +672,26 @@ class MemoryReinforceRequest(BaseModel):
     owner_id: str = Field(..., min_length=1, max_length=160)
     scores: Dict[str, Any] = Field(default_factory=dict)
     reason: Dict[str, Any] = Field(default_factory=dict)
+
+
+class MemoryTransitionReason(BaseModel):
+    code: str = Field(..., min_length=1, max_length=64)
+    metadata: Dict[str, Any] = Field(default_factory=dict, max_length=8)
+
+
+class MemoryTransitionRequest(BaseModel):
+    request_id: str = Field(..., min_length=1, max_length=160)
+    owner_id: str = Field(..., min_length=1, max_length=160)
+    status: MemoryDurableStatus
+    reason: MemoryTransitionReason
+    related_memory_id: Optional[str] = None
+
+
+class MemoryTransitionResponse(BaseModel):
+    request_id: str
+    changed: bool
+    memory: MemoryItemResponse
+    events_appended: List[MemoryEventType] = Field(default_factory=list)
 
 
 class MemoryEventItem(BaseModel):

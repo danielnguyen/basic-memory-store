@@ -75,6 +75,8 @@ from models import (
     MemoryPromoteRequest,
     MemoryPromoteResponse,
     MemoryReinforceRequest,
+    MemoryTransitionRequest,
+    MemoryTransitionResponse,
     RecallDebugResponse,
     RecallDecisionItem,
     RecallSelectRequest,
@@ -1724,6 +1726,7 @@ async def evaluate_proactive(body: ProactiveEvaluateRequest, request: Request):
     "/v1/internal/memory/promote",
     response_model=MemoryPromoteResponse,
     tags=["memory-internal"],
+    dependencies=[Depends(require_api_key)],
     summary="Manually promote or update one derived memory item",
 )
 async def promote_memory(body: MemoryPromoteRequest, request: Request):
@@ -1756,6 +1759,8 @@ async def promote_memory(body: MemoryPromoteRequest, request: Request):
         )
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
     return MemoryPromoteResponse(
         request_id=request_id,
@@ -1772,6 +1777,7 @@ async def promote_memory(body: MemoryPromoteRequest, request: Request):
     "/v1/internal/memory/{memory_id}/reinforce",
     response_model=MemoryItemResponse,
     tags=["memory-internal"],
+    dependencies=[Depends(require_api_key)],
     summary="Manually reinforce one derived memory item",
 )
 async def reinforce_memory(memory_id: str, body: MemoryReinforceRequest, request: Request):
@@ -1792,18 +1798,64 @@ async def reinforce_memory(memory_id: str, body: MemoryReinforceRequest, request
     return MemoryItemResponse(**shape_memory_item(row))
 
 
-@app.get(
-    "/v1/internal/memory/{memory_id}/debug",
-    response_model=MemoryDebugResponse,
+@app.post(
+    "/v1/internal/memory/{memory_id}/transition",
+    response_model=MemoryTransitionResponse,
     tags=["memory-internal"],
-    summary="Inspect one derived memory item and its audit events",
+    dependencies=[Depends(require_api_key)],
+    summary="Transition one derived memory item and append bounded audit evidence",
 )
-async def debug_memory(memory_id: str):
+async def transition_memory(memory_id: str, body: MemoryTransitionRequest, request: Request):
+    request_id = _require_matching_request_id(request, body.request_id)
     try:
         mid = UUID(memory_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="memory_id must be a UUID")
-    debug = await pg.get_memory_debug(mid)
+
+    related_memory_id = None
+    if body.related_memory_id is not None:
+        try:
+            related_memory_id = UUID(body.related_memory_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="related_memory_id must be a UUID")
+
+    try:
+        result = await pg.transition_memory_item(
+            memory_id=mid,
+            owner_id=body.owner_id,
+            new_status=body.status,
+            reason_code=body.reason.code,
+            reason_metadata=body.reason.metadata,
+            request_id=request_id,
+            related_memory_id=related_memory_id,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    if result is None:
+        raise HTTPException(status_code=404, detail="memory not found")
+    return MemoryTransitionResponse(
+        request_id=request_id,
+        changed=result["changed"],
+        memory=MemoryItemResponse(**shape_memory_item(result["memory"])),
+        events_appended=result["events_appended"],
+    )
+
+
+@app.get(
+    "/v1/internal/memory/{memory_id}/debug",
+    response_model=MemoryDebugResponse,
+    tags=["memory-internal"],
+    dependencies=[Depends(require_api_key)],
+    summary="Inspect one derived memory item and its audit events",
+)
+async def debug_memory(memory_id: str, owner_id: str):
+    try:
+        mid = UUID(memory_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="memory_id must be a UUID")
+    debug = await pg.get_memory_debug(mid, owner_id)
     if debug is None:
         raise HTTPException(status_code=404, detail="memory not found")
     return MemoryDebugResponse(

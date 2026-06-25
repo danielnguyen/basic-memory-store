@@ -16,6 +16,7 @@ class FakePG:
     def __init__(self):
         self.promote_calls = []
         self.reinforce_calls = []
+        self.transition_calls = []
         self.debug_payload = None
 
     async def open(self):
@@ -84,7 +85,38 @@ class FakePG:
             "updated_at": now,
         }
 
-    async def get_memory_debug(self, memory_id):
+    async def transition_memory_item(self, **kwargs):
+        self.transition_calls.append(kwargs)
+        now = "2026-01-01T00:00:01+00:00"
+        return {
+            "memory": {
+                "memory_id": str(kwargs["memory_id"]),
+                "owner_id": kwargs["owner_id"],
+                "memory_type": "core",
+                "summary": "remember concise answers",
+                "source_refs_json": [{"ref_type": "message", "ref_id": "m-1", "support_kind": "direct"}],
+                "source_ref_hash": "hash",
+                "scores_json": {},
+                "promotion_state": "promoted",
+                "status": kwargs["new_status"],
+                "supersedes_memory_id": str(kwargs["related_memory_id"])
+                if kwargs["new_status"] == "corrected" and kwargs["related_memory_id"]
+                else None,
+                "superseded_by_memory_id": None,
+                "last_reinforced_at": None,
+                "expires_at": None,
+                "derivation_version": "r20-mvp-v1",
+                "confidence": None,
+                "explanation_json": {},
+                "generation_trace_id": None,
+                "created_at": now,
+                "updated_at": now,
+            },
+            "changed": True,
+            "events_appended": ["state_changed"],
+        }
+
+    async def get_memory_debug(self, memory_id, owner_id):
         now = "2026-01-01T00:00:00+00:00"
         return {
             "memory": {
@@ -200,7 +232,7 @@ def test_reinforce_and_debug_endpoints(monkeypatch):
         assert pg.reinforce_calls[0]["scores_json"] == {"recurrence_score": 0.4}
 
         debug = client.get(
-            f"/v1/internal/memory/{memory_id}/debug",
+            f"/v1/internal/memory/{memory_id}/debug?owner_id=owner",
             headers={"X-API-Key": "testkey"},
         )
         assert debug.status_code == 200
@@ -208,5 +240,58 @@ def test_reinforce_and_debug_endpoints(monkeypatch):
         assert body["memory"]["memory_id"] == memory_id
         assert body["events"][0]["event_type"] == "created"
         assert body["events"][0]["reason"] == {"request_id": "rid-1"}
+    finally:
+        client.close()
+
+
+def test_transition_endpoint_preserves_durable_and_effective_state(monkeypatch):
+    pg = FakePG()
+    monkeypatch.setattr(main_module, "settings", _settings(), raising=True)
+    monkeypatch.setattr(main_module, "pg", pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", FakeQdrant(), raising=True)
+    memory_id = str(uuid.uuid4())
+
+    client = TestClient(main_module.app)
+    try:
+        response = client.post(
+            f"/v1/internal/memory/{memory_id}/transition",
+            headers={"X-API-Key": "testkey", "X-Request-ID": "rid-transition"},
+            json={
+                "request_id": "rid-transition",
+                "owner_id": "owner",
+                "status": "invalidated",
+                "reason": {"code": "support_withdrawn", "metadata": {"source": "review"}},
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["memory"]["status"] == "invalidated"
+        assert body["memory"]["freshness_state"] == "forgotten_or_demoted"
+        assert body["events_appended"] == ["state_changed"]
+        assert pg.transition_calls[0]["reason_code"] == "support_withdrawn"
+    finally:
+        client.close()
+
+
+def test_transition_rejects_unsupported_status_before_storage(monkeypatch):
+    pg = FakePG()
+    monkeypatch.setattr(main_module, "settings", _settings(), raising=True)
+    monkeypatch.setattr(main_module, "pg", pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", FakeQdrant(), raising=True)
+
+    client = TestClient(main_module.app)
+    try:
+        response = client.post(
+            f"/v1/internal/memory/{uuid.uuid4()}/transition",
+            headers={"X-API-Key": "testkey", "X-Request-ID": "rid-transition"},
+            json={
+                "request_id": "rid-transition",
+                "owner_id": "owner",
+                "status": "current",
+                "reason": {"code": "unsupported"},
+            },
+        )
+        assert response.status_code == 422
+        assert pg.transition_calls == []
     finally:
         client.close()
