@@ -15,6 +15,7 @@ from models import (
     RetrievalPolicyMetadata,
     RetrievalSourceRef,
 )
+from services.memory_lifecycle import effective_freshness_state
 
 
 def cap_snippet(text: str, max_chars: int) -> str:
@@ -195,24 +196,7 @@ def _policy_metadata(raw_metadata: Any) -> RetrievalPolicyMetadata:
 
 
 def _normalize_freshness_state(memory_item: dict[str, Any] | None) -> str:
-    if not isinstance(memory_item, dict):
-        return "unknown_freshness"
-
-    status = str(memory_item.get("status") or "").strip().lower()
-    if memory_item.get("superseded_by_memory_id"):
-        return "superseded"
-    if status in {
-        "active",
-        "parked",
-        "stale",
-        "superseded",
-        "corrected",
-        "unknown_freshness",
-    }:
-        return status
-    if status in {"forgotten", "demoted", "forgotten_or_demoted"}:
-        return "forgotten_or_demoted"
-    return "unknown_freshness"
+    return effective_freshness_state(memory_item)
 
 
 def _freshness_metadata(

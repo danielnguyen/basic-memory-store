@@ -232,6 +232,15 @@ def seed_manual_recent_shape(dsn: str, db_dir: Path) -> None:
     )
     for path in RECENT_LEGACY_MIGRATIONS:
         execute_sql(dsn, path.read_text(encoding="utf-8"))
+    execute_sql(
+        dsn,
+        (
+            SOURCE_DB_DIR
+            / "migrations"
+            / "managed"
+            / "20260625120000_memory_lifecycle.sql"
+        ).read_text(encoding="utf-8"),
+    )
 
 
 def write_managed_migration(db_dir: Path, filename: str, sql_text: str) -> Path:
@@ -637,6 +646,141 @@ def test_managed_migration_applies_once_and_commits_with_ledger(pg_database: str
     assert column_exists(pg_database, "memory_items", "notes")
     assert ("20260620010101", "migration") in ledger_rows(pg_database)
     assert second["applied_migrations"] == []
+
+
+def test_prior_baseline_upgrades_lifecycle_without_rewriting_rows_or_events(
+    pg_database: str, temp_db_dir: Path
+) -> None:
+    trace_migration = SOURCE_DB_DIR / "migrations" / "managed" / "20260624150000_trace_summary_fields.sql"
+    lifecycle_migration = SOURCE_DB_DIR / "migrations" / "managed" / "20260625120000_memory_lifecycle.sql"
+    shutil.copy2(trace_migration, temp_db_dir / "migrations" / "managed" / trace_migration.name)
+    shutil.copy2(lifecycle_migration, temp_db_dir / "migrations" / "managed" / lifecycle_migration.name)
+
+    memory_id = uuid4()
+    replacement_id = uuid4()
+    event_id = uuid4()
+    execute_sql(
+        pg_database,
+        (temp_db_dir / "baseline.sql").read_text(encoding="utf-8")
+        + """
+        ALTER TABLE memory_items DROP CONSTRAINT memory_items_status_check;
+        ALTER TABLE memory_items ADD CONSTRAINT memory_items_status_check
+          CHECK (status IN ('active', 'stale', 'invalidated', 'superseded', 'expired'));
+        """
+    )
+    with psycopg.connect(pg_database) as conn:
+        schema_migrations.create_ledger_table(conn)
+        conn.execute(
+            """
+            INSERT INTO schema_migrations (version, kind, checksum_sha256, execution_ms)
+            VALUES (%s, 'baseline', %s, 1), (%s, 'migration', %s, 1)
+            """,
+            (
+                schema_migrations.BASELINE_VERSION,
+                next(iter(schema_migrations.COMPATIBLE_BASELINE_CHECKSUMS)),
+                "20260624150000",
+                schema_migrations.compute_sha256(trace_migration),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO memory_items (
+                id, owner_id, memory_type, summary, source_refs_json, source_ref_hash,
+                scores_json, promotion_state, status, supersedes_memory_id,
+                superseded_by_memory_id, last_reinforced_at, expires_at,
+                derivation_version, confidence, explanation_json,
+                generation_trace_id, created_at, updated_at
+            ) VALUES (
+                %s, 'owner-upgrade', 'fixture', 'preserve me',
+                '[{"ref_type":"message","ref_id":"source-1","support_kind":"direct"}]'::jsonb,
+                'preserved-hash', '{"utility":0.7}'::jsonb, 'promoted', 'expired',
+                NULL, NULL, '2026-06-01T00:00:00Z', '2027-01-01T00:00:00Z',
+                'legacy-v1', 0.7, '{"rationale":"preserved"}'::jsonb,
+                'trace-preserved', '2026-06-01T00:00:00Z', '2026-06-02T00:00:00Z'
+            )
+            """,
+            (memory_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO memory_items (
+                id, owner_id, memory_type, summary, source_ref_hash,
+                promotion_state, status, supersedes_memory_id
+            ) VALUES (
+                %s, 'owner-upgrade', 'fixture', 'replacement', 'replacement-hash',
+                'promoted', 'invalidated', %s
+            )
+            """,
+            (replacement_id, memory_id),
+        )
+        conn.execute(
+            """
+            UPDATE memory_items
+            SET superseded_by_memory_id = %s
+            WHERE id = %s
+            """,
+            (replacement_id, memory_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO memory_events (id, memory_id, owner_id, event_type, reason_json, created_at)
+            VALUES (%s, %s, 'owner-upgrade', 'created', '{"request_id":"preserved"}'::jsonb,
+                    '2026-06-01T00:00:01Z')
+            """,
+            (event_id, memory_id),
+        )
+        conn.commit()
+
+    payload = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
+
+    assert payload["applied_migrations"] == [lifecycle_migration.name]
+    with psycopg.connect(pg_database) as conn:
+        memory = conn.execute(
+            """
+            SELECT id, owner_id, summary, source_refs_json, source_ref_hash, scores_json,
+                   promotion_state, status, superseded_by_memory_id, last_reinforced_at, expires_at,
+                   derivation_version, confidence, explanation_json,
+                   generation_trace_id, created_at, updated_at
+            FROM memory_items WHERE id = %s
+            """,
+            (memory_id,),
+        ).fetchone()
+        event = conn.execute(
+            "SELECT id, event_type, reason_json, created_at FROM memory_events WHERE id = %s",
+            (event_id,),
+        ).fetchone()
+        replacement_status = conn.execute(
+            "SELECT status, supersedes_memory_id FROM memory_items WHERE id = %s",
+            (replacement_id,),
+        ).fetchone()
+        conn.execute(
+            """
+            INSERT INTO memory_items (
+                owner_id, memory_type, summary, source_ref_hash, promotion_state, status
+            ) VALUES ('owner-upgrade', 'fixture', 'new status', 'new-status-hash', 'promoted', 'rebuilding')
+            """
+        )
+
+    assert memory[0] == memory_id
+    assert memory[1:8] == (
+        "owner-upgrade",
+        "preserve me",
+        [{"ref_type": "message", "ref_id": "source-1", "support_kind": "direct"}],
+        "preserved-hash",
+        {"utility": 0.7},
+        "promoted",
+        "expired",
+    )
+    assert memory[8] == replacement_id
+    assert str(memory[9]) == "2026-06-01 00:00:00+00:00"
+    assert str(memory[10]) == "2027-01-01 00:00:00+00:00"
+    assert memory[11:15] == ("legacy-v1", 0.7, {"rationale": "preserved"}, "trace-preserved")
+    assert str(memory[15]) == "2026-06-01 00:00:00+00:00"
+    assert str(memory[16]) == "2026-06-02 00:00:00+00:00"
+    assert replacement_status == ("invalidated", memory_id)
+    assert event[0] == event_id
+    assert event[1:3] == ("created", {"request_id": "preserved"})
+    assert str(event[3]) == "2026-06-01 00:00:01+00:00"
 
 
 def test_failed_managed_migration_rolls_back_and_remains_pending(pg_database: str, temp_db_dir: Path) -> None:

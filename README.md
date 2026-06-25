@@ -45,15 +45,17 @@ This separation keeps memory ownership explicit and preserves cross-device trace
 
 ## Schema Lifecycle
 
-Frozen install baseline:
+Install baseline:
 
-- `db/baseline.sql` is the immutable cutover snapshot for fresh installs and explicit baseline adoption.
+- `db/baseline.sql` is the current schema snapshot for fresh installs and explicit baseline adoption.
 
 Managed lifecycle:
 
 - `db/migrations/managed/` is the only executable migration directory for future schema changes.
 - Managed filenames must be unique and lexically sortable: `YYYYMMDDHHMMSS_domain_description.sql`.
-- Applied managed migrations and the frozen baseline are immutable.
+- Applied managed migrations are immutable. Baseline refreshes must ship with a
+  forward migration and preserve recognition of the previously enrolled
+  baseline checksum.
 
 Historical evidence:
 
@@ -72,9 +74,9 @@ python -m tools.schema_migrations upgrade
 
 Operational rules:
 
-- `upgrade` installs the frozen baseline into an empty database, then applies pending managed migrations.
+- `upgrade` installs the current baseline into an empty database, then applies pending managed migrations.
 - `upgrade` refuses to guess about a non-empty untracked database and returns `adoption_required`.
-- `adopt-baseline` is the explicit enrollment path for an existing database that already matches the frozen baseline.
+- `adopt-baseline` is the explicit enrollment path for an existing database that already matches the current baseline.
 - The runner records file checksums in `schema_migrations` and fails hard on checksum drift, missing files, invalid ordering, or unknown ledger state.
 - Migration and adoption operations are serialized with a PostgreSQL advisory lock.
 - Managed migrations are forward-only and transactional. Unsupported non-transactional SQL such as `CREATE INDEX CONCURRENTLY` is rejected.
@@ -112,8 +114,11 @@ Qdrant stores vector records for message and derived-text retrieval. If Qdrant d
   - `GET /v1/artifacts/{artifact_id}`
 - Diagnostics:
   - `GET /v1/traces/{request_id}`
+  - `GET /v1/internal/memory/{memory_id}/debug?owner_id={owner_id}`
   - `GET /metrics`
   - `GET /healthz`
+- Internal memory lifecycle:
+  - `POST /v1/internal/memory/{memory_id}/transition`
 
 ## Local Run
 
@@ -150,6 +155,15 @@ make replay-test
 ```
 
 The replay command loads the versioned persisted corpus, executes raw and augmented retrieval without live services, and reports a structural diff when IDs, order, provenance, token estimates, adjustments, or fallback outcomes change.
+
+The durable lifecycle smoke uses only a disposable PostgreSQL 16 container. It
+installs the schema, creates and transitions neutral memory items, verifies a
+bidirectional correction relationship and ordered audit events, reopens the
+storage client, and checks migration status:
+
+```bash
+make lifecycle-smoke
+```
 
 Live smoke scripts such as `scripts/validate_object_store.sh` and `scripts/validate_cluster6_r16.sh` require a disposable running stack. Do not point them at a deployed environment. The proactive smoke also requires local embedding capability; it must not be run with paid or external model credentials merely to validate this repository.
 

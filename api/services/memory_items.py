@@ -4,6 +4,7 @@ from hashlib import sha256
 import json
 from typing import Any
 
+from services.memory_lifecycle import effective_freshness_state
 
 DEFAULT_DERIVATION_VERSION = "r20-mvp-v1"
 
@@ -75,6 +76,7 @@ def shape_memory_item(row: dict[str, Any]) -> dict[str, Any]:
         "scores": row.get("scores_json") or {},
         "promotion_state": row["promotion_state"],
         "status": row["status"],
+        "freshness_state": effective_freshness_state(row),
         "supersedes_memory_id": row.get("supersedes_memory_id"),
         "superseded_by_memory_id": row.get("superseded_by_memory_id"),
         "last_reinforced_at": row.get("last_reinforced_at"),

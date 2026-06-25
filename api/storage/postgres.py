@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 from psycopg_pool import AsyncConnectionPool
 from psycopg.types.json import Json
 
+from services.memory_lifecycle import bounded_transition_reason
 
 @dataclass
 class Conversation:
@@ -1945,28 +1946,8 @@ class PostgresStore:
                     old_row = await cur.fetchone()
                     if old_row is None:
                         raise KeyError("superseded memory not found")
-
-                    await cur.execute(
-                        """
-                        UPDATE memory_items
-                        SET status = 'superseded',
-                            superseded_by_memory_id = %s,
-                            updated_at = now()
-                        WHERE id = %s AND owner_id = %s;
-                        """,
-                        (new_id, supersedes_memory_id, owner_id),
-                    )
-                    await cur.execute(
-                        """
-                        INSERT INTO memory_events (memory_id, owner_id, event_type, reason_json)
-                        VALUES (%s, %s, 'superseded', %s::jsonb);
-                        """,
-                        (
-                            supersedes_memory_id,
-                            owner_id,
-                            Json({"request_id": request_id, "superseded_by_memory_id": str(new_id)}),
-                        ),
-                    )
+                    if old_row[10] is not None:
+                        raise ValueError("superseded memory already has a replacement")
 
                     await cur.execute(
                         f"""
@@ -1997,6 +1978,36 @@ class PostgresStore:
                         ),
                     )
                     row = await cur.fetchone()
+                    await cur.execute(
+                        """
+                        UPDATE memory_items
+                        SET status = 'superseded',
+                            superseded_by_memory_id = %s,
+                            updated_at = now()
+                        WHERE id = %s AND owner_id = %s;
+                        """,
+                        (new_id, supersedes_memory_id, owner_id),
+                    )
+                    await cur.execute(
+                        """
+                        INSERT INTO memory_events (memory_id, owner_id, event_type, reason_json)
+                        VALUES (%s, %s, 'superseded', %s::jsonb);
+                        """,
+                        (
+                            supersedes_memory_id,
+                            owner_id,
+                            Json(
+                                bounded_transition_reason(
+                                    code="memory_replaced",
+                                    metadata={},
+                                    request_id=request_id,
+                                    previous_status=str(old_row[8]),
+                                    new_status="superseded",
+                                    related_memory_id=str(new_id),
+                                )
+                            ),
+                        ),
+                    )
                     for event_type in ("created", "promoted"):
                         await cur.execute(
                             """
@@ -2209,7 +2220,17 @@ class PostgresStore:
                 )
         return self._memory_item_from_row(updated_row)
 
-    async def get_memory_debug(self, memory_id: UUID) -> dict[str, Any] | None:
+    async def transition_memory_item(
+        self,
+        *,
+        memory_id: UUID,
+        owner_id: str,
+        new_status: str,
+        reason_code: str,
+        reason_metadata: dict[str, Any],
+        request_id: str,
+        related_memory_id: UUID | None,
+    ) -> dict[str, Any] | None:
         select_cols = """
             id, owner_id, memory_type, summary, source_refs_json, source_ref_hash,
             scores_json, promotion_state, status, supersedes_memory_id,
@@ -2219,7 +2240,180 @@ class PostgresStore:
         """
         async with self.pool.connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(f"SELECT {select_cols} FROM memory_items WHERE id = %s;", (memory_id,))
+                await cur.execute(
+                    f"""
+                    SELECT {select_cols}
+                    FROM memory_items
+                    WHERE id = %s AND owner_id = %s
+                    FOR UPDATE;
+                    """,
+                    (memory_id, owner_id),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    return None
+                current = self._memory_item_from_row(row)
+                related = None
+
+                if related_memory_id == memory_id:
+                    raise ValueError("related memory must be different from the transitioned memory")
+                if new_status in {"corrected", "superseded"} and related_memory_id is None:
+                    raise ValueError(f"related_memory_id is required for status {new_status}")
+                if related_memory_id is not None:
+                    await cur.execute(
+                        f"""
+                        SELECT {select_cols}
+                        FROM memory_items
+                        WHERE id = %s AND owner_id = %s
+                        FOR UPDATE;
+                        """,
+                        (related_memory_id, owner_id),
+                    )
+                    related_row = await cur.fetchone()
+                    if related_row is None:
+                        raise KeyError("related memory not found")
+                    related = self._memory_item_from_row(related_row)
+
+                primary_supersedes = current.get("supersedes_memory_id")
+                primary_superseded_by = current.get("superseded_by_memory_id")
+                related_changed_status = False
+                related_previous_status = None
+
+                if new_status == "corrected":
+                    assert related is not None
+                    if primary_supersedes not in {None, str(related_memory_id)}:
+                        raise ValueError("memory already corrects or supersedes a different item")
+                    if related.get("superseded_by_memory_id") not in {None, str(memory_id)}:
+                        raise ValueError("related memory already has a different replacement")
+                    primary_supersedes = str(related_memory_id)
+                elif new_status in {"superseded", "contradicted"} and related is not None:
+                    if primary_superseded_by not in {None, str(related_memory_id)}:
+                        raise ValueError("memory already has a different replacement")
+                    if related.get("supersedes_memory_id") not in {None, str(memory_id)}:
+                        raise ValueError("related memory already replaces a different item")
+                    primary_superseded_by = str(related_memory_id)
+                elif related is not None:
+                    raise ValueError("related_memory_id is only supported for correction or supersession")
+
+                relation_is_current = True
+                if new_status == "corrected":
+                    relation_is_current = (
+                        current.get("supersedes_memory_id") == str(related_memory_id)
+                        and related is not None
+                        and related.get("superseded_by_memory_id") == str(memory_id)
+                        and related.get("status") == "superseded"
+                    )
+                elif new_status in {"superseded", "contradicted"} and related is not None:
+                    relation_is_current = (
+                        current.get("superseded_by_memory_id") == str(related_memory_id)
+                        and related.get("supersedes_memory_id") == str(memory_id)
+                    )
+
+                if current["status"] == new_status and relation_is_current:
+                    return {
+                        "memory": current,
+                        "changed": False,
+                        "events_appended": [],
+                    }
+
+                await cur.execute(
+                    f"""
+                    UPDATE memory_items
+                    SET status = %s,
+                        supersedes_memory_id = %s,
+                        superseded_by_memory_id = %s,
+                        updated_at = now()
+                    WHERE id = %s AND owner_id = %s
+                    RETURNING {select_cols};
+                    """,
+                    (
+                        new_status,
+                        primary_supersedes,
+                        primary_superseded_by,
+                        memory_id,
+                        owner_id,
+                    ),
+                )
+                updated_row = await cur.fetchone()
+
+                if new_status == "corrected":
+                    assert related is not None
+                    related_previous_status = related["status"]
+                    related_changed_status = related_previous_status != "superseded"
+                    await cur.execute(
+                        """
+                        UPDATE memory_items
+                        SET status = 'superseded',
+                            superseded_by_memory_id = %s,
+                            updated_at = now()
+                        WHERE id = %s AND owner_id = %s;
+                        """,
+                        (memory_id, related_memory_id, owner_id),
+                    )
+                elif new_status in {"superseded", "contradicted"} and related is not None:
+                    await cur.execute(
+                        """
+                        UPDATE memory_items
+                        SET supersedes_memory_id = %s,
+                            updated_at = now()
+                        WHERE id = %s AND owner_id = %s;
+                        """,
+                        (memory_id, related_memory_id, owner_id),
+                    )
+
+                primary_reason = bounded_transition_reason(
+                    code=reason_code,
+                    metadata=reason_metadata,
+                    request_id=request_id,
+                    previous_status=current["status"],
+                    new_status=new_status,
+                    related_memory_id=str(related_memory_id) if related_memory_id else None,
+                )
+                await cur.execute(
+                    """
+                    INSERT INTO memory_events (memory_id, owner_id, event_type, reason_json)
+                    VALUES (%s, %s, 'state_changed', %s::jsonb);
+                    """,
+                    (memory_id, owner_id, Json(primary_reason)),
+                )
+
+                if related_changed_status:
+                    related_reason = bounded_transition_reason(
+                        code="replaced_by_related_memory",
+                        metadata={},
+                        request_id=request_id,
+                        previous_status=str(related_previous_status),
+                        new_status="superseded",
+                        related_memory_id=str(memory_id),
+                    )
+                    await cur.execute(
+                        """
+                        INSERT INTO memory_events (memory_id, owner_id, event_type, reason_json)
+                        VALUES (%s, %s, 'state_changed', %s::jsonb);
+                        """,
+                        (related_memory_id, owner_id, Json(related_reason)),
+                    )
+
+        return {
+            "memory": self._memory_item_from_row(updated_row),
+            "changed": True,
+            "events_appended": ["state_changed"],
+        }
+
+    async def get_memory_debug(self, memory_id: UUID, owner_id: str) -> dict[str, Any] | None:
+        select_cols = """
+            id, owner_id, memory_type, summary, source_refs_json, source_ref_hash,
+            scores_json, promotion_state, status, supersedes_memory_id,
+            superseded_by_memory_id, last_reinforced_at, expires_at,
+            derivation_version, confidence, explanation_json, generation_trace_id,
+            created_at, updated_at
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"SELECT {select_cols} FROM memory_items WHERE id = %s AND owner_id = %s;",
+                    (memory_id, owner_id),
+                )
                 row = await cur.fetchone()
                 if row is None:
                     return None
@@ -2227,10 +2421,10 @@ class PostgresStore:
                     """
                     SELECT id, memory_id, owner_id, event_type, reason_json, created_at
                     FROM memory_events
-                    WHERE memory_id = %s
+                    WHERE memory_id = %s AND owner_id = %s
                     ORDER BY created_at ASC, id ASC;
                     """,
-                    (memory_id,),
+                    (memory_id, owner_id),
                 )
                 event_rows = await cur.fetchall()
         return {

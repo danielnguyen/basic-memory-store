@@ -20,6 +20,9 @@ from psycopg.rows import dict_row
 
 
 BASELINE_VERSION = "schema_baseline_20260620"
+COMPATIBLE_BASELINE_CHECKSUMS = {
+    "b68542ad271358abdc077a604b0ac90c295ef9e3a5fdb10f7548a40f835b27d8",
+}
 LEDGER_TABLE = "schema_migrations"
 LOCK_KEY = 612361446343624483
 LOCK_TIMEOUT_SECONDS = 30.0
@@ -546,11 +549,18 @@ def analyze_state(conn: psycopg.Connection[Any], db_dir: Path) -> dict[str, Any]
         baseline_row = baseline_rows[0]
         if baseline_row["version"] != BASELINE_VERSION:
             errors.append(f"Ledger baseline version {baseline_row['version']} is not recognized.")
-        elif baseline_row["checksum_sha256"] != baseline_checksum:
+        elif (
+            baseline_row["checksum_sha256"] != baseline_checksum
+            and baseline_row["checksum_sha256"] not in COMPATIBLE_BASELINE_CHECKSUMS
+        ):
             baseline_status = "mismatch"
             errors.append("Recorded baseline checksum does not match db/baseline.sql.")
         else:
-            baseline_status = "match"
+            baseline_status = (
+                "match"
+                if baseline_row["checksum_sha256"] == baseline_checksum
+                else "compatible_prior"
+            )
 
     managed_by_version = {migration.version: migration for migration in managed}
     applied_versions: list[str] = []
