@@ -1396,7 +1396,8 @@ class PostgresStore:
             return []
         id_strs = [str(i) for i in ids]
         q = """
-        SELECT dt.id, dt.artifact_id, dt.text, dt.derivation_params, dt.created_at, a.file_path, a.repo_name, a.mime
+        SELECT dt.id, dt.artifact_id, dt.kind, dt.text, dt.derivation_params, dt.created_at,
+               a.owner_id, a.file_path, a.repo_name, a.mime
         FROM derived_text dt
         JOIN artifacts a ON a.id = dt.artifact_id
         WHERE dt.id = ANY(%s);
@@ -1410,14 +1411,46 @@ class PostgresStore:
             by_id[str(row[0])] = {
                 "derived_text_id": str(row[0]),
                 "artifact_id": str(row[1]),
-                "text": row[2],
-                "derivation_params": row[3] or {},
-                "created_at": str(row[4]),
-                "file_path": row[5] or "",
-                "repo_name": row[6],
-                "mime": row[7],
+                "kind": row[2],
+                "text": row[3],
+                "derivation_params": row[4] or {},
+                "created_at": str(row[5]),
+                "owner_id": row[6],
+                "file_path": row[7] or "",
+                "repo_name": row[8],
+                "mime": row[9],
             }
         return [by_id[item] for item in id_strs if item in by_id]
+
+    async def get_derived_text_for_owner(
+        self,
+        derived_text_id: UUID,
+        owner_id: str,
+    ) -> dict[str, Any] | None:
+        q = """
+        SELECT dt.id, dt.artifact_id, dt.kind, dt.language, dt.text,
+               dt.derivation_params, dt.created_at, a.owner_id
+        FROM derived_text dt
+        JOIN artifacts a ON a.id = dt.artifact_id
+        WHERE dt.id = %s AND a.owner_id = %s
+        LIMIT 1;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (derived_text_id, owner_id))
+                row = await cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "derived_text_id": str(row[0]),
+            "artifact_id": str(row[1]),
+            "kind": row[2],
+            "language": row[3],
+            "text": row[4],
+            "derivation_params": row[5] or {},
+            "created_at": str(row[6]),
+            "owner_id": row[7],
+        }
 
     async def get_recent_message_snippets(self, conversation_id: UUID, limit: int = 10) -> list[dict[str, Any]]:
         q = """
@@ -2733,7 +2766,7 @@ class PostgresStore:
             "links": out_links,
         }
 
-    async def get_episode_debug(self, episode_id: UUID) -> dict[str, Any] | None:
+    async def get_episode_debug(self, episode_id: UUID, owner_id: str) -> dict[str, Any] | None:
         select_cols = """
             id, owner_id, title, summary, episode_type, trigger_json,
             outcome, significance, unresolved_json, source_refs_json,
@@ -2743,7 +2776,10 @@ class PostgresStore:
         """
         async with self.pool.connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(f"SELECT {select_cols} FROM episodes WHERE id = %s;", (episode_id,))
+                await cur.execute(
+                    f"SELECT {select_cols} FROM episodes WHERE id = %s AND owner_id = %s;",
+                    (episode_id, owner_id),
+                )
                 row = await cur.fetchone()
                 if row is None:
                     return None
@@ -2751,20 +2787,20 @@ class PostgresStore:
                     """
                     SELECT id, episode_id, owner_id, ref_type, ref_id, relationship, created_at
                     FROM episode_links
-                    WHERE episode_id = %s
+                    WHERE episode_id = %s AND owner_id = %s
                     ORDER BY created_at ASC, id ASC;
                     """,
-                    (episode_id,),
+                    (episode_id, owner_id),
                 )
                 link_rows = await cur.fetchall()
                 await cur.execute(
                     """
                     SELECT id, episode_id, owner_id, event_type, reason_json, created_at
                     FROM episode_events
-                    WHERE episode_id = %s
+                    WHERE episode_id = %s AND owner_id = %s
                     ORDER BY created_at ASC, id ASC;
                     """,
-                    (episode_id,),
+                    (episode_id, owner_id),
                 )
                 event_rows = await cur.fetchall()
         return {

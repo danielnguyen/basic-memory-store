@@ -164,6 +164,7 @@ class FakePG:
         row = {
             "derived_text_id": str(did),
             "artifact_id": str(artifact_id),
+            "owner_id": self.artifacts[str(artifact_id)]["owner_id"],
             "kind": kind,
             "language": language,
             "text": text,

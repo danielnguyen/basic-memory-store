@@ -5,6 +5,7 @@ import json
 from typing import Any
 
 from services.memory_lifecycle import effective_freshness_state
+from services.derived_contract import normalize_contract_source_refs
 
 DEFAULT_DERIVATION_VERSION = "r20-mvp-v1"
 
@@ -14,27 +15,7 @@ def _compact_json(value: Any) -> str:
 
 
 def normalize_source_refs(source_refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    normalized: list[dict[str, Any]] = []
-    for ref in source_refs:
-        item = {
-            "ref_type": str(ref["ref_type"]).strip(),
-            "ref_id": str(ref["ref_id"]).strip(),
-            "support_kind": str(ref.get("support_kind") or "direct").strip(),
-        }
-        metadata = ref.get("metadata")
-        if isinstance(metadata, dict) and metadata:
-            item["metadata"] = metadata
-        normalized.append(item)
-
-    return sorted(
-        normalized,
-        key=lambda item: (
-            item["ref_type"],
-            item["ref_id"],
-            item["support_kind"],
-            _compact_json(item),
-        ),
-    )
+    return normalize_contract_source_refs(source_refs)
 
 
 def source_ref_hash(source_refs: list[dict[str, Any]]) -> str:

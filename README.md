@@ -115,6 +115,7 @@ Qdrant stores vector records for message and derived-text retrieval. If Qdrant d
 - Diagnostics:
   - `GET /v1/traces/{request_id}`
   - `GET /v1/internal/memory/{memory_id}/debug?owner_id={owner_id}`
+  - `GET /v1/internal/derived/{derivative_class}/{derived_id}?owner_id={owner_id}`
   - `GET /metrics`
   - `GET /healthz`
 - Internal memory lifecycle:
@@ -147,6 +148,15 @@ make test-postgres
 ```
 
 These tests cover the migration lifecycle and schema assertions, including the `memory_entities` and `memory_edges` tables. They are separate from the regular fake/unit/API group.
+
+The focused derivative provenance proof creates derived text, a proactive
+suggestion, a promoted memory item, and an episode through their production
+paths, inspects their bounded shared contract, exercises derivative-assisted
+retrieval, verifies owner isolation, and reopens the PostgreSQL client:
+
+```bash
+make provenance-test
+```
 
 Deterministic retrieval replay fixtures can be run independently:
 

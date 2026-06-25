@@ -25,6 +25,7 @@ from services.proactive import evaluate_event as evaluate_initiative_event
 from services.memory_items import normalize_scores, normalize_source_refs, shape_memory_event, shape_memory_item, source_ref_hash
 from services.episodes import DEFAULT_DERIVATION_VERSION as EPISODE_DERIVATION_VERSION, episode_key, normalize_json_list, normalize_json_map, normalize_source_refs as normalize_episode_source_refs, shape_episode, shape_episode_event, shape_episode_link, source_ref_hash as episode_source_ref_hash
 from services.recall import select_recall_decision, shape_recall_decision
+from services.derived_contract import CONTRACT_ADAPTERS
 
 from models import (
     ArtifactCompleteRequest,
@@ -69,6 +70,7 @@ from models import (
     EpisodeLinkItem,
     EpisodeLinkRequest,
     EpisodeLinkResponse,
+    DerivedInspectionResponse,
     MemoryDebugResponse,
     MemoryEventItem,
     MemoryItemResponse,
@@ -1017,7 +1019,7 @@ async def retrieve_tiered_v2(conversation_id: str, body: RetrieveBundleRequest, 
         raise HTTPException(status_code=400, detail="conversation_id must be a UUID")
 
     convo = await pg.get_conversation(cid)
-    if convo is None:
+    if convo is None or convo.get("owner_id") != body.owner_id:
         raise HTTPException(status_code=404, detail="conversation_id not found")
 
     opts = body.retrieval or RetrievalOptions(k=settings.retrieval_k, min_score=0.25, scope="conversation")
@@ -1732,7 +1734,10 @@ async def evaluate_proactive(body: ProactiveEvaluateRequest, request: Request):
 async def promote_memory(body: MemoryPromoteRequest, request: Request):
     request_id = _require_matching_request_id(request, body.request_id)
     raw_source_refs = [ref.model_dump(exclude_none=True) for ref in body.source_refs]
-    normalized_refs = normalize_source_refs(raw_source_refs)
+    try:
+        normalized_refs = normalize_source_refs(raw_source_refs)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     supersedes_memory_id = None
     if body.supersedes_memory_id is not None:
         try:
@@ -1869,12 +1874,16 @@ async def debug_memory(memory_id: str, owner_id: str):
     "/v1/internal/episodes",
     response_model=EpisodeCreateResponse,
     tags=["episodes-internal"],
+    dependencies=[Depends(require_api_key)],
     summary="Manually create or update one derived episode",
 )
 async def create_episode(body: EpisodeCreateRequest, request: Request):
     request_id = _require_matching_request_id(request, body.request_id)
     raw_source_refs = [ref.model_dump(exclude_none=True) for ref in body.source_refs]
-    normalized_refs = normalize_episode_source_refs(raw_source_refs)
+    try:
+        normalized_refs = normalize_episode_source_refs(raw_source_refs)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     trigger = normalize_json_map(body.trigger)
     time_window = normalize_json_map(body.time_window)
     source_hash = episode_source_ref_hash(normalized_refs)
@@ -1916,6 +1925,7 @@ async def create_episode(body: EpisodeCreateRequest, request: Request):
     "/v1/internal/episodes/{episode_id}/links",
     response_model=EpisodeLinkResponse,
     tags=["episodes-internal"],
+    dependencies=[Depends(require_api_key)],
     summary="Manually create explicit episode links",
 )
 async def create_episode_links(episode_id: str, body: EpisodeLinkRequest, request: Request):
@@ -1945,20 +1955,65 @@ async def create_episode_links(episode_id: str, body: EpisodeLinkRequest, reques
     "/v1/internal/episodes/{episode_id}/debug",
     response_model=EpisodeDebugResponse,
     tags=["episodes-internal"],
+    dependencies=[Depends(require_api_key)],
     summary="Inspect one derived episode, its links, and lifecycle events",
 )
-async def debug_episode(episode_id: str):
+async def debug_episode(episode_id: str, owner_id: str):
     try:
         eid = UUID(episode_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="episode_id must be a UUID")
-    debug = await pg.get_episode_debug(eid)
+    debug = await pg.get_episode_debug(eid, owner_id)
     if debug is None:
         raise HTTPException(status_code=404, detail="episode not found")
     return EpisodeDebugResponse(
         episode=EpisodeItemResponse(**shape_episode(debug["episode"])),
         links=[EpisodeLinkItem(**shape_episode_link(link)) for link in debug["links"]],
         events=[EpisodeEventItem(**shape_episode_event(event)) for event in debug["events"]],
+    )
+
+
+@app.get(
+    "/v1/internal/derived/{derivative_class}/{derived_id}",
+    response_model=DerivedInspectionResponse,
+    tags=["derived-internal"],
+    dependencies=[Depends(require_api_key)],
+    summary="Inspect one owner-scoped derivative through the bounded shared contract",
+)
+async def inspect_derived(derivative_class: str, derived_id: str, owner_id: str):
+    adapter = CONTRACT_ADAPTERS.get(derivative_class)
+    if adapter is None:
+        raise HTTPException(status_code=404, detail="derivative class not found")
+    try:
+        object_id = UUID(derived_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="derived_id must be a UUID")
+
+    row: dict[str, Any] | None
+    if derivative_class == "derived_text":
+        row = await pg.get_derived_text_for_owner(object_id, owner_id)
+    elif derivative_class == "proactive_suggestion":
+        row = await pg.get_proactive_suggestion(object_id)
+        if row is not None and row.get("owner_id") != owner_id:
+            row = None
+    elif derivative_class == "memory_item":
+        debug = await pg.get_memory_debug(object_id, owner_id)
+        row = debug["memory"] if debug is not None else None
+        if row is not None:
+            row = {**row, "freshness_state": shape_memory_item(row)["freshness_state"]}
+    else:
+        debug = await pg.get_episode_debug(object_id, owner_id)
+        row = debug["episode"] if debug is not None else None
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="derived object not found")
+    try:
+        contract = adapter(row)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return DerivedInspectionResponse(
+        derivative_class=derivative_class,
+        contract=contract,
     )
 
 

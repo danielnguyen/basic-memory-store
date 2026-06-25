@@ -244,6 +244,23 @@ class RetrievalPolicyMetadata(BaseModel):
     sensitivity: Optional[str] = None
 
 
+class DerivedProvenance(BaseModel):
+    derived_id: str
+    owner_id: str
+    derivation_type: str
+    source_refs: List[Dict[str, Any]] = Field(default_factory=list, max_length=50)
+    derivation_version: str
+    created_at: str
+    status: str
+    effective_status: Optional[str] = None
+    confidence: Optional[float] = None
+    explanation: Optional[str] = Field(default=None, max_length=500)
+    generation_trace_id: Optional[str] = Field(default=None, max_length=160)
+    compatibility_defaults: List[str] = Field(default_factory=list)
+    provenance_status: Literal["complete"] = "complete"
+    retrieval_reason: Optional[str] = Field(default=None, max_length=160)
+
+
 class ArtifactRef(BaseModel):
     artifact_id: str
     file_path: str
@@ -260,6 +277,7 @@ class ArtifactRef(BaseModel):
     confidence: Optional[float] = None
     supersedes: Optional[str] = None
     superseded_by: Optional[str] = None
+    provenance: Optional[DerivedProvenance] = None
 
 
 class RetrievalMessageItem(BaseModel):
@@ -301,6 +319,11 @@ class RetrieveBundleResponse(BaseModel):
     request_id: str
     conversation_id: str
     bundle: RetrievalBundle
+
+
+class DerivedInspectionResponse(BaseModel):
+    derivative_class: Literal["derived_text", "proactive_suggestion", "memory_item", "episode"]
+    contract: DerivedProvenance
 
 
 # ---- Ingestion ----

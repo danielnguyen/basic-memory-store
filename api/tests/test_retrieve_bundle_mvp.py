@@ -72,6 +72,8 @@ class FakePG:
                 {
                     "derived_text_id": str(item),
                     "artifact_id": str(uuid.uuid4()),
+                    "owner_id": "owner",
+                    "kind": "chunk",
                     "text": "def important_helper(): pass",
                     "derivation_params": self.artifact_metadata.get(str(item), {}),
                     "created_at": "2026-01-01T00:00:00+00:00",

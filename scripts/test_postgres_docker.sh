@@ -44,4 +44,8 @@ docker run -d --rm \
   sleep infinity >/dev/null
 
 docker cp "${ROOT_DIR}/docker-compose.yml" "${TEST_CONTAINER_NAME}:/app/docker-compose.yml"
-docker exec "${TEST_CONTAINER_NAME}" ./tests/run_test_group.sh postgres
+if [[ "$#" -gt 0 ]]; then
+  docker exec "${TEST_CONTAINER_NAME}" python -m pytest -q "$@"
+else
+  docker exec "${TEST_CONTAINER_NAME}" ./tests/run_test_group.sh postgres
+fi

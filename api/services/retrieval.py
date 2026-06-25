@@ -8,6 +8,7 @@ from uuid import UUID
 
 from models import (
     ArtifactRef,
+    DerivedProvenance,
     ObservedMetadata,
     RetrievalBundle,
     RetrievalMessageItem,
@@ -16,6 +17,7 @@ from models import (
     RetrievalSourceRef,
 )
 from services.memory_lifecycle import effective_freshness_state
+from services.derived_contract import derived_text_contract_view
 
 
 def cap_snippet(text: str, max_chars: int) -> str:
@@ -463,9 +465,23 @@ async def build_retrieval_bundle(
     if artifact_missing_source_count:
         artifact_status = "degraded"
         artifact_omission_reasons.append("missing_derivative_source")
-    ranked_artifacts: list[tuple[dict[str, Any], dict[str, float]]] = []
+    ranked_artifacts: list[tuple[dict[str, Any], dict[str, float], dict[str, Any]]] = []
+    malformed_artifact_provenance_count = 0
+    cross_owner_artifact_provenance_count = 0
     for snippet in artifact_snips:
         if not _in_time_window(snippet.get("created_at"), opts.time_window):
+            continue
+        if snippet.get("owner_id") != owner_id:
+            cross_owner_artifact_provenance_count += 1
+            artifact_status = "degraded"
+            artifact_omission_reasons.append("cross_owner_derivative_provenance")
+            continue
+        try:
+            provenance = derived_text_contract_view(snippet)
+        except ValueError:
+            malformed_artifact_provenance_count += 1
+            artifact_status = "degraded"
+            artifact_omission_reasons.append("malformed_derivative_provenance")
             continue
         score_details = _score_item(
             settings=settings,
@@ -476,7 +492,7 @@ async def build_retrieval_bundle(
             is_pinned=False,
             missing_score=_artifact_missing_score(settings, snippet),
         )
-        ranked_artifacts.append((snippet, score_details))
+        ranked_artifacts.append((snippet, score_details, provenance))
     ranked_artifacts.sort(key=lambda item: item[1]["final_score"], reverse=True)
     ranked_artifacts = ranked_artifacts[:artifact_k]
 
@@ -492,7 +508,7 @@ async def build_retrieval_bundle(
         for snippet, _ in ranked_semantic
     ] + [
         {"ref_type": "derived_text", "ref_id": snippet["derived_text_id"]}
-        for snippet, _ in ranked_artifacts
+        for snippet, _, _ in ranked_artifacts
     ]
     memory_items_by_ref = await pg.get_memory_items_for_source_refs(
         owner_id=owner_id,
@@ -540,12 +556,16 @@ async def build_retrieval_bundle(
                 score_details=score_details,
                 source_ref=RetrievalSourceRef(ref_type="derived_text", ref_id=s["derived_text_id"]),
                 policy_metadata=_policy_metadata(s.get("derivation_params")),
+                provenance=DerivedProvenance(
+                    **provenance,
+                    retrieval_reason="included_by_artifact_similarity",
+                ),
                 **_freshness_metadata(
                     memory_item=memory_items_by_ref.get(("derived_text", s["derived_text_id"])),
                     source_kind="derived_text",
                 ),
             )
-            for s, score_details in ranked_artifacts
+            for s, score_details, provenance in ranked_artifacts
         ]
     )
 
@@ -601,6 +621,8 @@ async def build_retrieval_bundle(
             "artifact_status": artifact_status,
             "artifact_invalid_hit_ids": artifact_invalid_hit_ids,
             "artifact_missing_source_count": artifact_missing_source_count,
+            "malformed_artifact_provenance_count": malformed_artifact_provenance_count,
+            "cross_owner_artifact_provenance_count": cross_owner_artifact_provenance_count,
             "artifact_omission_reasons": artifact_omission_reasons,
             "graph_expansion_applied": False,
             "pinned_handling": "pinned memories are not part of the v2 ranked bundle; they remain available via the unchanged tiered retrieval path",

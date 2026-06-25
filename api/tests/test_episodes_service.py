@@ -77,7 +77,9 @@ def test_episode_contract_view_exposes_r37_fields():
     assert out["derived_id"] == "ep-1"
     assert out["owner_id"] == "owner"
     assert out["derivation_type"] == "milestone"
-    assert out["source_refs"] == [{"ref_type": "message", "ref_id": "m-1"}]
+    assert out["source_refs"] == [
+        {"ref_type": "message", "ref_id": "m-1", "support_kind": "direct"}
+    ]
     assert out["explanation"] == "manual incident capture"
 
 
