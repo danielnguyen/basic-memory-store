@@ -2700,9 +2700,10 @@ class PostgresStore:
         q = """
         INSERT INTO traces (
             request_id, conversation_id, owner_id, client_id, surface,
-            profile_json, retrieval_json, router_decision_json, manual_override_json,
-            model_call_json, fallback_json, cost_json, latency_ms, status, error_text
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            profile_json, retrieval_json, prompt_json, router_decision_json, manual_override_json,
+            model_call_json, model_calls_json, fallback_json, artifacts_json, references_json,
+            cost_json, latency_ms, status, error_text
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (request_id) DO UPDATE
             SET conversation_id = EXCLUDED.conversation_id,
                 owner_id = EXCLUDED.owner_id,
@@ -2710,10 +2711,14 @@ class PostgresStore:
                 surface = EXCLUDED.surface,
                 profile_json = EXCLUDED.profile_json,
                 retrieval_json = EXCLUDED.retrieval_json,
+                prompt_json = EXCLUDED.prompt_json,
                 router_decision_json = EXCLUDED.router_decision_json,
                 manual_override_json = EXCLUDED.manual_override_json,
                 model_call_json = EXCLUDED.model_call_json,
+                model_calls_json = EXCLUDED.model_calls_json,
                 fallback_json = EXCLUDED.fallback_json,
+                artifacts_json = EXCLUDED.artifacts_json,
+                references_json = EXCLUDED.references_json,
                 cost_json = EXCLUDED.cost_json,
                 latency_ms = EXCLUDED.latency_ms,
                 status = EXCLUDED.status,
@@ -2732,10 +2737,14 @@ class PostgresStore:
                         trace["surface"],
                         Json(trace.get("profile", {})),
                         Json(trace.get("retrieval", {})),
+                        Json(trace.get("prompt", {})),
                         Json(trace.get("router_decision", {})),
                         Json(trace.get("manual_override", {})),
                         Json(trace.get("model_call", {})),
+                        Json(trace.get("model_calls", [])),
                         Json(trace.get("fallback", {})),
+                        Json(trace.get("artifacts", {})),
+                        Json(trace.get("references", [])),
                         Json(trace.get("cost", {})),
                         trace.get("latency_ms"),
                         trace["status"],
@@ -2748,8 +2757,9 @@ class PostgresStore:
     async def get_trace_by_request_id(self, request_id: str) -> dict[str, Any] | None:
         q = """
         SELECT id, request_id, conversation_id, owner_id, client_id, surface,
-               profile_json, retrieval_json, router_decision_json, manual_override_json,
-               model_call_json, fallback_json, cost_json, latency_ms, status, error_text, created_at
+               profile_json, retrieval_json, prompt_json, router_decision_json, manual_override_json,
+               model_call_json, model_calls_json, fallback_json, artifacts_json, references_json,
+               cost_json, latency_ms, status, error_text, created_at
         FROM traces
         WHERE request_id = %s
         LIMIT 1;
@@ -2769,13 +2779,17 @@ class PostgresStore:
             "surface": row[5],
             "profile": row[6] or {},
             "retrieval": row[7] or {},
-            "router_decision": row[8] or {},
-            "manual_override": row[9] or {},
-            "model_call": row[10] or {},
-            "fallback": row[11] or {},
-            "cost": row[12] or {},
-            "latency_ms": row[13],
-            "status": row[14],
-            "error": row[15],
-            "created_at": str(row[16]),
+            "prompt": row[8] or {},
+            "router_decision": row[9] or {},
+            "manual_override": row[10] or {},
+            "model_call": row[11] or {},
+            "model_calls": row[12] or [],
+            "fallback": row[13] or {},
+            "artifacts": row[14] or {},
+            "references": row[15] or [],
+            "cost": row[16] or {},
+            "latency_ms": row[17],
+            "status": row[18],
+            "error": row[19],
+            "created_at": str(row[20]),
         }

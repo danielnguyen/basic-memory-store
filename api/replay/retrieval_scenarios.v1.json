@@ -1,0 +1,1368 @@
+{
+  "scenarios": [
+    {
+      "categories": [
+        "positive"
+      ],
+      "consumer_context": {},
+      "expected": {
+        "augmented": {
+          "artifact_ids": [
+            "00000000-0000-0000-0000-000000000401"
+          ],
+          "artifacts": [
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000401",
+              "score": 0.7,
+              "score_details": {
+                "conversation_boost": 0.0,
+                "final_score": 0.7,
+                "missing_score": 0.0,
+                "pinned_bias": 0.0,
+                "recency_adjustment": 0.0,
+                "semantic_score": 0.7
+              },
+              "source_kind": "derived_text",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000301",
+                "ref_type": "derived_text"
+              }
+            }
+          ],
+          "diagnostics": {
+            "artifact_invalid_hit_ids": 0,
+            "artifact_missing_source_count": 0,
+            "artifact_omission_reasons": [],
+            "artifact_status": "ok",
+            "fallback_to_raw_reasons": [],
+            "semantic_invalid_hit_ids": 0,
+            "semantic_missing_source_count": 0,
+            "vector_status": "ok"
+          },
+          "recent": [
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000201",
+              "score_details": {},
+              "source_kind": "message",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000201",
+                "ref_type": "message"
+              }
+            }
+          ],
+          "recent_ids": [
+            "00000000-0000-0000-0000-000000000201"
+          ],
+          "semantic": [
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000202",
+              "score": 0.88,
+              "score_details": {
+                "conversation_boost": 0.08,
+                "final_score": 0.88,
+                "missing_score": 0.0,
+                "pinned_bias": 0.0,
+                "recency_adjustment": 0.0,
+                "semantic_score": 0.8
+              },
+              "source_kind": "message",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000202",
+                "ref_type": "message"
+              }
+            }
+          ],
+          "semantic_ids": [
+            "00000000-0000-0000-0000-000000000202"
+          ],
+          "source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000201",
+              "ref_type": "message"
+            },
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000202",
+              "ref_type": "message"
+            },
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000301",
+              "ref_type": "derived_text"
+            }
+          ],
+          "token_estimate_total": 17
+        },
+        "comparison": {
+          "artifact_delta": 1,
+          "augmented_only_semantic_ids": [],
+          "raw_only_semantic_ids": [],
+          "same_semantic_order": true,
+          "token_delta": 6
+        },
+        "contract": {
+          "client_id": "client-chat",
+          "consumer_context": {},
+          "conversation_id": "00000000-0000-0000-0000-000000000101",
+          "owner_id": "owner-fixture",
+          "profile": "default",
+          "request_id": "request-normal-001",
+          "surface": "chat"
+        },
+        "outcome": {
+          "fallback": "none",
+          "reasons": [],
+          "status": "ok"
+        },
+        "provenance": {
+          "augmented_freshness": [
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000201"
+            },
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000202"
+            },
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000401"
+            }
+          ],
+          "augmented_source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000201",
+              "ref_type": "message"
+            },
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000202",
+              "ref_type": "message"
+            },
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000301",
+              "ref_type": "derived_text"
+            }
+          ],
+          "raw_freshness": [
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000201"
+            },
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000202"
+            }
+          ],
+          "raw_source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000201",
+              "ref_type": "message"
+            },
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000202",
+              "ref_type": "message"
+            }
+          ]
+        },
+        "raw": {
+          "artifact_ids": [],
+          "artifacts": [],
+          "diagnostics": {
+            "artifact_invalid_hit_ids": 0,
+            "artifact_missing_source_count": 0,
+            "artifact_omission_reasons": [],
+            "artifact_status": "not_requested",
+            "fallback_to_raw_reasons": [],
+            "semantic_invalid_hit_ids": 0,
+            "semantic_missing_source_count": 0,
+            "vector_status": "ok"
+          },
+          "recent": [
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000201",
+              "score_details": {},
+              "source_kind": "message",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000201",
+                "ref_type": "message"
+              }
+            }
+          ],
+          "recent_ids": [
+            "00000000-0000-0000-0000-000000000201"
+          ],
+          "semantic": [
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000202",
+              "score": 0.88,
+              "score_details": {
+                "conversation_boost": 0.08,
+                "final_score": 0.88,
+                "missing_score": 0.0,
+                "pinned_bias": 0.0,
+                "recency_adjustment": 0.0,
+                "semantic_score": 0.8
+              },
+              "source_kind": "message",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000202",
+                "ref_type": "message"
+              }
+            }
+          ],
+          "semantic_ids": [
+            "00000000-0000-0000-0000-000000000202"
+          ],
+          "source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000201",
+              "ref_type": "message"
+            },
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000202",
+              "ref_type": "message"
+            }
+          ],
+          "token_estimate_total": 11
+        }
+      },
+      "fixture": {
+        "artifact_hits": [
+          {
+            "derived_text_id": "00000000-0000-0000-0000-000000000301",
+            "score": 0.7
+          }
+        ],
+        "artifact_sources": [
+          {
+            "artifact_id": "00000000-0000-0000-0000-000000000401",
+            "created_at": "fixture-time",
+            "derivation_params": {},
+            "derived_text_id": "00000000-0000-0000-0000-000000000301",
+            "file_path": "fixture.txt",
+            "repo_name": "fixture-repository",
+            "text": "neutral artifact fixture"
+          }
+        ],
+        "memory_items": [],
+        "message_sources": [
+          {
+            "content": "neutral semantic fixture",
+            "conversation_id": "00000000-0000-0000-0000-000000000101",
+            "created_at": "fixture-time",
+            "message_id": "00000000-0000-0000-0000-000000000202",
+            "metadata": {},
+            "role": "assistant"
+          }
+        ],
+        "recent_messages": [
+          {
+            "content": "neutral recent fixture",
+            "conversation_id": "00000000-0000-0000-0000-000000000101",
+            "created_at": "fixture-time",
+            "message_id": "00000000-0000-0000-0000-000000000201",
+            "metadata": {},
+            "role": "user"
+          }
+        ],
+        "semantic_hits": [
+          {
+            "message_id": "00000000-0000-0000-0000-000000000202",
+            "score": 0.8
+          }
+        ]
+      },
+      "name": "normal_augmented_retrieval",
+      "request": {
+        "client_id": "client-chat",
+        "conversation_id": "00000000-0000-0000-0000-000000000101",
+        "owner_id": "owner-fixture",
+        "profile": "default",
+        "request_id": "request-normal-001",
+        "surface": "chat"
+      },
+      "retrieval": {
+        "artifact_k": 3,
+        "options": {
+          "k": 4,
+          "min_score": 0.25,
+          "scope": "conversation"
+        },
+        "query": "deterministic fixture query"
+      }
+    },
+    {
+      "categories": [
+        "negative",
+        "stale"
+      ],
+      "consumer_context": {},
+      "expected": {
+        "augmented": {
+          "artifact_ids": [
+            "00000000-0000-0000-0000-000000000402"
+          ],
+          "artifacts": [
+            {
+              "confidence": 0.4,
+              "freshness_state": "stale",
+              "id": "00000000-0000-0000-0000-000000000402",
+              "score": 0.9,
+              "score_details": {
+                "conversation_boost": 0.0,
+                "final_score": 0.9,
+                "missing_score": 0.0,
+                "pinned_bias": 0.0,
+                "recency_adjustment": 0.0,
+                "semantic_score": 0.9
+              },
+              "source_kind": "derived_text",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000302",
+                "ref_type": "derived_text"
+              }
+            }
+          ],
+          "diagnostics": {
+            "artifact_invalid_hit_ids": 0,
+            "artifact_missing_source_count": 0,
+            "artifact_omission_reasons": [],
+            "artifact_status": "ok",
+            "fallback_to_raw_reasons": [],
+            "semantic_invalid_hit_ids": 0,
+            "semantic_missing_source_count": 0,
+            "vector_status": "ok"
+          },
+          "recent": [],
+          "recent_ids": [],
+          "semantic": [
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000203",
+              "score": 0.83,
+              "score_details": {
+                "conversation_boost": 0.08,
+                "final_score": 0.83,
+                "missing_score": 0.0,
+                "pinned_bias": 0.0,
+                "recency_adjustment": 0.0,
+                "semantic_score": 0.75
+              },
+              "source_kind": "message",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000203",
+                "ref_type": "message"
+              }
+            }
+          ],
+          "semantic_ids": [
+            "00000000-0000-0000-0000-000000000203"
+          ],
+          "source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000203",
+              "ref_type": "message"
+            },
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000302",
+              "ref_type": "derived_text"
+            }
+          ],
+          "token_estimate_total": 10
+        },
+        "comparison": {
+          "artifact_delta": 1,
+          "augmented_only_semantic_ids": [],
+          "raw_only_semantic_ids": [],
+          "same_semantic_order": true,
+          "token_delta": 6
+        },
+        "contract": {
+          "client_id": "client-chat",
+          "consumer_context": {},
+          "conversation_id": "00000000-0000-0000-0000-000000000102",
+          "owner_id": "owner-fixture",
+          "profile": "default",
+          "request_id": "request-stale-001",
+          "surface": "chat"
+        },
+        "outcome": {
+          "fallback": "none",
+          "reasons": [],
+          "status": "ok"
+        },
+        "provenance": {
+          "augmented_freshness": [
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000203"
+            },
+            {
+              "freshness_state": "stale",
+              "id": "00000000-0000-0000-0000-000000000402"
+            }
+          ],
+          "augmented_source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000203",
+              "ref_type": "message"
+            },
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000302",
+              "ref_type": "derived_text"
+            }
+          ],
+          "raw_freshness": [
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000203"
+            }
+          ],
+          "raw_source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000203",
+              "ref_type": "message"
+            }
+          ]
+        },
+        "raw": {
+          "artifact_ids": [],
+          "artifacts": [],
+          "diagnostics": {
+            "artifact_invalid_hit_ids": 0,
+            "artifact_missing_source_count": 0,
+            "artifact_omission_reasons": [],
+            "artifact_status": "not_requested",
+            "fallback_to_raw_reasons": [],
+            "semantic_invalid_hit_ids": 0,
+            "semantic_missing_source_count": 0,
+            "vector_status": "ok"
+          },
+          "recent": [],
+          "recent_ids": [],
+          "semantic": [
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000203",
+              "score": 0.83,
+              "score_details": {
+                "conversation_boost": 0.08,
+                "final_score": 0.83,
+                "missing_score": 0.0,
+                "pinned_bias": 0.0,
+                "recency_adjustment": 0.0,
+                "semantic_score": 0.75
+              },
+              "source_kind": "message",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000203",
+                "ref_type": "message"
+              }
+            }
+          ],
+          "semantic_ids": [
+            "00000000-0000-0000-0000-000000000203"
+          ],
+          "source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000203",
+              "ref_type": "message"
+            }
+          ],
+          "token_estimate_total": 4
+        }
+      },
+      "fixture": {
+        "artifact_hits": [
+          {
+            "derived_text_id": "00000000-0000-0000-0000-000000000302",
+            "score": 0.9
+          }
+        ],
+        "artifact_sources": [
+          {
+            "artifact_id": "00000000-0000-0000-0000-000000000402",
+            "created_at": "fixture-time",
+            "derivation_params": {},
+            "derived_text_id": "00000000-0000-0000-0000-000000000302",
+            "file_path": "stale.txt",
+            "repo_name": "fixture-repository",
+            "text": "stale derivative fixture"
+          }
+        ],
+        "memory_items": [
+          {
+            "memory": {
+              "confidence": 0.4,
+              "memory_id": "memory-stale-001",
+              "status": "stale",
+              "updated_at": "2026-01-01T00:00:00+00:00"
+            },
+            "ref_id": "00000000-0000-0000-0000-000000000302",
+            "ref_type": "derived_text"
+          }
+        ],
+        "message_sources": [
+          {
+            "content": "canonical fixture",
+            "conversation_id": "00000000-0000-0000-0000-000000000102",
+            "created_at": "fixture-time",
+            "message_id": "00000000-0000-0000-0000-000000000203",
+            "metadata": {},
+            "role": "assistant"
+          }
+        ],
+        "recent_messages": [],
+        "semantic_hits": [
+          {
+            "message_id": "00000000-0000-0000-0000-000000000203",
+            "score": 0.75
+          }
+        ]
+      },
+      "name": "stale_derivative_is_qualified",
+      "request": {
+        "client_id": "client-chat",
+        "conversation_id": "00000000-0000-0000-0000-000000000102",
+        "owner_id": "owner-fixture",
+        "profile": "default",
+        "request_id": "request-stale-001",
+        "surface": "chat"
+      },
+      "retrieval": {
+        "artifact_k": 3,
+        "options": {
+          "k": 4,
+          "min_score": 0.25,
+          "scope": "conversation"
+        },
+        "query": "stale derivative fixture"
+      }
+    },
+    {
+      "categories": [
+        "negative",
+        "missing-source"
+      ],
+      "consumer_context": {},
+      "expected": {
+        "augmented": {
+          "artifact_ids": [],
+          "artifacts": [],
+          "diagnostics": {
+            "artifact_invalid_hit_ids": 0,
+            "artifact_missing_source_count": 1,
+            "artifact_omission_reasons": [
+              "missing_derivative_source"
+            ],
+            "artifact_status": "degraded",
+            "fallback_to_raw_reasons": [],
+            "semantic_invalid_hit_ids": 0,
+            "semantic_missing_source_count": 0,
+            "vector_status": "ok"
+          },
+          "recent": [],
+          "recent_ids": [],
+          "semantic": [],
+          "semantic_ids": [],
+          "source_refs": [],
+          "token_estimate_total": null
+        },
+        "comparison": {
+          "artifact_delta": 0,
+          "augmented_only_semantic_ids": [],
+          "raw_only_semantic_ids": [],
+          "same_semantic_order": true,
+          "token_delta": 0
+        },
+        "contract": {
+          "client_id": "client-chat",
+          "consumer_context": {},
+          "conversation_id": "00000000-0000-0000-0000-000000000103",
+          "owner_id": "owner-fixture",
+          "profile": "default",
+          "request_id": "request-missing-001",
+          "surface": "chat"
+        },
+        "outcome": {
+          "fallback": "partial_without_artifacts",
+          "reasons": [
+            "missing_derivative_source"
+          ],
+          "status": "degraded"
+        },
+        "provenance": {
+          "augmented_freshness": [],
+          "augmented_source_refs": [],
+          "raw_freshness": [],
+          "raw_source_refs": []
+        },
+        "raw": {
+          "artifact_ids": [],
+          "artifacts": [],
+          "diagnostics": {
+            "artifact_invalid_hit_ids": 0,
+            "artifact_missing_source_count": 0,
+            "artifact_omission_reasons": [],
+            "artifact_status": "not_requested",
+            "fallback_to_raw_reasons": [],
+            "semantic_invalid_hit_ids": 0,
+            "semantic_missing_source_count": 0,
+            "vector_status": "ok"
+          },
+          "recent": [],
+          "recent_ids": [],
+          "semantic": [],
+          "semantic_ids": [],
+          "source_refs": [],
+          "token_estimate_total": null
+        }
+      },
+      "fixture": {
+        "artifact_hits": [
+          {
+            "derived_text_id": "00000000-0000-0000-0000-000000000303",
+            "score": 0.8
+          }
+        ],
+        "artifact_sources": [],
+        "memory_items": [],
+        "message_sources": [],
+        "recent_messages": [],
+        "semantic_hits": []
+      },
+      "name": "missing_derivative_source",
+      "request": {
+        "client_id": "client-chat",
+        "conversation_id": "00000000-0000-0000-0000-000000000103",
+        "owner_id": "owner-fixture",
+        "profile": "default",
+        "request_id": "request-missing-001",
+        "surface": "chat"
+      },
+      "retrieval": {
+        "artifact_k": 3,
+        "options": {
+          "k": 4,
+          "min_score": 0.25,
+          "scope": "conversation"
+        },
+        "query": "missing derivative fixture"
+      }
+    },
+    {
+      "categories": [
+        "negative",
+        "malformed"
+      ],
+      "consumer_context": {},
+      "expected": {
+        "augmented": {
+          "artifact_ids": [],
+          "artifacts": [],
+          "diagnostics": {
+            "artifact_invalid_hit_ids": 1,
+            "artifact_missing_source_count": 0,
+            "artifact_omission_reasons": [
+              "malformed_artifact_result"
+            ],
+            "artifact_status": "degraded",
+            "fallback_to_raw_reasons": [
+              "malformed_vector_result"
+            ],
+            "semantic_invalid_hit_ids": 1,
+            "semantic_missing_source_count": 0,
+            "vector_status": "ok"
+          },
+          "recent": [],
+          "recent_ids": [],
+          "semantic": [],
+          "semantic_ids": [],
+          "source_refs": [],
+          "token_estimate_total": null
+        },
+        "comparison": {
+          "artifact_delta": 0,
+          "augmented_only_semantic_ids": [],
+          "raw_only_semantic_ids": [],
+          "same_semantic_order": true,
+          "token_delta": 0
+        },
+        "contract": {
+          "client_id": "client-chat",
+          "consumer_context": {},
+          "conversation_id": "00000000-0000-0000-0000-000000000104",
+          "owner_id": "owner-fixture",
+          "profile": "default",
+          "request_id": "request-malformed-001",
+          "surface": "chat"
+        },
+        "outcome": {
+          "fallback": "raw_canonical",
+          "reasons": [
+            "malformed_vector_result",
+            "malformed_artifact_result"
+          ],
+          "status": "degraded"
+        },
+        "provenance": {
+          "augmented_freshness": [],
+          "augmented_source_refs": [],
+          "raw_freshness": [],
+          "raw_source_refs": []
+        },
+        "raw": {
+          "artifact_ids": [],
+          "artifacts": [],
+          "diagnostics": {
+            "artifact_invalid_hit_ids": 0,
+            "artifact_missing_source_count": 0,
+            "artifact_omission_reasons": [],
+            "artifact_status": "not_requested",
+            "fallback_to_raw_reasons": [
+              "malformed_vector_result"
+            ],
+            "semantic_invalid_hit_ids": 1,
+            "semantic_missing_source_count": 0,
+            "vector_status": "ok"
+          },
+          "recent": [],
+          "recent_ids": [],
+          "semantic": [],
+          "semantic_ids": [],
+          "source_refs": [],
+          "token_estimate_total": null
+        }
+      },
+      "fixture": {
+        "artifact_hits": [
+          {
+            "derived_text_id": "also-not-a-uuid",
+            "score": 0.99
+          }
+        ],
+        "artifact_sources": [],
+        "memory_items": [],
+        "message_sources": [],
+        "recent_messages": [],
+        "semantic_hits": [
+          {
+            "message_id": "not-a-uuid",
+            "score": 0.99
+          }
+        ]
+      },
+      "name": "malformed_retrieval_metadata",
+      "request": {
+        "client_id": "client-chat",
+        "conversation_id": "00000000-0000-0000-0000-000000000104",
+        "owner_id": "owner-fixture",
+        "profile": "default",
+        "request_id": "request-malformed-001",
+        "surface": "chat"
+      },
+      "retrieval": {
+        "artifact_k": 3,
+        "options": {
+          "k": 4,
+          "min_score": 0.25,
+          "scope": "conversation"
+        },
+        "query": "malformed metadata fixture"
+      }
+    },
+    {
+      "categories": [
+        "dependency",
+        "fallback"
+      ],
+      "consumer_context": {},
+      "expected": {
+        "augmented": {
+          "artifact_ids": [],
+          "artifacts": [],
+          "diagnostics": {
+            "artifact_invalid_hit_ids": 0,
+            "artifact_missing_source_count": 0,
+            "artifact_omission_reasons": [],
+            "artifact_status": "not_requested",
+            "fallback_to_raw_reasons": [
+              "vector_unavailable"
+            ],
+            "semantic_invalid_hit_ids": 0,
+            "semantic_missing_source_count": 0,
+            "vector_status": "unavailable"
+          },
+          "recent": [
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000204",
+              "score_details": {},
+              "source_kind": "message",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000204",
+                "ref_type": "message"
+              }
+            }
+          ],
+          "recent_ids": [
+            "00000000-0000-0000-0000-000000000204"
+          ],
+          "semantic": [],
+          "semantic_ids": [],
+          "source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000204",
+              "ref_type": "message"
+            }
+          ],
+          "token_estimate_total": 6
+        },
+        "comparison": {
+          "artifact_delta": 0,
+          "augmented_only_semantic_ids": [],
+          "raw_only_semantic_ids": [],
+          "same_semantic_order": true,
+          "token_delta": 0
+        },
+        "contract": {
+          "client_id": "client-chat",
+          "consumer_context": {},
+          "conversation_id": "00000000-0000-0000-0000-000000000105",
+          "owner_id": "owner-fixture",
+          "profile": "default",
+          "request_id": "request-vector-001",
+          "surface": "chat"
+        },
+        "outcome": {
+          "fallback": "raw_canonical",
+          "reasons": [
+            "vector_unavailable"
+          ],
+          "status": "degraded"
+        },
+        "provenance": {
+          "augmented_freshness": [
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000204"
+            }
+          ],
+          "augmented_source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000204",
+              "ref_type": "message"
+            }
+          ],
+          "raw_freshness": [
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000204"
+            }
+          ],
+          "raw_source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000204",
+              "ref_type": "message"
+            }
+          ]
+        },
+        "raw": {
+          "artifact_ids": [],
+          "artifacts": [],
+          "diagnostics": {
+            "artifact_invalid_hit_ids": 0,
+            "artifact_missing_source_count": 0,
+            "artifact_omission_reasons": [],
+            "artifact_status": "not_requested",
+            "fallback_to_raw_reasons": [
+              "vector_unavailable"
+            ],
+            "semantic_invalid_hit_ids": 0,
+            "semantic_missing_source_count": 0,
+            "vector_status": "unavailable"
+          },
+          "recent": [
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000204",
+              "score_details": {},
+              "source_kind": "message",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000204",
+                "ref_type": "message"
+              }
+            }
+          ],
+          "recent_ids": [
+            "00000000-0000-0000-0000-000000000204"
+          ],
+          "semantic": [],
+          "semantic_ids": [],
+          "source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000204",
+              "ref_type": "message"
+            }
+          ],
+          "token_estimate_total": 6
+        }
+      },
+      "fixture": {
+        "artifact_hits": [],
+        "artifact_sources": [],
+        "memory_items": [],
+        "message_sources": [],
+        "recent_messages": [
+          {
+            "content": "canonical fallback fixture",
+            "conversation_id": "00000000-0000-0000-0000-000000000105",
+            "created_at": "fixture-time",
+            "message_id": "00000000-0000-0000-0000-000000000204",
+            "metadata": {},
+            "role": "user"
+          }
+        ],
+        "semantic_hits": [],
+        "vector_status": "unavailable"
+      },
+      "name": "vector_unavailable_raw_fallback",
+      "request": {
+        "client_id": "client-chat",
+        "conversation_id": "00000000-0000-0000-0000-000000000105",
+        "owner_id": "owner-fixture",
+        "profile": "default",
+        "request_id": "request-vector-001",
+        "surface": "chat"
+      },
+      "retrieval": {
+        "artifact_k": 0,
+        "options": {
+          "k": 4,
+          "min_score": 0.25,
+          "scope": "conversation"
+        },
+        "query": "vector fallback fixture"
+      }
+    },
+    {
+      "categories": [
+        "dependency",
+        "derived-store",
+        "fallback"
+      ],
+      "consumer_context": {},
+      "expected": {
+        "augmented": {
+          "artifact_ids": [],
+          "artifacts": [],
+          "diagnostics": {
+            "artifact_invalid_hit_ids": 0,
+            "artifact_missing_source_count": 0,
+            "artifact_omission_reasons": [
+              "artifact_retrieval_unavailable"
+            ],
+            "artifact_status": "unavailable",
+            "fallback_to_raw_reasons": [],
+            "semantic_invalid_hit_ids": 0,
+            "semantic_missing_source_count": 0,
+            "vector_status": "ok"
+          },
+          "recent": [],
+          "recent_ids": [],
+          "semantic": [
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000205",
+              "score": 0.78,
+              "score_details": {
+                "conversation_boost": 0.08,
+                "final_score": 0.78,
+                "missing_score": 0.0,
+                "pinned_bias": 0.0,
+                "recency_adjustment": 0.0,
+                "semantic_score": 0.7
+              },
+              "source_kind": "message",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000205",
+                "ref_type": "message"
+              }
+            }
+          ],
+          "semantic_ids": [
+            "00000000-0000-0000-0000-000000000205"
+          ],
+          "source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000205",
+              "ref_type": "message"
+            }
+          ],
+          "token_estimate_total": 6
+        },
+        "comparison": {
+          "artifact_delta": 0,
+          "augmented_only_semantic_ids": [],
+          "raw_only_semantic_ids": [],
+          "same_semantic_order": true,
+          "token_delta": 0
+        },
+        "contract": {
+          "client_id": "client-chat",
+          "consumer_context": {},
+          "conversation_id": "00000000-0000-0000-0000-000000000106",
+          "owner_id": "owner-fixture",
+          "profile": "default",
+          "request_id": "request-artifact-001",
+          "surface": "chat"
+        },
+        "outcome": {
+          "fallback": "partial_without_artifacts",
+          "reasons": [
+            "artifact_retrieval_unavailable"
+          ],
+          "status": "degraded"
+        },
+        "provenance": {
+          "augmented_freshness": [
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000205"
+            }
+          ],
+          "augmented_source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000205",
+              "ref_type": "message"
+            }
+          ],
+          "raw_freshness": [
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000205"
+            }
+          ],
+          "raw_source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000205",
+              "ref_type": "message"
+            }
+          ]
+        },
+        "raw": {
+          "artifact_ids": [],
+          "artifacts": [],
+          "diagnostics": {
+            "artifact_invalid_hit_ids": 0,
+            "artifact_missing_source_count": 0,
+            "artifact_omission_reasons": [],
+            "artifact_status": "not_requested",
+            "fallback_to_raw_reasons": [],
+            "semantic_invalid_hit_ids": 0,
+            "semantic_missing_source_count": 0,
+            "vector_status": "ok"
+          },
+          "recent": [],
+          "recent_ids": [],
+          "semantic": [
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000205",
+              "score": 0.78,
+              "score_details": {
+                "conversation_boost": 0.08,
+                "final_score": 0.78,
+                "missing_score": 0.0,
+                "pinned_bias": 0.0,
+                "recency_adjustment": 0.0,
+                "semantic_score": 0.7
+              },
+              "source_kind": "message",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000205",
+                "ref_type": "message"
+              }
+            }
+          ],
+          "semantic_ids": [
+            "00000000-0000-0000-0000-000000000205"
+          ],
+          "source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000205",
+              "ref_type": "message"
+            }
+          ],
+          "token_estimate_total": 6
+        }
+      },
+      "fixture": {
+        "artifact_hits": [],
+        "artifact_sources": [],
+        "artifact_status": "unavailable",
+        "memory_items": [],
+        "message_sources": [
+          {
+            "content": "semantic fallback fixture",
+            "conversation_id": "00000000-0000-0000-0000-000000000106",
+            "created_at": "fixture-time",
+            "message_id": "00000000-0000-0000-0000-000000000205",
+            "metadata": {},
+            "role": "assistant"
+          }
+        ],
+        "recent_messages": [],
+        "semantic_hits": [
+          {
+            "message_id": "00000000-0000-0000-0000-000000000205",
+            "score": 0.7
+          }
+        ]
+      },
+      "name": "artifact_unavailable_partial_retrieval",
+      "request": {
+        "client_id": "client-chat",
+        "conversation_id": "00000000-0000-0000-0000-000000000106",
+        "owner_id": "owner-fixture",
+        "profile": "default",
+        "request_id": "request-artifact-001",
+        "surface": "chat"
+      },
+      "retrieval": {
+        "artifact_k": 3,
+        "options": {
+          "k": 4,
+          "min_score": 0.25,
+          "scope": "conversation"
+        },
+        "query": "artifact fallback fixture"
+      }
+    },
+    {
+      "categories": [
+        "offline",
+        "local-routing",
+        "cross-service"
+      ],
+      "consumer_context": {
+        "provider_contact": "none",
+        "routing_mode": "local_only",
+        "status": "ready"
+      },
+      "expected": {
+        "augmented": {
+          "artifact_ids": [],
+          "artifacts": [],
+          "diagnostics": {
+            "artifact_invalid_hit_ids": 0,
+            "artifact_missing_source_count": 0,
+            "artifact_omission_reasons": [],
+            "artifact_status": "not_requested",
+            "fallback_to_raw_reasons": [],
+            "semantic_invalid_hit_ids": 0,
+            "semantic_missing_source_count": 0,
+            "vector_status": "ok"
+          },
+          "recent": [],
+          "recent_ids": [],
+          "semantic": [],
+          "semantic_ids": [],
+          "source_refs": [],
+          "token_estimate_total": null
+        },
+        "comparison": {
+          "artifact_delta": 0,
+          "augmented_only_semantic_ids": [],
+          "raw_only_semantic_ids": [],
+          "same_semantic_order": true,
+          "token_delta": 0
+        },
+        "contract": {
+          "client_id": "client-telegram",
+          "consumer_context": {
+            "provider_contact": "none",
+            "routing_mode": "local_only",
+            "status": "ready"
+          },
+          "conversation_id": "00000000-0000-0000-0000-000000000107",
+          "owner_id": "owner-fixture",
+          "profile": "local",
+          "request_id": "request-local-001",
+          "surface": "telegram"
+        },
+        "outcome": {
+          "fallback": "none",
+          "reasons": [],
+          "status": "ok"
+        },
+        "provenance": {
+          "augmented_freshness": [],
+          "augmented_source_refs": [],
+          "raw_freshness": [],
+          "raw_source_refs": []
+        },
+        "raw": {
+          "artifact_ids": [],
+          "artifacts": [],
+          "diagnostics": {
+            "artifact_invalid_hit_ids": 0,
+            "artifact_missing_source_count": 0,
+            "artifact_omission_reasons": [],
+            "artifact_status": "not_requested",
+            "fallback_to_raw_reasons": [],
+            "semantic_invalid_hit_ids": 0,
+            "semantic_missing_source_count": 0,
+            "vector_status": "ok"
+          },
+          "recent": [],
+          "recent_ids": [],
+          "semantic": [],
+          "semantic_ids": [],
+          "source_refs": [],
+          "token_estimate_total": null
+        }
+      },
+      "fixture": {
+        "artifact_hits": [],
+        "artifact_sources": [],
+        "memory_items": [],
+        "message_sources": [],
+        "recent_messages": [],
+        "semantic_hits": []
+      },
+      "name": "local_only_consumer_handoff",
+      "request": {
+        "client_id": "client-telegram",
+        "conversation_id": "00000000-0000-0000-0000-000000000107",
+        "owner_id": "owner-fixture",
+        "profile": "local",
+        "request_id": "request-local-001",
+        "surface": "telegram"
+      },
+      "retrieval": {
+        "artifact_k": 0,
+        "options": {
+          "k": 4,
+          "min_score": 0.25,
+          "scope": "conversation"
+        },
+        "query": "local handoff fixture"
+      }
+    },
+    {
+      "categories": [
+        "positive",
+        "cross-service"
+      ],
+      "consumer_context": {
+        "consumer": "orchestrator",
+        "retrieval_status": "ok",
+        "sources_field": "preserved"
+      },
+      "expected": {
+        "augmented": {
+          "artifact_ids": [],
+          "artifacts": [],
+          "diagnostics": {
+            "artifact_invalid_hit_ids": 0,
+            "artifact_missing_source_count": 0,
+            "artifact_omission_reasons": [],
+            "artifact_status": "not_requested",
+            "fallback_to_raw_reasons": [],
+            "semantic_invalid_hit_ids": 0,
+            "semantic_missing_source_count": 0,
+            "vector_status": "ok"
+          },
+          "recent": [],
+          "recent_ids": [],
+          "semantic": [],
+          "semantic_ids": [],
+          "source_refs": [],
+          "token_estimate_total": null
+        },
+        "comparison": {
+          "artifact_delta": 0,
+          "augmented_only_semantic_ids": [],
+          "raw_only_semantic_ids": [],
+          "same_semantic_order": true,
+          "token_delta": 0
+        },
+        "contract": {
+          "client_id": "client-voice",
+          "consumer_context": {
+            "consumer": "orchestrator",
+            "retrieval_status": "ok",
+            "sources_field": "preserved"
+          },
+          "conversation_id": "00000000-0000-0000-0000-000000000108",
+          "owner_id": "owner-fixture",
+          "profile": "brief",
+          "request_id": "request-contract-001",
+          "surface": "native_voice_text"
+        },
+        "outcome": {
+          "fallback": "none",
+          "reasons": [],
+          "status": "ok"
+        },
+        "provenance": {
+          "augmented_freshness": [],
+          "augmented_source_refs": [],
+          "raw_freshness": [],
+          "raw_source_refs": []
+        },
+        "raw": {
+          "artifact_ids": [],
+          "artifacts": [],
+          "diagnostics": {
+            "artifact_invalid_hit_ids": 0,
+            "artifact_missing_source_count": 0,
+            "artifact_omission_reasons": [],
+            "artifact_status": "not_requested",
+            "fallback_to_raw_reasons": [],
+            "semantic_invalid_hit_ids": 0,
+            "semantic_missing_source_count": 0,
+            "vector_status": "ok"
+          },
+          "recent": [],
+          "recent_ids": [],
+          "semantic": [],
+          "semantic_ids": [],
+          "source_refs": [],
+          "token_estimate_total": null
+        }
+      },
+      "fixture": {
+        "artifact_hits": [],
+        "artifact_sources": [],
+        "memory_items": [],
+        "message_sources": [],
+        "recent_messages": [],
+        "semantic_hits": []
+      },
+      "name": "cross_service_contract_handoff",
+      "request": {
+        "client_id": "client-voice",
+        "conversation_id": "00000000-0000-0000-0000-000000000108",
+        "owner_id": "owner-fixture",
+        "profile": "brief",
+        "request_id": "request-contract-001",
+        "surface": "native_voice_text"
+      },
+      "retrieval": {
+        "artifact_k": 0,
+        "options": {
+          "k": 4,
+          "min_score": 0.25,
+          "scope": "conversation"
+        },
+        "query": "contract handoff fixture"
+      }
+    }
+  ],
+  "schema_version": 1
+}

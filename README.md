@@ -143,6 +143,14 @@ make test-postgres
 
 These tests cover the migration lifecycle and schema assertions, including the `memory_entities` and `memory_edges` tables. They are separate from the regular fake/unit/API group.
 
+Deterministic retrieval replay fixtures can be run independently:
+
+```bash
+make replay-test
+```
+
+The replay command loads the versioned persisted corpus, executes raw and augmented retrieval without live services, and reports a structural diff when IDs, order, provenance, token estimates, adjustments, or fallback outcomes change.
+
 Live smoke scripts such as `scripts/validate_object_store.sh` and `scripts/validate_cluster6_r16.sh` require a disposable running stack. Do not point them at a deployed environment. The proactive smoke also requires local embedding capability; it must not be run with paid or external model credentials merely to validate this repository.
 
 Host-local API development does require a validated Python 3.12 virtual environment. Create it with an explicit interpreter:
