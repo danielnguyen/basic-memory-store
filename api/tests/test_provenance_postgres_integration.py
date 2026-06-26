@@ -13,6 +13,8 @@ from storage.postgres import PostgresStore
 class FakeQdrant:
     def __init__(self):
         self.derived_text_ids: list[str] = []
+        self.vector_unavailable = False
+        self.artifact_unavailable = False
 
     def ping(self):
         return True
@@ -24,9 +26,13 @@ class FakeQdrant:
         return None
 
     async def search(self, **kwargs):
+        if self.vector_unavailable:
+            raise RuntimeError("vector unavailable")
         return []
 
     async def search_artifact_chunks(self, **kwargs):
+        if self.artifact_unavailable:
+            raise RuntimeError("artifact unavailable")
         return [
             types.SimpleNamespace(
                 derived_text_id=derived_id,
@@ -62,6 +68,9 @@ def _settings():
         ingest_chunk_size_chars=1_000,
         ingest_chunk_overlap_chars=0,
         embed_model="test-embed",
+        min_index_chars=3,
+        index_assistant_messages=True,
+        index_user_questions=True,
     )
 
 
@@ -102,6 +111,17 @@ def test_real_creation_paths_storage_reopen_retrieval_and_owner_isolation(
         )
         assert conversation.status_code == 200, conversation.text
         conversation_id = conversation.json()["conversation_id"]
+        canonical_message = client.post(
+            f"/v1/conversations/{conversation_id}/messages",
+            headers=_headers(),
+            json={
+                "owner_id": "owner-a",
+                "client_id": "test",
+                "role": "user",
+                "content": "Neutral canonical retrieval proof.",
+            },
+        )
+        assert canonical_message.status_code == 200, canonical_message.text
 
         ingested = client.post(
             "/v1/ingestion/files",
@@ -175,6 +195,33 @@ def test_real_creation_paths_storage_reopen_retrieval_and_owner_isolation(
         )
         assert promoted.status_code == 200, promoted.text
         memory = promoted.json()["memory"]
+        derived_memory_response = client.post(
+            "/v1/internal/memory/promote",
+            headers=_headers("rid-derived-memory"),
+            json={
+                "request_id": "rid-derived-memory",
+                "owner_id": "owner-a",
+                "memory_type": "derived_text_note",
+                "summary": "Derived artifact qualification record.",
+                "source_refs": [{"ref_type": "derived_text", "ref_id": derived_text_id}],
+                "confidence": 0.64,
+                "explanation": {"rationale": "retrieval qualification fixture"},
+                "generation_trace_id": "trace-derived-memory",
+            },
+        )
+        assert derived_memory_response.status_code == 200, derived_memory_response.text
+        derived_memory_id = derived_memory_response.json()["memory"]["memory_id"]
+        derived_transition = client.post(
+            f"/v1/internal/memory/{derived_memory_id}/transition",
+            headers=_headers("rid-derived-stale"),
+            json={
+                "request_id": "rid-derived-stale",
+                "owner_id": "owner-a",
+                "status": "stale",
+                "reason": {"code": "source_recheck_required"},
+            },
+        )
+        assert derived_transition.status_code == 200, derived_transition.text
         replacement_response = client.post(
             "/v1/internal/memory/promote",
             headers=_headers("rid-memory-replacement"),
@@ -249,14 +296,55 @@ def test_real_creation_paths_storage_reopen_retrieval_and_owner_isolation(
         assert retrieval.status_code == 200, retrieval.text
         artifact = retrieval.json()["bundle"]["artifact_refs"][0]
         assert len(retrieval.json()["bundle"]["artifact_refs"]) == 1
+        assert retrieval.json()["bundle"]["recent"][0]["evidence_role"] == "canonical"
+        assert retrieval.json()["bundle"]["recent"][0]["source_availability"] == "not_applicable"
         assert retrieval.json()["bundle"]["retrieval_debug"]["cross_owner_artifact_provenance_count"] == 1
+        truth = retrieval.json()["bundle"]["retrieval_debug"]["truth_qualification"]
+        assert truth["canonical_result_count"] >= 1
+        assert truth["derived_result_count"] == 1
+        assert truth["source_available_count"] == 1
+        assert truth["source_owner_mismatch_count"] == 1
+        assert truth["lifecycle_restricted_derived_count"] == 1
         assert artifact["source_ref"] == {"ref_type": "derived_text", "ref_id": derived_text_id}
+        assert artifact["evidence_role"] == "derived"
+        assert artifact["source_availability"] == "available"
+        assert artifact["source_checks"] == [
+            {
+                "ref_type": "artifact",
+                "ref_id": artifact["provenance"]["source_refs"][0]["ref_id"],
+                "support_kind": "direct",
+                "availability": "available",
+            }
+        ]
+        assert artifact["memory_id"] == derived_memory_id
+        assert artifact["durable_status"] == "stale"
+        assert artifact["freshness_state"] == "stale"
+        assert artifact["confidence"] == 0.64
+        assert artifact["qualification_reasons"] == ["effective_stale"]
         assert artifact["provenance"] == {
             **contracts["derived_text"],
             "retrieval_reason": "included_by_artifact_similarity",
         }
         assert "text" not in artifact["provenance"]
         assert "derivation_params" not in artifact["provenance"]
+
+        qdrant.artifact_unavailable = True
+        degraded_retrieval = client.post(
+            f"/v2/conversations/{conversation_id}/retrieve",
+            headers=_headers("rid-artifact-unavailable"),
+            json={
+                "request_id": "rid-artifact-unavailable",
+                "owner_id": "owner-a",
+                "query": "provenance",
+                "include_artifacts": True,
+            },
+        )
+        assert degraded_retrieval.status_code == 200, degraded_retrieval.text
+        degraded_body = degraded_retrieval.json()["bundle"]
+        assert degraded_body["recent"][0]["evidence_role"] == "canonical"
+        assert degraded_body["artifact_refs"] == []
+        assert degraded_body["retrieval_debug"]["artifact_status"] == "unavailable"
+        qdrant.artifact_unavailable = False
 
         assert _inspect(client, "memory_item", memory["memory_id"], "owner-b").status_code == 404
         cross_owner_retrieval = client.post(

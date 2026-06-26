@@ -44,14 +44,20 @@ def _safe_item_summary(item: Any, *, id_key: str, score_key: str) -> dict[str, A
     value = item if isinstance(item, dict) else item.model_dump()
     summary = {
         "id": str(value[id_key]),
+        "owner_id": value.get("owner_id"),
+        "evidence_role": value.get("evidence_role"),
         "source_ref": _source_ref(value),
+        "source_availability": value.get("source_availability"),
+        "source_checks": value.get("source_checks") or [],
         "score": value.get(score_key),
         "score_details": value.get("score_details") or {},
         "freshness_state": value.get("freshness_state"),
+        "durable_status": value.get("durable_status"),
         "source_kind": value.get("source_kind"),
         "confidence": value.get("confidence"),
         "supersedes": value.get("supersedes"),
         "superseded_by": value.get("superseded_by"),
+        "qualification_reasons": value.get("qualification_reasons") or [],
     }
     return {key: item_value for key, item_value in summary.items() if item_value is not None}
 

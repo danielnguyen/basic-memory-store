@@ -20,6 +20,21 @@ from services.memory_lifecycle import effective_freshness_state
 from services.derived_contract import derived_text_contract_view
 
 
+SOURCE_AVAILABLE = "available"
+SOURCE_MISSING = "missing"
+SOURCE_MALFORMED = "malformed"
+SOURCE_UNAVAILABLE = "unavailable"
+SOURCE_OWNER_MISMATCH = "owner_mismatch"
+
+LIFECYCLE_RESTRICTED_STATES = {
+    "parked",
+    "stale",
+    "superseded",
+    "forgotten_or_demoted",
+    "unknown_freshness",
+}
+
+
 def cap_snippet(text: str, max_chars: int) -> str:
     cleaned = text.strip()
     if len(cleaned) <= max_chars:
@@ -210,6 +225,7 @@ def _freshness_metadata(
         return {
             "memory_id": None,
             "freshness_state": "unknown_freshness",
+            "durable_status": None,
             "last_verified_at": None,
             "source_kind": source_kind,
             "confidence": None,
@@ -225,12 +241,185 @@ def _freshness_metadata(
     return {
         "memory_id": memory_item.get("memory_id"),
         "freshness_state": _normalize_freshness_state(memory_item),
+        "durable_status": memory_item.get("status"),
         "last_verified_at": str(last_verified_at) if last_verified_at else None,
         "source_kind": source_kind,
         "confidence": float(confidence) if confidence is not None else None,
         "supersedes": memory_item.get("supersedes_memory_id"),
         "superseded_by": memory_item.get("superseded_by_memory_id"),
     }
+
+
+def _truth_counts() -> dict[str, Any]:
+    return {
+        "canonical_result_count": 0,
+        "derived_result_count": 0,
+        "derivative_source_checks_attempted": 0,
+        "source_available_count": 0,
+        "source_missing_count": 0,
+        "source_malformed_count": 0,
+        "source_unavailable_count": 0,
+        "source_owner_mismatch_count": 0,
+        "derived_degraded_count": 0,
+        "lifecycle_restricted_derived_count": 0,
+        "derivative_omissions_by_reason": {},
+        "canonical_fallback_reasons": [],
+    }
+
+
+def _add_omission(debug_state: dict[str, Any], reason: str) -> None:
+    omissions = debug_state["derivative_omissions_by_reason"]
+    omissions[reason] = int(omissions.get(reason, 0)) + 1
+
+
+def _source_count_key(availability: str) -> str:
+    if availability == SOURCE_AVAILABLE:
+        return "source_available_count"
+    if availability == SOURCE_MISSING:
+        return "source_missing_count"
+    if availability == SOURCE_MALFORMED:
+        return "source_malformed_count"
+    if availability == SOURCE_UNAVAILABLE:
+        return "source_unavailable_count"
+    if availability == SOURCE_OWNER_MISMATCH:
+        return "source_owner_mismatch_count"
+    return "source_unavailable_count"
+
+
+def _bounded_source_check(ref: dict[str, Any], availability: str, reason: str | None = None) -> dict[str, Any]:
+    check = {
+        "ref_type": str(ref.get("ref_type") or "")[:64],
+        "ref_id": str(ref.get("ref_id") or "")[:160],
+        "support_kind": str(ref.get("support_kind") or "")[:64],
+        "availability": availability,
+    }
+    if reason:
+        check["reason"] = reason[:160]
+    return check
+
+
+def _safe_source_uuid(ref: dict[str, Any]) -> UUID | None:
+    raw = str(ref.get("ref_id") or "").strip()
+    try:
+        return UUID(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _check_source_ref(pg: Any, *, owner_id: str, ref: dict[str, Any]) -> dict[str, Any]:
+    ref_type = str(ref.get("ref_type") or "").strip()
+    ref_id = str(ref.get("ref_id") or "").strip()
+    support_kind = str(ref.get("support_kind") or "").strip()
+    if not ref_type or not ref_id or not support_kind:
+        return _bounded_source_check(ref, SOURCE_MALFORMED, "malformed_source_ref")
+
+    source_id = _safe_source_uuid(ref)
+    if source_id is None:
+        return _bounded_source_check(ref, SOURCE_MALFORMED, "source_ref_id_not_uuid")
+
+    try:
+        if ref_type == "artifact":
+            row = await pg.get_artifact(source_id)
+            if row is None:
+                return _bounded_source_check(ref, SOURCE_MISSING, "source_not_found")
+            if row.get("owner_id") != owner_id:
+                return _bounded_source_check(ref, SOURCE_OWNER_MISMATCH, "source_owner_mismatch")
+            return _bounded_source_check(ref, SOURCE_AVAILABLE)
+
+        if ref_type == "message":
+            if hasattr(pg, "get_message_owner"):
+                message_owner = await pg.get_message_owner(source_id)
+                if message_owner is None:
+                    return _bounded_source_check(ref, SOURCE_MISSING, "source_not_found")
+                if message_owner != owner_id:
+                    return _bounded_source_check(ref, SOURCE_OWNER_MISMATCH, "source_owner_mismatch")
+                return _bounded_source_check(ref, SOURCE_AVAILABLE)
+            rows = await pg.get_message_snippets_by_ids([source_id])
+            return _bounded_source_check(
+                ref,
+                SOURCE_AVAILABLE if rows else SOURCE_MISSING,
+                None if rows else "source_not_found",
+            )
+
+        if ref_type == "event_log":
+            row = await pg.get_event_ingest_log(source_id)
+            if row is None:
+                return _bounded_source_check(ref, SOURCE_MISSING, "source_not_found")
+            if row.get("owner_id") != owner_id:
+                return _bounded_source_check(ref, SOURCE_OWNER_MISMATCH, "source_owner_mismatch")
+            return _bounded_source_check(ref, SOURCE_AVAILABLE)
+
+        if ref_type == "memory_item":
+            row = await pg.get_memory_debug(source_id, owner_id)
+            return _bounded_source_check(
+                ref,
+                SOURCE_AVAILABLE if row else SOURCE_MISSING,
+                None if row else "source_not_found",
+            )
+
+        if ref_type == "derived_text":
+            row = await pg.get_derived_text_for_owner(derived_text_id=source_id, owner_id=owner_id)
+            return _bounded_source_check(
+                ref,
+                SOURCE_AVAILABLE if row else SOURCE_MISSING,
+                None if row else "source_not_found",
+            )
+    except Exception:
+        logging.warning("Derivative source traversal unavailable")
+        return _bounded_source_check(ref, SOURCE_UNAVAILABLE, "source_lookup_unavailable")
+
+    return _bounded_source_check(ref, SOURCE_MALFORMED, "unsupported_source_ref_type")
+
+
+async def _validate_source_refs(
+    pg: Any,
+    *,
+    owner_id: str,
+    source_refs: list[dict[str, Any]],
+    debug_state: dict[str, Any],
+) -> tuple[str, list[dict[str, Any]], str | None]:
+    checks: list[dict[str, Any]] = []
+    if not source_refs:
+        debug_state["source_malformed_count"] += 1
+        _add_omission(debug_state, "missing_derivative_source_refs")
+        return SOURCE_MALFORMED, checks, "missing_derivative_source_refs"
+
+    for ref in source_refs:
+        debug_state["derivative_source_checks_attempted"] += 1
+        check = await _check_source_ref(pg, owner_id=owner_id, ref=ref)
+        checks.append(check)
+        debug_state[_source_count_key(check["availability"])] += 1
+
+    failing = next((check for check in checks if check["availability"] != SOURCE_AVAILABLE), None)
+    if failing is not None:
+        reason_by_availability = {
+            SOURCE_MALFORMED: "malformed_derivative_source_ref",
+            SOURCE_MISSING: "missing_derivative_source_record",
+            SOURCE_UNAVAILABLE: "derivative_source_lookup_unavailable",
+            SOURCE_OWNER_MISMATCH: "cross_owner_derivative_source_ref",
+        }
+        reason = reason_by_availability.get(failing["availability"], "derivative_source_unavailable")
+        _add_omission(debug_state, reason)
+        return str(failing["availability"]), checks, reason
+
+    return SOURCE_AVAILABLE, checks, None
+
+
+def _qualification_reasons(*, freshness_state: str, durable_status: str | None) -> list[str]:
+    reasons: list[str] = []
+    if freshness_state in LIFECYCLE_RESTRICTED_STATES:
+        reasons.append(f"effective_{freshness_state}")
+    if durable_status in {
+        "contradicted",
+        "invalidated",
+        "retracted",
+        "expired",
+        "forgotten_or_demoted",
+        "rebuilding",
+        "superseded",
+    }:
+        reasons.append(f"durable_{durable_status}")
+    return list(dict.fromkeys(reasons))
 
 
 def _domain_filter_state(
@@ -465,7 +654,11 @@ async def build_retrieval_bundle(
     if artifact_missing_source_count:
         artifact_status = "degraded"
         artifact_omission_reasons.append("missing_derivative_source")
-    ranked_artifacts: list[tuple[dict[str, Any], dict[str, float], dict[str, Any]]] = []
+    truth_debug = _truth_counts()
+    truth_debug["canonical_fallback_reasons"] = list(
+        message_results["retrieval_debug"]["fallback_to_raw_reasons"]
+    )
+    ranked_artifacts: list[tuple[dict[str, Any], dict[str, float], dict[str, Any], str, list[dict[str, Any]]]] = []
     malformed_artifact_provenance_count = 0
     cross_owner_artifact_provenance_count = 0
     for snippet in artifact_snips:
@@ -475,6 +668,8 @@ async def build_retrieval_bundle(
             cross_owner_artifact_provenance_count += 1
             artifact_status = "degraded"
             artifact_omission_reasons.append("cross_owner_derivative_provenance")
+            truth_debug["source_owner_mismatch_count"] += 1
+            _add_omission(truth_debug, "cross_owner_derivative_provenance")
             continue
         try:
             provenance = derived_text_contract_view(snippet)
@@ -482,6 +677,18 @@ async def build_retrieval_bundle(
             malformed_artifact_provenance_count += 1
             artifact_status = "degraded"
             artifact_omission_reasons.append("malformed_derivative_provenance")
+            _add_omission(truth_debug, "malformed_derivative_provenance")
+            truth_debug["source_malformed_count"] += 1
+            continue
+        source_availability, source_checks, source_failure_reason = await _validate_source_refs(
+            pg,
+            owner_id=owner_id,
+            source_refs=provenance["source_refs"],
+            debug_state=truth_debug,
+        )
+        if source_failure_reason is not None:
+            artifact_status = "degraded"
+            artifact_omission_reasons.append(source_failure_reason)
             continue
         score_details = _score_item(
             settings=settings,
@@ -492,7 +699,7 @@ async def build_retrieval_bundle(
             is_pinned=False,
             missing_score=_artifact_missing_score(settings, snippet),
         )
-        ranked_artifacts.append((snippet, score_details, provenance))
+        ranked_artifacts.append((snippet, score_details, provenance, source_availability, source_checks))
     ranked_artifacts.sort(key=lambda item: item[1]["final_score"], reverse=True)
     ranked_artifacts = ranked_artifacts[:artifact_k]
 
@@ -508,7 +715,7 @@ async def build_retrieval_bundle(
         for snippet, _ in ranked_semantic
     ] + [
         {"ref_type": "derived_text", "ref_id": snippet["derived_text_id"]}
-        for snippet, _, _ in ranked_artifacts
+        for snippet, _, _, _, _ in ranked_artifacts
     ]
     memory_items_by_ref = await pg.get_memory_items_for_source_refs(
         owner_id=owner_id,
@@ -518,12 +725,16 @@ async def build_retrieval_bundle(
     recent_items = [
         RetrievalMessageItem(
             message_id=s["message_id"],
+            owner_id=owner_id,
+            evidence_role="canonical",
             conversation_id=s["conversation_id"],
             role=s["role"],
             content=s["content"],
             created_at=s["created_at"],
             score=None,
             source_ref=RetrievalSourceRef(ref_type="message", ref_id=s["message_id"]),
+            source_availability="not_applicable",
+            qualification_reasons=["canonical_recent"],
             policy_metadata=_policy_metadata(s.get("metadata")),
             **_freshness_metadata(memory_item=memory_items_by_ref.get(("message", s["message_id"])), source_kind="message"),
         )
@@ -532,6 +743,8 @@ async def build_retrieval_bundle(
     semantic_items = [
         RetrievalMessageItem(
             message_id=s["message_id"],
+            owner_id=owner_id,
+            evidence_role="canonical",
             conversation_id=s["conversation_id"],
             role=s["role"],
             content=s["content"],
@@ -539,22 +752,48 @@ async def build_retrieval_bundle(
             score=score_details["final_score"],
             score_details=score_details,
             source_ref=RetrievalSourceRef(ref_type="message", ref_id=s["message_id"]),
+            source_availability="not_applicable",
+            qualification_reasons=["canonical_semantic"],
             policy_metadata=_policy_metadata(s.get("metadata")),
             **_freshness_metadata(memory_item=memory_items_by_ref.get(("message", s["message_id"])), source_kind="message"),
         )
         for s, score_details in ranked_semantic
     ]
+    for item in recent_items:
+        item.qualification_reasons = list(
+            dict.fromkeys([
+                *item.qualification_reasons,
+                *_qualification_reasons(
+                    freshness_state=item.freshness_state,
+                    durable_status=item.durable_status,
+                ),
+            ])
+        )
+    for item in semantic_items:
+        item.qualification_reasons = list(
+            dict.fromkeys([
+                *item.qualification_reasons,
+                *_qualification_reasons(
+                    freshness_state=item.freshness_state,
+                    durable_status=item.durable_status,
+                ),
+            ])
+        )
 
     artifact_refs = _dedupe_artifact_refs(
         [
             ArtifactRef(
                 artifact_id=s["artifact_id"],
+                owner_id=owner_id,
+                evidence_role="derived",
                 file_path=s["file_path"],
                 snippet=cap_snippet(s["text"], retrieval_artifact_max_snippet_chars(settings)),
                 relevance_score=score_details["final_score"],
                 repo_name=s.get("repo_name"),
                 score_details=score_details,
                 source_ref=RetrievalSourceRef(ref_type="derived_text", ref_id=s["derived_text_id"]),
+                source_availability=source_availability,
+                source_checks=source_checks,
                 policy_metadata=_policy_metadata(s.get("derivation_params")),
                 provenance=DerivedProvenance(
                     **provenance,
@@ -565,9 +804,17 @@ async def build_retrieval_bundle(
                     source_kind="derived_text",
                 ),
             )
-            for s, score_details, provenance in ranked_artifacts
+            for s, score_details, provenance, source_availability, source_checks in ranked_artifacts
         ]
     )
+    for item in artifact_refs:
+        item.qualification_reasons = _qualification_reasons(
+            freshness_state=item.freshness_state,
+            durable_status=item.durable_status or (item.provenance.status if item.provenance else None),
+        )
+        if item.qualification_reasons:
+            truth_debug["derived_degraded_count"] += 1
+            truth_debug["lifecycle_restricted_derived_count"] += 1
 
     allowed_domain_set = set(_normalize_domain_values(allowed_memory_domains or []))
     blocked_domain_set = set(_normalize_domain_values(blocked_memory_domains or []))
@@ -594,6 +841,8 @@ async def build_retrieval_bundle(
         blocked_domains=blocked_domain_set,
         debug_state=domain_filter_debug,
     )
+    truth_debug["canonical_result_count"] = len(recent_items) + len(semantic_items)
+    truth_debug["derived_result_count"] = len(artifact_refs)
     all_content = "".join(
         [s.content for s in recent_items]
         + [s.content for s in semantic_items]
@@ -624,6 +873,11 @@ async def build_retrieval_bundle(
             "malformed_artifact_provenance_count": malformed_artifact_provenance_count,
             "cross_owner_artifact_provenance_count": cross_owner_artifact_provenance_count,
             "artifact_omission_reasons": artifact_omission_reasons,
+            "truth_qualification": {
+                **truth_debug,
+                "vector_retrieval_status": message_results["retrieval_debug"]["vector_status"],
+                "derivative_retrieval_status": artifact_status,
+            },
             "graph_expansion_applied": False,
             "pinned_handling": "pinned memories are not part of the v2 ranked bundle; they remain available via the unchanged tiered retrieval path",
             "missing_score_note": "project heuristic; not an explicit spec term",

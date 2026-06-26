@@ -11,6 +11,15 @@ RetrievalScope = Literal["conversation", "client", "owner"]
 TimeWindow = Literal["7d", "30d", "90d", "all"]
 RetrievalMode = Literal["recent", "balanced", "historical"]
 RetrievalSourceType = Literal["message", "derived_text"]
+RetrievalEvidenceRole = Literal["canonical", "derived"]
+RetrievalSourceAvailability = Literal[
+    "available",
+    "missing",
+    "malformed",
+    "unavailable",
+    "owner_mismatch",
+    "not_applicable",
+]
 RetrievalFreshnessState = Literal[
     "active",
     "parked",
@@ -263,15 +272,21 @@ class DerivedProvenance(BaseModel):
 
 class ArtifactRef(BaseModel):
     artifact_id: str
+    owner_id: Optional[str] = None
+    evidence_role: RetrievalEvidenceRole = "derived"
     file_path: str
     snippet: str
     relevance_score: Optional[float] = None
     repo_name: Optional[str] = None
     score_details: Dict[str, Any] = Field(default_factory=dict)
     source_ref: RetrievalSourceRef
+    source_availability: RetrievalSourceAvailability = "unavailable"
+    source_checks: List[Dict[str, Any]] = Field(default_factory=list, max_length=50)
+    qualification_reasons: List[str] = Field(default_factory=list, max_length=16)
     memory_id: Optional[str] = None
     policy_metadata: RetrievalPolicyMetadata = Field(default_factory=RetrievalPolicyMetadata)
     freshness_state: RetrievalFreshnessState = "unknown_freshness"
+    durable_status: Optional[str] = None
     last_verified_at: Optional[str] = None
     source_kind: Optional[str] = None
     confidence: Optional[float] = None
@@ -282,6 +297,8 @@ class ArtifactRef(BaseModel):
 
 class RetrievalMessageItem(BaseModel):
     message_id: str
+    owner_id: Optional[str] = None
+    evidence_role: RetrievalEvidenceRole = "canonical"
     conversation_id: str
     role: Role
     content: str
@@ -289,9 +306,13 @@ class RetrievalMessageItem(BaseModel):
     score: Optional[float] = None
     score_details: Dict[str, Any] = Field(default_factory=dict)
     source_ref: RetrievalSourceRef
+    source_availability: RetrievalSourceAvailability = "not_applicable"
+    source_checks: List[Dict[str, Any]] = Field(default_factory=list, max_length=50)
+    qualification_reasons: List[str] = Field(default_factory=list, max_length=16)
     memory_id: Optional[str] = None
     policy_metadata: RetrievalPolicyMetadata = Field(default_factory=RetrievalPolicyMetadata)
     freshness_state: RetrievalFreshnessState = "unknown_freshness"
+    durable_status: Optional[str] = None
     last_verified_at: Optional[str] = None
     source_kind: Optional[str] = None
     confidence: Optional[float] = None
