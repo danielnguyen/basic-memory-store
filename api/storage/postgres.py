@@ -178,6 +178,20 @@ class PostgresStore:
         # Preserve input order
         return [by_id[mid] for mid in id_strs if mid in by_id]
 
+    async def get_message_owner(self, message_id: UUID) -> str | None:
+        q = """
+        SELECT c.owner_id
+        FROM messages m
+        JOIN conversations c ON c.id = m.conversation_id
+        WHERE m.id = %s
+        LIMIT 1;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (message_id,))
+                row = await cur.fetchone()
+        return str(row[0]) if row else None
+
     async def list_conversations(
         self,
         owner_id: str,

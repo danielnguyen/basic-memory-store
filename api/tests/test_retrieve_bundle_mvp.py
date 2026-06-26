@@ -8,11 +8,22 @@ import main as main_module
 
 
 class FakePG:
-    def __init__(self, *, message_times=None, message_metadata=None, artifact_metadata=None, memory_items_by_ref=None):
+    def __init__(
+        self,
+        *,
+        message_times=None,
+        message_metadata=None,
+        artifact_metadata=None,
+        memory_items_by_ref=None,
+        artifact_owner_by_id=None,
+        source_lookup_fails=False,
+    ):
         self.message_times = message_times or ["2026-01-01T00:00:00+00:00"]
         self.message_metadata = message_metadata or {}
         self.artifact_metadata = artifact_metadata or {}
         self.memory_items_by_ref = memory_items_by_ref or {}
+        self.artifact_owner_by_id = artifact_owner_by_id or {}
+        self.source_lookup_fails = source_lookup_fails
         self.last_conversation_id = None
 
     async def open(self):
@@ -53,6 +64,9 @@ class FakePG:
             )
         return out
 
+    async def get_message_owner(self, message_id):
+        return "owner"
+
     async def get_recent_message_items(self, conversation_id, limit):
         self.last_conversation_id = str(conversation_id)
         return [
@@ -86,6 +100,23 @@ class FakePG:
             if ids
             else []
         )
+
+    async def get_artifact(self, artifact_id):
+        if self.source_lookup_fails:
+            raise RuntimeError("source lookup unavailable")
+        owner_id = self.artifact_owner_by_id.get(str(artifact_id), "owner")
+        if owner_id is None:
+            return None
+        return {"artifact_id": str(artifact_id), "owner_id": owner_id}
+
+    async def get_event_ingest_log(self, event_log_id):
+        return None
+
+    async def get_memory_debug(self, memory_id, owner_id):
+        return None
+
+    async def get_derived_text_for_owner(self, *, derived_text_id, owner_id):
+        return None
 
     async def get_memory_items_for_source_refs(self, *, owner_id, source_refs):
         out = {}
@@ -182,14 +213,23 @@ async def test_retrieve_bundle_shape(monkeypatch):
     assert body["request_id"] == rid
     assert body["conversation_id"] == conversation_id
     assert body["bundle"]["recent"][0]["content"] == "recent snippet"
+    assert body["bundle"]["recent"][0]["owner_id"] == "owner"
+    assert body["bundle"]["recent"][0]["evidence_role"] == "canonical"
+    assert body["bundle"]["recent"][0]["source_availability"] == "not_applicable"
+    assert body["bundle"]["recent"][0]["qualification_reasons"] == ["canonical_recent", "effective_unknown_freshness"]
     assert body["bundle"]["recent"][0]["memory_id"] is None
     assert body["bundle"]["recent"][0]["freshness_state"] == "unknown_freshness"
     assert body["bundle"]["semantic"][0]["content"] == "semantic result 0"
+    assert body["bundle"]["semantic"][0]["evidence_role"] == "canonical"
     assert body["bundle"]["semantic"][0]["memory_id"] is None
     assert body["bundle"]["semantic"][0]["score"] >= 0.77
     assert body["bundle"]["semantic"][0]["score_details"]["semantic_score"] == 0.77
     assert body["bundle"]["semantic"][0]["source_ref"]["ref_type"] == "message"
     assert body["bundle"]["artifact_refs"][0]["file_path"] == "api/helpers.py"
+    assert body["bundle"]["artifact_refs"][0]["owner_id"] == "owner"
+    assert body["bundle"]["artifact_refs"][0]["evidence_role"] == "derived"
+    assert body["bundle"]["artifact_refs"][0]["source_availability"] == "available"
+    assert body["bundle"]["artifact_refs"][0]["source_checks"][0]["availability"] == "available"
     assert body["bundle"]["artifact_refs"][0]["memory_id"] is None
     assert body["bundle"]["artifact_refs"][0]["freshness_state"] == "unknown_freshness"
     assert len(body["bundle"]["artifact_refs"]) == 1
@@ -204,6 +244,13 @@ async def test_retrieve_bundle_shape(monkeypatch):
     assert body["bundle"]["retrieval_debug"]["retrieval_mode"] == "balanced"
     assert body["bundle"]["retrieval_debug"]["artifacts_included"] is True
     assert body["bundle"]["retrieval_debug"]["domain_filters_requested"] is False
+    truth = body["bundle"]["retrieval_debug"]["truth_qualification"]
+    assert truth["canonical_result_count"] == 2
+    assert truth["derived_result_count"] == 1
+    assert truth["source_available_count"] == 2
+    assert truth["source_missing_count"] == 0
+    assert truth["vector_retrieval_status"] == "ok"
+    assert truth["derivative_retrieval_status"] == "ok"
     assert "pinned memories are not part of the v2 ranked bundle" in body["bundle"]["retrieval_debug"]["pinned_handling"]
 
 
@@ -700,3 +747,280 @@ async def test_retrieve_bundle_returns_artifact_memory_identity_from_same_select
     assert artifact_item["supersedes"] == supersedes_id
     assert artifact_item["superseded_by"] is None
     assert artifact_item["snippet"] == "def important_helper(): pass"
+
+
+@pytest.mark.asyncio
+async def test_retrieve_bundle_omits_missing_derivative_source_but_keeps_canonical(monkeypatch):
+    derived_text_id = "55555555-5555-4555-8555-555555555555"
+    missing_artifact_id = "99999999-9999-4999-8999-999999999999"
+    fake_pg = FakePG(
+        artifact_metadata={
+            derived_text_id: {
+                "source_refs": [
+                    {
+                        "ref_type": "artifact",
+                        "ref_id": missing_artifact_id,
+                        "support_kind": "direct",
+                    }
+                ]
+            }
+        },
+        artifact_owner_by_id={missing_artifact_id: None},
+    )
+    fake_qdrant = FakeQdrant()
+
+    async def fake_search_artifact_chunks(**kwargs):
+        return [types.SimpleNamespace(derived_text_id=derived_text_id, score=0.66)]
+
+    fake_qdrant.search_artifact_chunks = fake_search_artifact_chunks
+    fake_settings = types.SimpleNamespace(
+        memory_api_key="testkey",
+        require_request_id=True,
+        enforce_request_id_header_body_match=True,
+        retrieval_k=8,
+        retrieval_recent_half_life_days=14,
+        retrieval_balanced_half_life_days=45,
+        retrieval_historical_half_life_days=365,
+        retrieval_conversation_boost=0.08,
+        retrieval_pinned_bias=0.12,
+        retrieval_missing_penalty_cap=0.15,
+        recent_turns=10,
+    )
+    monkeypatch.setattr(main_module, "settings", fake_settings, raising=True)
+    monkeypatch.setattr(main_module, "pg", fake_pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", fake_qdrant, raising=True)
+
+    rid = "rid-missing-source"
+    conversation_id = str(uuid.uuid4())
+    r = await _post_retrieve_bundle(
+        conversation_id=conversation_id,
+        request_id=rid,
+        body={"request_id": rid, "owner_id": "owner", "query": "helper"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["bundle"]["recent"]) == 1
+    assert len(body["bundle"]["semantic"]) == 1
+    assert body["bundle"]["artifact_refs"] == []
+    truth = body["bundle"]["retrieval_debug"]["truth_qualification"]
+    assert truth["source_missing_count"] == 1
+    assert truth["derivative_omissions_by_reason"] == {"missing_derivative_source_record": 1}
+
+
+@pytest.mark.asyncio
+async def test_retrieve_bundle_omits_cross_owner_derivative_source(monkeypatch):
+    derived_text_id = "55555555-5555-4555-8555-555555555556"
+    artifact_id = "99999999-9999-4999-8999-999999999998"
+    fake_pg = FakePG(
+        artifact_metadata={
+            derived_text_id: {
+                "source_refs": [
+                    {"ref_type": "artifact", "ref_id": artifact_id, "support_kind": "direct"}
+                ]
+            }
+        },
+        artifact_owner_by_id={artifact_id: "other-owner"},
+    )
+    fake_qdrant = FakeQdrant()
+
+    async def fake_search_artifact_chunks(**kwargs):
+        return [types.SimpleNamespace(derived_text_id=derived_text_id, score=0.66)]
+
+    fake_qdrant.search_artifact_chunks = fake_search_artifact_chunks
+    fake_settings = types.SimpleNamespace(
+        memory_api_key="testkey",
+        require_request_id=True,
+        enforce_request_id_header_body_match=True,
+        retrieval_k=8,
+        retrieval_recent_half_life_days=14,
+        retrieval_balanced_half_life_days=45,
+        retrieval_historical_half_life_days=365,
+        retrieval_conversation_boost=0.08,
+        retrieval_pinned_bias=0.12,
+        retrieval_missing_penalty_cap=0.15,
+        recent_turns=10,
+    )
+    monkeypatch.setattr(main_module, "settings", fake_settings, raising=True)
+    monkeypatch.setattr(main_module, "pg", fake_pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", fake_qdrant, raising=True)
+
+    rid = "rid-cross-source"
+    conversation_id = str(uuid.uuid4())
+    r = await _post_retrieve_bundle(
+        conversation_id=conversation_id,
+        request_id=rid,
+        body={"request_id": rid, "owner_id": "owner", "query": "helper"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["bundle"]["artifact_refs"] == []
+    truth = body["bundle"]["retrieval_debug"]["truth_qualification"]
+    assert truth["source_owner_mismatch_count"] == 1
+    assert truth["derivative_omissions_by_reason"] == {"cross_owner_derivative_source_ref": 1}
+
+
+@pytest.mark.asyncio
+async def test_retrieve_bundle_omits_derivative_when_source_lookup_fails(monkeypatch):
+    derived_text_id = "55555555-5555-4555-8555-555555555557"
+    artifact_id = "99999999-9999-4999-8999-999999999997"
+    fake_pg = FakePG(
+        artifact_metadata={
+            derived_text_id: {
+                "source_refs": [
+                    {"ref_type": "artifact", "ref_id": artifact_id, "support_kind": "direct"}
+                ]
+            }
+        },
+        source_lookup_fails=True,
+    )
+    fake_qdrant = FakeQdrant()
+
+    async def fake_search_artifact_chunks(**kwargs):
+        return [types.SimpleNamespace(derived_text_id=derived_text_id, score=0.66)]
+
+    fake_qdrant.search_artifact_chunks = fake_search_artifact_chunks
+    fake_settings = types.SimpleNamespace(
+        memory_api_key="testkey",
+        require_request_id=True,
+        enforce_request_id_header_body_match=True,
+        retrieval_k=8,
+        retrieval_recent_half_life_days=14,
+        retrieval_balanced_half_life_days=45,
+        retrieval_historical_half_life_days=365,
+        retrieval_conversation_boost=0.08,
+        retrieval_pinned_bias=0.12,
+        retrieval_missing_penalty_cap=0.15,
+        recent_turns=10,
+    )
+    monkeypatch.setattr(main_module, "settings", fake_settings, raising=True)
+    monkeypatch.setattr(main_module, "pg", fake_pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", fake_qdrant, raising=True)
+
+    rid = "rid-source-unavailable"
+    conversation_id = str(uuid.uuid4())
+    r = await _post_retrieve_bundle(
+        conversation_id=conversation_id,
+        request_id=rid,
+        body={"request_id": rid, "owner_id": "owner", "query": "helper"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["bundle"]["recent"][0]["evidence_role"] == "canonical"
+    assert body["bundle"]["artifact_refs"] == []
+    truth = body["bundle"]["retrieval_debug"]["truth_qualification"]
+    assert truth["source_unavailable_count"] == 1
+    assert truth["derivative_omissions_by_reason"] == {"derivative_source_lookup_unavailable": 1}
+
+
+@pytest.mark.asyncio
+async def test_retrieve_bundle_degrades_lifecycle_restricted_derivative_without_rewriting_canonical(monkeypatch):
+    derived_text_source_id = "55555555-5555-4555-8555-555555555558"
+    fake_pg = FakePG(
+        memory_items_by_ref={
+            ("derived_text", derived_text_source_id): {
+                "memory_id": "66666666-6666-4666-8666-666666666668",
+                "status": "rebuilding",
+                "last_reinforced_at": None,
+                "updated_at": "2026-06-12T00:00:00+00:00",
+                "confidence": 0.41,
+                "supersedes_memory_id": None,
+                "superseded_by_memory_id": None,
+            }
+        }
+    )
+    fake_qdrant = FakeQdrant()
+
+    async def fake_search_artifact_chunks(**kwargs):
+        return [types.SimpleNamespace(derived_text_id=derived_text_source_id, score=0.66)]
+
+    fake_qdrant.search_artifact_chunks = fake_search_artifact_chunks
+    fake_settings = types.SimpleNamespace(
+        memory_api_key="testkey",
+        require_request_id=True,
+        enforce_request_id_header_body_match=True,
+        retrieval_k=8,
+        retrieval_recent_half_life_days=14,
+        retrieval_balanced_half_life_days=45,
+        retrieval_historical_half_life_days=365,
+        retrieval_conversation_boost=0.08,
+        retrieval_pinned_bias=0.12,
+        retrieval_missing_penalty_cap=0.15,
+        recent_turns=10,
+    )
+    monkeypatch.setattr(main_module, "settings", fake_settings, raising=True)
+    monkeypatch.setattr(main_module, "pg", fake_pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", fake_qdrant, raising=True)
+
+    rid = "rid-lifecycle-degraded"
+    conversation_id = str(uuid.uuid4())
+    r = await _post_retrieve_bundle(
+        conversation_id=conversation_id,
+        request_id=rid,
+        body={"request_id": rid, "owner_id": "owner", "query": "helper"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    artifact = body["bundle"]["artifact_refs"][0]
+    assert body["bundle"]["recent"][0]["evidence_role"] == "canonical"
+    assert artifact["evidence_role"] == "derived"
+    assert artifact["source_availability"] == "available"
+    assert artifact["durable_status"] == "rebuilding"
+    assert artifact["freshness_state"] == "unknown_freshness"
+    assert artifact["confidence"] == 0.41
+    assert artifact["qualification_reasons"] == [
+        "effective_unknown_freshness",
+        "durable_rebuilding",
+    ]
+    truth = body["bundle"]["retrieval_debug"]["truth_qualification"]
+    assert truth["derived_degraded_count"] == 1
+    assert truth["lifecycle_restricted_derived_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_vector_and_artifact_failure_preserve_canonical_recent_without_fabricating_semantic(monkeypatch):
+    fake_pg = FakePG()
+    fake_qdrant = FakeQdrant()
+
+    async def failed_search(**kwargs):
+        raise RuntimeError("vector unavailable")
+
+    async def failed_artifact_search(**kwargs):
+        raise RuntimeError("artifact unavailable")
+
+    fake_qdrant.search = failed_search
+    fake_qdrant.search_artifact_chunks = failed_artifact_search
+    fake_settings = types.SimpleNamespace(
+        memory_api_key="testkey",
+        require_request_id=True,
+        enforce_request_id_header_body_match=True,
+        retrieval_k=8,
+        retrieval_recent_half_life_days=14,
+        retrieval_balanced_half_life_days=45,
+        retrieval_historical_half_life_days=365,
+        retrieval_conversation_boost=0.08,
+        retrieval_pinned_bias=0.12,
+        retrieval_missing_penalty_cap=0.15,
+        recent_turns=10,
+    )
+    monkeypatch.setattr(main_module, "settings", fake_settings, raising=True)
+    monkeypatch.setattr(main_module, "pg", fake_pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", fake_qdrant, raising=True)
+
+    rid = "rid-fallbacks"
+    conversation_id = str(uuid.uuid4())
+    r = await _post_retrieve_bundle(
+        conversation_id=conversation_id,
+        request_id=rid,
+        body={"request_id": rid, "owner_id": "owner", "query": "helper"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["bundle"]["recent"]) == 1
+    assert body["bundle"]["semantic"] == []
+    assert body["bundle"]["artifact_refs"] == []
+    debug = body["bundle"]["retrieval_debug"]
+    assert debug["vector_status"] == "unavailable"
+    assert debug["artifact_status"] == "unavailable"
+    assert debug["truth_qualification"]["canonical_result_count"] == 1
+    assert debug["truth_qualification"]["derived_result_count"] == 0
+    assert debug["truth_qualification"]["canonical_fallback_reasons"] == ["vector_unavailable"]

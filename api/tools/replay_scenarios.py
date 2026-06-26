@@ -30,6 +30,16 @@ class FixturePG:
         by_id = {item["message_id"]: item for item in self.fixture.get("message_sources", [])}
         return [deepcopy(by_id[str(item)]) for item in ids if str(item) in by_id]
 
+    async def get_message_owner(self, message_id: UUID) -> str | None:
+        wanted = str(message_id)
+        for item in [
+            *self.fixture.get("message_sources", []),
+            *self.fixture.get("recent_messages", []),
+        ]:
+            if item.get("message_id") == wanted:
+                return item.get("owner_id") or self.owner_id
+        return None
+
     async def get_derived_text_snippets_by_ids(self, ids: list[UUID]) -> list[dict[str, Any]]:
         by_id = {item["derived_text_id"]: item for item in self.fixture.get("artifact_sources", [])}
         rows = [deepcopy(by_id[str(item)]) for item in ids if str(item) in by_id]
@@ -46,6 +56,48 @@ class FixturePG:
                 }],
             )
         return rows
+
+    async def get_artifact(self, artifact_id: UUID) -> dict[str, Any] | None:
+        wanted = str(artifact_id)
+        for item in self.fixture.get("artifact_sources", []):
+            if item.get("artifact_id") == wanted:
+                return {
+                    "artifact_id": wanted,
+                    "owner_id": item.get("artifact_owner_id") or item.get("owner_id") or self.owner_id,
+                }
+        for item in self.fixture.get("source_records", []):
+            if item.get("ref_type") == "artifact" and item.get("ref_id") == wanted:
+                if item.get("availability") == "missing":
+                    return None
+                if item.get("availability") == "unavailable":
+                    raise RuntimeError("fixture source lookup unavailable")
+                return {"artifact_id": wanted, "owner_id": item.get("owner_id") or self.owner_id}
+        return None
+
+    async def get_event_ingest_log(self, event_log_id: UUID) -> dict[str, Any] | None:
+        wanted = str(event_log_id)
+        for item in self.fixture.get("source_records", []):
+            if item.get("ref_type") == "event_log" and item.get("ref_id") == wanted:
+                if item.get("availability") == "missing":
+                    return None
+                return {"event_log_id": wanted, "owner_id": item.get("owner_id") or self.owner_id}
+        return None
+
+    async def get_memory_debug(self, memory_id: UUID, owner_id: str) -> dict[str, Any] | None:
+        wanted = str(memory_id)
+        for item in self.fixture.get("source_records", []):
+            if item.get("ref_type") == "memory_item" and item.get("ref_id") == wanted:
+                if item.get("availability") == "missing" or item.get("owner_id", owner_id) != owner_id:
+                    return None
+                return {"memory": {"memory_id": wanted, "owner_id": owner_id}, "events": []}
+        return None
+
+    async def get_derived_text_for_owner(self, *, derived_text_id: UUID, owner_id: str) -> dict[str, Any] | None:
+        wanted = str(derived_text_id)
+        for item in self.fixture.get("artifact_sources", []):
+            if item.get("derived_text_id") == wanted and (item.get("owner_id") or self.owner_id) == owner_id:
+                return deepcopy(item)
+        return None
 
     async def get_recent_message_items(
         self,
@@ -101,6 +153,7 @@ def _provenance(snapshot: dict[str, Any]) -> dict[str, Any]:
                 *snapshot["augmented"]["artifacts"],
             ]
         ],
+        "truth_qualification": snapshot["augmented"]["diagnostics"].get("truth_qualification", {}),
     }
 
 
@@ -124,6 +177,7 @@ def _summary_view(summary: dict[str, Any]) -> dict[str, Any]:
             "artifact_invalid_hit_ids": debug["artifact_invalid_hit_ids"],
             "artifact_missing_source_count": debug["artifact_missing_source_count"],
             "artifact_omission_reasons": debug["artifact_omission_reasons"],
+            "truth_qualification": debug.get("truth_qualification", {}),
         },
     }
 

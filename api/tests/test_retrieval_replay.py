@@ -80,7 +80,7 @@ async def test_persisted_replay_corpus_matches_twice_from_clean_fixture_state():
     assert first_failures == []
     assert second_failures == []
     assert first == second
-    assert len(first) == 8
+    assert len(first) == 13
 
 
 def test_persisted_replay_corpus_covers_required_retrieval_matrix():
@@ -104,6 +104,12 @@ def test_persisted_replay_corpus_covers_required_retrieval_matrix():
         "offline",
         "local-routing",
         "cross-service",
+        "truth-qualified",
+        "parked",
+        "contradicted",
+        "superseded",
+        "cross-owner",
+        "source-traversal",
     } <= categories
 
 
@@ -116,6 +122,10 @@ def test_replay_snapshots_are_privacy_safe_and_structural_diff_is_readable():
     serialized_expected = json.dumps(expected_payloads)
     assert "neutral recent fixture" not in serialized_expected
     assert "stale derivative fixture" not in serialized_expected
+    assert "parked derivative fixture" not in serialized_expected
+    assert "contradicted derivative fixture" not in serialized_expected
+    assert "cross owner derivative fixture" not in serialized_expected
+    assert "source traversal unavailable fixture" not in serialized_expected
     diff = structural_diff({"ids": ["a"]}, {"ids": ["b"]})
     assert "--- expected" in diff
     assert "+++ actual" in diff
