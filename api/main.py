@@ -26,6 +26,14 @@ from services.memory_items import normalize_scores, normalize_source_refs, shape
 from services.episodes import DEFAULT_DERIVATION_VERSION as EPISODE_DERIVATION_VERSION, episode_key, normalize_json_list, normalize_json_map, normalize_source_refs as normalize_episode_source_refs, shape_episode, shape_episode_event, shape_episode_link, source_ref_hash as episode_source_ref_hash
 from services.recall import select_recall_decision, shape_recall_decision
 from services.derived_contract import CONTRACT_ADAPTERS
+from services.derivation_lifecycle import (
+    DERIVED_CLASSES,
+    inspect_row as inspect_lifecycle_row,
+    invalidate_derived,
+    load_derived_row,
+    replay_derived,
+    structural_hash,
+)
 
 from models import (
     ArtifactCompleteRequest,
@@ -71,6 +79,11 @@ from models import (
     EpisodeLinkRequest,
     EpisodeLinkResponse,
     DerivedInspectionResponse,
+    DerivedInvalidationRequest,
+    DerivedInvalidationResponse,
+    DerivedLifecycleInspection,
+    DerivedReplayRequest,
+    DerivedReplayResponse,
     MemoryDebugResponse,
     MemoryEventItem,
     MemoryItemResponse,
@@ -2014,6 +2027,105 @@ async def inspect_derived(derivative_class: str, derived_id: str, owner_id: str)
     return DerivedInspectionResponse(
         derivative_class=derivative_class,
         contract=contract,
+    )
+
+
+@app.get(
+    "/v1/internal/derived/{derivative_class}/{derived_id}/lifecycle",
+    response_model=DerivedLifecycleInspection,
+    tags=["derived-internal"],
+    dependencies=[Depends(require_api_key)],
+    summary="Inspect bounded lifecycle, rebuildability, source, and replay evidence for one derivative",
+)
+async def inspect_derived_lifecycle(derivative_class: str, derived_id: str, owner_id: str):
+    if derivative_class not in DERIVED_CLASSES:
+        raise HTTPException(status_code=404, detail="derivative class not found")
+    try:
+        object_id = UUID(derived_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="derived_id must be a UUID")
+    row = await load_derived_row(pg, derived_class=derivative_class, derived_id=object_id, owner_id=owner_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="derived object not found")
+    try:
+        return DerivedLifecycleInspection(**inspect_lifecycle_row(derived_class=derivative_class, row=row))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@app.post(
+    "/v1/internal/derived/{derivative_class}/{derived_id}/invalidate",
+    response_model=DerivedInvalidationResponse,
+    tags=["derived-internal"],
+    dependencies=[Depends(require_api_key)],
+    summary="Owner-scoped invalidation for one derived object with bounded audit evidence",
+)
+async def invalidate_derived_endpoint(derivative_class: str, derived_id: str, body: DerivedInvalidationRequest, request: Request):
+    request_id = _require_matching_request_id(request, body.request_id)
+    if derivative_class not in DERIVED_CLASSES:
+        raise HTTPException(status_code=404, detail="derivative class not found")
+    try:
+        object_id = UUID(derived_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="derived_id must be a UUID")
+    metadata = dict(body.metadata)
+    if body.source_ref:
+        metadata["source_ref_hash"] = structural_hash(body.source_ref)
+    if body.derivation_version:
+        metadata["derivation_version"] = body.derivation_version
+    try:
+        result = await invalidate_derived(
+            pg,
+            derived_class=derivative_class,
+            derived_id=object_id,
+            owner_id=body.owner_id,
+            request_id=request_id,
+            reason_code=body.reason_code,
+            metadata=metadata,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    if result is None:
+        raise HTTPException(status_code=404, detail="derived object not found")
+    return DerivedInvalidationResponse(
+        request_id=request_id,
+        changed=result["changed"],
+        inspection=DerivedLifecycleInspection(**result["inspection"]),
+    )
+
+
+@app.post(
+    "/v1/internal/derived/{derivative_class}/{derived_id}/replay",
+    response_model=DerivedReplayResponse,
+    tags=["derived-internal"],
+    dependencies=[Depends(require_api_key)],
+    summary="Deterministically replay or persist a rebuild for one derived object",
+)
+async def replay_derived_endpoint(derivative_class: str, derived_id: str, body: DerivedReplayRequest, request: Request):
+    request_id = _require_matching_request_id(request, body.request_id)
+    if derivative_class not in DERIVED_CLASSES:
+        raise HTTPException(status_code=404, detail="derivative class not found")
+    try:
+        object_id = UUID(derived_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="derived_id must be a UUID")
+    result = await replay_derived(
+        pg,
+        derived_class=derivative_class,
+        derived_id=object_id,
+        owner_id=body.owner_id,
+        request_id=request_id,
+        requested_derivation_version=body.requested_derivation_version,
+        persist_replacement=body.persist_replacement,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="derived object not found")
+    replay = result.get("replay") or {}
+    inspection = {key: value for key, value in result.items() if key != "replay"}
+    return DerivedReplayResponse(
+        request_id=request_id,
+        inspection=DerivedLifecycleInspection(**inspection),
+        replay=replay,
     )
 
 

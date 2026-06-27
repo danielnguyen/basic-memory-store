@@ -647,6 +647,50 @@ class PostgresStore:
             "updated_at": str(row[17]),
         }
 
+    async def update_proactive_suggestion_evidence(
+        self,
+        *,
+        suggestion_id: UUID,
+        owner_id: str,
+        evidence_json: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        q = """
+        UPDATE proactive_suggestions
+        SET evidence_json = %s::jsonb,
+            updated_at = now()
+        WHERE id = %s AND owner_id = %s
+        RETURNING id, owner_id, source_event_log_id, source_type, kind, status, title, body,
+                  explanation_json, evidence_json, target_surface, delivery_surface,
+                  delivery_status, delivery_external_id, delivery_error, delivered_at,
+                  created_at, updated_at;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (Json(evidence_json), suggestion_id, owner_id))
+                row = await cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "suggestion_id": str(row[0]),
+            "owner_id": row[1],
+            "source_event_log_id": str(row[2]) if row[2] else None,
+            "source_type": row[3],
+            "kind": row[4],
+            "status": row[5],
+            "title": row[6],
+            "body": row[7],
+            "explanation_json": row[8] or {},
+            "evidence_json": row[9] or {},
+            "target_surface": row[10],
+            "delivery_surface": row[11],
+            "delivery_status": row[12],
+            "delivery_external_id": row[13],
+            "delivery_error": row[14],
+            "delivered_at": str(row[15]) if row[15] else None,
+            "created_at": str(row[16]),
+            "updated_at": str(row[17]),
+        }
+
     async def record_proactive_feedback(
         self,
         *,
@@ -1452,6 +1496,40 @@ class PostgresStore:
         async with self.pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(q, (derived_text_id, owner_id))
+                row = await cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "derived_text_id": str(row[0]),
+            "artifact_id": str(row[1]),
+            "kind": row[2],
+            "language": row[3],
+            "text": row[4],
+            "derivation_params": row[5] or {},
+            "created_at": str(row[6]),
+            "owner_id": row[7],
+        }
+
+    async def update_derived_text_params(
+        self,
+        *,
+        derived_text_id: UUID,
+        owner_id: str,
+        derivation_params: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        q = """
+        UPDATE derived_text dt
+        SET derivation_params = %s::jsonb
+        FROM artifacts a
+        WHERE dt.id = %s
+          AND dt.artifact_id = a.id
+          AND a.owner_id = %s
+        RETURNING dt.id, dt.artifact_id, dt.kind, dt.language, dt.text,
+                  dt.derivation_params, dt.created_at, a.owner_id;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (Json(derivation_params), derived_text_id, owner_id))
                 row = await cur.fetchone()
         if row is None:
             return None
@@ -2822,6 +2900,160 @@ class PostgresStore:
             "links": [self._episode_link_from_row(link_row) for link_row in link_rows],
             "events": [self._episode_event_from_row(event_row) for event_row in event_rows],
         }
+
+    async def transition_episode_status(
+        self,
+        *,
+        episode_id: UUID,
+        owner_id: str,
+        new_status: str,
+        request_id: str,
+        reason_json: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        select_cols = """
+            id, owner_id, title, summary, episode_type, trigger_json,
+            outcome, significance, unresolved_json, source_refs_json,
+            source_ref_hash, episode_key, callback_candidates_json,
+            time_window_json, participants_json, status, derivation_version,
+            confidence, explanation_json, generation_trace_id, created_at, updated_at
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"SELECT {select_cols} FROM episodes WHERE id = %s AND owner_id = %s FOR UPDATE;",
+                    (episode_id, owner_id),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    return None
+                current = self._episode_from_row(row)
+                if current["status"] == new_status:
+                    return {"episode": current, "changed": False}
+                await cur.execute(
+                    f"""
+                    UPDATE episodes
+                    SET status = %s,
+                        updated_at = now()
+                    WHERE id = %s AND owner_id = %s
+                    RETURNING {select_cols};
+                    """,
+                    (new_status, episode_id, owner_id),
+                )
+                updated = await cur.fetchone()
+                await cur.execute(
+                    """
+                    INSERT INTO episode_events (episode_id, owner_id, event_type, reason_json)
+                    VALUES (%s, %s, 'updated', %s::jsonb);
+                    """,
+                    (episode_id, owner_id, Json({**reason_json, "request_id": request_id})),
+                )
+        return {"episode": self._episode_from_row(updated), "changed": True}
+
+    async def replace_episode(
+        self,
+        *,
+        old_episode_id: UUID,
+        owner_id: str,
+        request_id: str,
+        title: str,
+        summary: str,
+        episode_type: str,
+        trigger_json: dict[str, Any],
+        outcome: str | None,
+        significance: str | None,
+        unresolved_json: dict[str, Any],
+        source_refs_json: list[dict[str, Any]],
+        source_ref_hash: str,
+        episode_key: str,
+        callback_candidates_json: list[Any],
+        time_window_json: dict[str, Any],
+        participants_json: list[Any],
+        derivation_version: str,
+        confidence: float | None,
+        explanation_json: dict[str, Any],
+        generation_trace_id: str,
+    ) -> dict[str, Any]:
+        select_cols = """
+            id, owner_id, title, summary, episode_type, trigger_json,
+            outcome, significance, unresolved_json, source_refs_json,
+            source_ref_hash, episode_key, callback_candidates_json,
+            time_window_json, participants_json, status, derivation_version,
+            confidence, explanation_json, generation_trace_id, created_at, updated_at
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"SELECT {select_cols} FROM episodes WHERE id = %s AND owner_id = %s FOR UPDATE;",
+                    (old_episode_id, owner_id),
+                )
+                old_row = await cur.fetchone()
+                if old_row is None:
+                    raise KeyError("episode not found")
+                await cur.execute(
+                    f"""
+                    INSERT INTO episodes (
+                        owner_id, title, summary, episode_type, trigger_json,
+                        outcome, significance, unresolved_json, source_refs_json,
+                        source_ref_hash, episode_key, callback_candidates_json,
+                        time_window_json, participants_json, status,
+                        derivation_version, confidence, explanation_json,
+                        generation_trace_id
+                    ) VALUES (
+                        %s, %s, %s, %s, %s::jsonb,
+                        %s, %s, %s::jsonb, %s::jsonb,
+                        %s, %s, %s::jsonb,
+                        %s::jsonb, %s::jsonb, 'active',
+                        %s, %s, %s::jsonb,
+                        %s
+                    ) RETURNING {select_cols};
+                    """,
+                    (
+                        owner_id,
+                        title,
+                        summary,
+                        episode_type,
+                        Json(trigger_json),
+                        outcome,
+                        significance,
+                        Json(unresolved_json),
+                        Json(source_refs_json),
+                        source_ref_hash,
+                        episode_key,
+                        Json(callback_candidates_json),
+                        Json(time_window_json),
+                        Json(participants_json),
+                        derivation_version,
+                        confidence,
+                        Json(explanation_json),
+                        generation_trace_id,
+                    ),
+                )
+                new_row = await cur.fetchone()
+                new_id = new_row[0]
+                await cur.execute(
+                    """
+                    UPDATE episodes
+                    SET status = 'superseded',
+                        updated_at = now()
+                    WHERE id = %s AND owner_id = %s;
+                    """,
+                    (old_episode_id, owner_id),
+                )
+                await cur.execute(
+                    """
+                    INSERT INTO episode_events (episode_id, owner_id, event_type, reason_json)
+                    VALUES (%s, %s, 'updated', %s::jsonb), (%s, %s, 'created', %s::jsonb);
+                    """,
+                    (
+                        old_episode_id,
+                        owner_id,
+                        Json({"request_id": request_id, "reason_code": "rebuild_replaced", "replacement_episode_id": str(new_id)}),
+                        new_id,
+                        owner_id,
+                        Json({"request_id": request_id, "replaces_episode_id": str(old_episode_id)}),
+                    ),
+                )
+        return {"episode": self._episode_from_row(new_row)}
 
     def _recall_decision_from_row(self, row: tuple[Any, ...]) -> dict[str, Any]:
         return {
