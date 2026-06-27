@@ -87,6 +87,12 @@ class FakePG:
         self.updated_suggestions = []
         self.memory_replacements = []
         self.events = {}
+        self.memory_events = []
+        self.suggestion_evidence = {
+            "source_refs": [{"ref_type": "event_log", "ref_id": self.event_id, "support_kind": "direct"}],
+            "source_event_log_id": self.event_id,
+            "threshold": 0.05,
+        }
         self.memory_recipe_summary = "Use concise answers"
         self.memory_status = "active"
         self.episode_status = "active"
@@ -154,11 +160,7 @@ class FakePG:
             "title": "Portfolio allocation drift crossed threshold",
             "body": "Retirement allocation drifted beyond your threshold. Review the portfolio?",
             "explanation_json": {"derivation_version": "proactive-rules-v1", "rule": "portfolio_drift_review", "threshold": 0.05, "observed_drift": 0.09},
-            "evidence_json": {
-                "source_refs": [{"ref_type": "event_log", "ref_id": self.event_id, "support_kind": "direct"}],
-                "source_event_log_id": self.event_id,
-                "threshold": 0.05,
-            },
+            "evidence_json": self.suggestion_evidence,
             "target_surface": "telegram",
             "delivery_status": "not_attempted",
             "created_at": NOW,
@@ -166,6 +168,7 @@ class FakePG:
         }
 
     async def update_proactive_suggestion_evidence(self, *, suggestion_id, owner_id, evidence_json):
+        self.suggestion_evidence = evidence_json
         self.updated_suggestions.append(evidence_json)
         row = await self.get_proactive_suggestion(suggestion_id)
         return {**row, "evidence_json": evidence_json}
@@ -186,12 +189,23 @@ class FakePG:
         }
         row = _memory_row(self.memory_id, recipe=recipe)
         row["status"] = self.memory_status
-        return {"memory": row, "events": []}
+        return {"memory": row, "events": self.memory_events}
 
     async def transition_memory_item(self, **kwargs):
         row = _memory_row(str(kwargs["memory_id"]), recipe=None)
         row["status"] = kwargs["new_status"]
         self.memory_status = kwargs["new_status"]
+        event = {
+            "event_type": "state_changed",
+            "reason_json": {
+                "request_id": kwargs["request_id"],
+                "reason_code": kwargs["reason_code"],
+                "previous_status": "active",
+                "new_status": kwargs["new_status"],
+                "reason_metadata": kwargs["reason_metadata"],
+            },
+        }
+        self.memory_events.append(event)
         return {"memory": row, "changed": True, "events_appended": ["state_changed"]}
 
     async def promote_memory_item(self, **kwargs):
@@ -331,6 +345,49 @@ async def test_persistable_memory_rebuild_is_truthfully_unsupported_and_non_acti
 
 
 @pytest.mark.asyncio
+async def test_unsupported_memory_replay_retry_uses_transition_terminal_metadata(tmp_path):
+    pg = FakePG(tmp_path)
+    first = await replay_derived(
+        pg,
+        derived_class="memory_item",
+        derived_id=uuid.UUID(pg.memory_id),
+        owner_id="owner",
+        request_id="rid-rebuild",
+        requested_derivation_version="memory-promotion-v1",
+        persist_replacement=True,
+    )
+    event_count = len(pg.memory_events)
+    retry = await replay_derived(
+        pg,
+        derived_class="memory_item",
+        derived_id=uuid.UUID(pg.memory_id),
+        owner_id="owner",
+        request_id="rid-rebuild",
+        requested_derivation_version="memory-promotion-v1",
+        persist_replacement=True,
+    )
+    distinct = await replay_derived(
+        pg,
+        derived_class="memory_item",
+        derived_id=uuid.UUID(pg.memory_id),
+        owner_id="owner",
+        request_id="rid-rebuild-distinct",
+        requested_derivation_version="memory-promotion-v1",
+        persist_replacement=True,
+    )
+
+    assert first["replay"]["result"] == "unsupported"
+    assert first["replay"]["failure_reason"] == "caller_authored_no_deterministic_recipe"
+    assert retry["replay"]["result"] == "unsupported"
+    assert retry["replay"]["failure_reason"] == "caller_authored_no_deterministic_recipe"
+    assert retry["replay"]["idempotent_replay"] is True
+    assert len(pg.memory_events) == event_count
+    assert pg.memory_status == "invalidated"
+    assert distinct["replay"]["result"] == "unsupported"
+    assert pg.memory_status == "invalidated"
+
+
+@pytest.mark.asyncio
 async def test_replay_rejects_unsupported_requested_version_before_mutation(tmp_path):
     pg = FakePG(tmp_path)
     result = await replay_derived(
@@ -383,9 +440,11 @@ async def test_proactive_replay_only_does_not_create_delivery_side_effects(tmp_p
 
     assert result["rebuildability"] == "replay_only"
     assert result["replay"]["result"] == "identical"
+    assert result["contract"]["status"] == "pending"
+    assert result["contract"]["effective_status"] == "active"
+    assert result["lifecycle_status"] == "active"
     assert pg.updated_suggestions
     assert (await pg.get_proactive_suggestion(uuid.UUID(pg.suggestion_id)))["delivery_status"] == "not_attempted"
-
 
 @pytest.mark.asyncio
 async def test_proactive_replay_is_reevaluated_from_source_event(tmp_path):
@@ -411,3 +470,35 @@ async def test_proactive_replay_is_reevaluated_from_source_event(tmp_path):
     )
 
     assert before["replay"]["candidate"]["normalized_output_hash"] != after["replay"]["candidate"]["normalized_output_hash"]
+
+
+@pytest.mark.asyncio
+async def test_proactive_contract_without_lifecycle_preserves_compatibility(tmp_path):
+    pg = FakePG(tmp_path)
+    row = await pg.get_proactive_suggestion(uuid.UUID(pg.suggestion_id))
+    inspection = inspect_row(derived_class="proactive_suggestion", row=row)
+
+    assert inspection["contract"]["status"] == "pending"
+    assert inspection["contract"]["effective_status"] is None
+    assert inspection["lifecycle_status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_proactive_changed_replay_projects_lifecycle_effective_status(tmp_path):
+    pg = FakePG(tmp_path)
+    pg.event_id = str(uuid.uuid4())
+    result = await replay_derived(
+        pg,
+        derived_class="proactive_suggestion",
+        derived_id=uuid.UUID(pg.suggestion_id),
+        owner_id="owner",
+        request_id="rid-proactive-changed",
+        requested_derivation_version=None,
+        persist_replacement=True,
+    )
+
+    assert result["replay"]["result"] == "unsupported"
+    assert result["contract"]["status"] == "pending"
+    assert result["contract"]["effective_status"] == "invalidated"
+    assert result["lifecycle_status"] == "invalidated"
+    assert "payload_json" not in result["contract"]

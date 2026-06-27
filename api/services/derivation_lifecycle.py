@@ -100,15 +100,33 @@ def lifecycle_events_for(derived_class: str, row: dict[str, Any]) -> list[dict[s
     return [event for event in row.get("_events") or [] if isinstance(event, dict)]
 
 
+def normalized_terminal_reason(event: dict[str, Any]) -> dict[str, Any]:
+    reason = event.get("reason_json") if isinstance(event.get("reason_json"), dict) else event
+    normalized = dict(reason)
+    metadata = normalized.get("reason_metadata")
+    if not isinstance(metadata, dict):
+        metadata = normalized.get("metadata")
+    if isinstance(metadata, dict):
+        if normalized.get("terminal_result") is None and metadata.get("terminal_result") is not None:
+            normalized["terminal_result"] = metadata.get("terminal_result")
+        if normalized.get("failure_reason") is None and metadata.get("failure_reason") is not None:
+            normalized["failure_reason"] = metadata.get("failure_reason")
+        if normalized.get("replacement_id") is None and metadata.get("replacement_id") is not None:
+            normalized["replacement_id"] = metadata.get("replacement_id")
+    if normalized.get("event_type") is None and event.get("event_type") is not None:
+        normalized["event_type"] = event.get("event_type")
+    return normalized
+
+
 def terminal_for_request(derived_class: str, row: dict[str, Any], request_id: str) -> dict[str, Any] | None:
     for event in reversed(lifecycle_events_for(derived_class, row)):
-        reason = event.get("reason_json") if isinstance(event.get("reason_json"), dict) else event
+        reason = normalized_terminal_reason(event)
         if reason.get("request_id") != request_id:
             continue
         result = reason.get("result") or reason.get("terminal_result")
         if result in TERMINAL_RESULTS:
             return reason
-        if event.get("event_type") in {"rebuild_terminal", "terminal"}:
+        if reason.get("event_type") in {"rebuild_terminal", "terminal"}:
             return reason
     return None
 
@@ -331,7 +349,7 @@ def inspect_row(*, derived_class: str, row: dict[str, Any]) -> dict[str, Any]:
         "contract": contract,
         "rebuildability": classification["classification"],
         "rebuildability_reason": classification["reason"],
-        "lifecycle_status": lifecycle.get("status") or contract.get("status"),
+        "lifecycle_status": lifecycle.get("status") or contract.get("effective_status") or contract.get("status"),
         "invalidation": {
             "reason": lifecycle.get("invalidated_reason"),
             "request_id": lifecycle.get("last_request_id"),

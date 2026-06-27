@@ -280,10 +280,54 @@ def test_real_creation_paths_storage_reopen_retrieval_and_owner_isolation(
             {"ref_type": "event_log", "ref_id": event_log_id, "support_kind": "direct"}
         ]
         assert contracts["proactive_suggestion"]["generation_trace_id"] == "rid-proactive"
+        assert contracts["proactive_suggestion"]["status"] == "pending"
+        assert contracts["proactive_suggestion"]["effective_status"] is None
         assert contracts["memory_item"]["confidence"] == 0.8
         assert contracts["memory_item"]["generation_trace_id"] == "trace-memory"
         assert contracts["episode"]["confidence"] == 0.7
         assert contracts["episode"]["generation_trace_id"] == "trace-episode"
+
+        proactive_identical = client.post(
+            f"/v1/internal/derived/proactive_suggestion/{proactive_id}/replay",
+            headers=_headers("rid-proactive-identical"),
+            json={
+                "request_id": "rid-proactive-identical",
+                "owner_id": "owner-a",
+                "expected_current_derivation_version": "proactive-rules-v1",
+                "persist_replacement": True,
+            },
+        )
+        assert proactive_identical.status_code == 200, proactive_identical.text
+        assert proactive_identical.json()["replay"]["result"] == "identical"
+        assert proactive_identical.json()["inspection"]["contract"]["status"] == "pending"
+        assert proactive_identical.json()["inspection"]["contract"]["effective_status"] == "active"
+        assert proactive_identical.json()["inspection"]["lifecycle_status"] == "active"
+
+        with psycopg.connect(postgres_database) as conn:
+            conn.execute(
+                """
+                UPDATE event_ingest_log
+                SET payload_json = payload_json || '{"account": "taxable"}'::jsonb
+                WHERE id = %s
+                """,
+                (event_log_id,),
+            )
+        proactive_changed = client.post(
+            f"/v1/internal/derived/proactive_suggestion/{proactive_id}/replay",
+            headers=_headers("rid-proactive-changed"),
+            json={
+                "request_id": "rid-proactive-changed",
+                "owner_id": "owner-a",
+                "expected_current_derivation_version": "proactive-rules-v1",
+                "persist_replacement": True,
+            },
+        )
+        assert proactive_changed.status_code == 200, proactive_changed.text
+        assert proactive_changed.json()["replay"]["result"] == "unsupported"
+        assert proactive_changed.json()["inspection"]["contract"]["status"] == "pending"
+        assert proactive_changed.json()["inspection"]["contract"]["effective_status"] == "invalidated"
+        assert proactive_changed.json()["inspection"]["lifecycle_status"] == "invalidated"
+        assert "evidence_json" not in proactive_changed.json()["inspection"]["contract"]
 
         retrieval = client.post(
             f"/v2/conversations/{conversation_id}/retrieve",
@@ -543,6 +587,45 @@ def test_real_creation_paths_storage_reopen_retrieval_and_owner_isolation(
         assert memory_replay.json()["replay"]["failure_reason"] == "caller_authored_no_deterministic_recipe"
         assert memory_replay.json()["inspection"]["lifecycle_status"] == "invalidated"
         assert memory_replay.json()["inspection"]["contract"]["status"] == "invalidated"
+        with psycopg.connect(postgres_database) as conn:
+            memory_event_count = conn.execute(
+                "SELECT count(*) FROM memory_events WHERE memory_id = %s",
+                (unsupported_memory_id,),
+            ).fetchone()[0]
+        retry_memory_replay = client.post(
+            f"/v1/internal/derived/memory_item/{unsupported_memory_id}/replay",
+            headers=_headers("rid-memory-unsupported-replay"),
+            json={
+                "request_id": "rid-memory-unsupported-replay",
+                "owner_id": "owner-a",
+                "requested_derivation_version": "memory-promotion-v1",
+                "persist_replacement": True,
+            },
+        )
+        assert retry_memory_replay.status_code == 200, retry_memory_replay.text
+        assert retry_memory_replay.json()["replay"]["result"] == "unsupported"
+        assert retry_memory_replay.json()["replay"]["failure_reason"] == "caller_authored_no_deterministic_recipe"
+        assert retry_memory_replay.json()["replay"]["idempotent_replay"] is True
+        assert retry_memory_replay.json()["inspection"]["contract"]["status"] == "invalidated"
+        with psycopg.connect(postgres_database) as conn:
+            retry_memory_event_count = conn.execute(
+                "SELECT count(*) FROM memory_events WHERE memory_id = %s",
+                (unsupported_memory_id,),
+            ).fetchone()[0]
+        assert retry_memory_event_count == memory_event_count
+        distinct_memory_replay = client.post(
+            f"/v1/internal/derived/memory_item/{unsupported_memory_id}/replay",
+            headers=_headers("rid-memory-unsupported-distinct"),
+            json={
+                "request_id": "rid-memory-unsupported-distinct",
+                "owner_id": "owner-a",
+                "requested_derivation_version": "memory-promotion-v1",
+                "persist_replacement": True,
+            },
+        )
+        assert distinct_memory_replay.status_code == 200, distinct_memory_replay.text
+        assert distinct_memory_replay.json()["replay"]["result"] == "unsupported"
+        assert distinct_memory_replay.json()["inspection"]["contract"]["status"] == "invalidated"
         cross_owner_memory_replay = client.post(
             f"/v1/internal/derived/memory_item/{unsupported_memory_id}/replay",
             headers=_headers("rid-memory-cross-owner-replay"),
@@ -597,6 +680,9 @@ def test_real_creation_paths_storage_reopen_retrieval_and_owner_isolation(
             persisted = _inspect(reopened_client, derivative_class, derived_id)
             assert persisted.status_code == 200, persisted.text
             assert persisted.json()["contract"]["source_refs"]
+            if derivative_class == "proactive_suggestion":
+                assert persisted.json()["contract"]["status"] == "pending"
+                assert persisted.json()["contract"]["effective_status"] == "invalidated"
         reopened_lifecycle = reopened_client.get(
             f"/v1/internal/derived/derived_text/{derived_text_id}/lifecycle",
             headers=_headers(),
