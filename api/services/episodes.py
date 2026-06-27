@@ -4,10 +4,11 @@ from hashlib import sha256
 import json
 from typing import Any
 
+from services.derivation_versions import EPISODE_DERIVATION_VERSION
 from services.memory_items import normalize_source_refs, source_ref_hash
 
 
-DEFAULT_DERIVATION_VERSION = "r21-m0-v1"
+DEFAULT_DERIVATION_VERSION = EPISODE_DERIVATION_VERSION
 
 
 def _compact_json(value: Any) -> str:

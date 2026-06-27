@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 from psycopg_pool import AsyncConnectionPool
 from psycopg.types.json import Json
 
+from services.derivation_versions import EPISODE_DERIVATION_VERSION, MEMORY_ITEM_DERIVATION_VERSION
 from services.memory_lifecycle import bounded_transition_reason
 
 
@@ -2341,7 +2342,7 @@ class PostgresStore:
         request_id: str,
         reinforce: bool,
         supersedes_memory_id: UUID | None,
-        derivation_version: str = "r20-mvp-v1",
+        derivation_version: str = MEMORY_ITEM_DERIVATION_VERSION,
     ) -> dict[str, Any]:
         select_cols = """
             id, owner_id, memory_type, summary, source_refs_json, source_ref_hash,
@@ -2983,7 +2984,7 @@ class PostgresStore:
         explanation_json: dict[str, Any],
         generation_trace_id: str | None,
         request_id: str,
-        derivation_version: str = "r21-m0-v1",
+        derivation_version: str = EPISODE_DERIVATION_VERSION,
     ) -> dict[str, Any]:
         select_cols = """
             id, owner_id, title, summary, episode_type, trigger_json,

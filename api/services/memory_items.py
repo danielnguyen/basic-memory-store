@@ -6,8 +6,9 @@ from typing import Any
 
 from services.memory_lifecycle import effective_freshness_state
 from services.derived_contract import normalize_contract_source_refs
+from services.derivation_versions import MEMORY_ITEM_DERIVATION_VERSION
 
-DEFAULT_DERIVATION_VERSION = "r20-mvp-v1"
+DEFAULT_DERIVATION_VERSION = MEMORY_ITEM_DERIVATION_VERSION
 
 
 def _compact_json(value: Any) -> str:

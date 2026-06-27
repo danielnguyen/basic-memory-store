@@ -10,6 +10,7 @@ os.environ.setdefault("QDRANT_URL", "http://localhost:6333")
 os.environ.setdefault("LITELLM_BASE_URL", "http://localhost:4000")
 
 import main as main_module
+from services.derivation_versions import EPISODE_DERIVATION_VERSION
 
 
 class FakePG:
@@ -44,7 +45,7 @@ class FakePG:
                 "time_window_json": kwargs["time_window_json"],
                 "participants_json": kwargs["participants_json"],
                 "status": "active",
-                "derivation_version": "r21-m0-v1",
+                "derivation_version": kwargs["derivation_version"],
                 "confidence": kwargs["confidence"],
                 "explanation_json": kwargs["explanation_json"],
                 "generation_trace_id": kwargs["generation_trace_id"],
@@ -84,12 +85,12 @@ class FakePG:
             "episode": {
                 "episode_id": str(episode_id),
                 "owner_id": "owner",
-                "title": "Cluster 9A completion",
-                "summary": "Manual capture of the Cluster 9A milestone.",
+                "title": "Memory promotion completed",
+                "summary": "Manual capture of the memory-promotion milestone.",
                 "episode_type": "milestone",
                 "trigger_json": {"kind": "manual"},
                 "outcome": "completed",
-                "significance": "moves memory work into R21 planning",
+                "significance": "moves memory work into episode planning",
                 "unresolved_json": {},
                 "source_refs_json": [{"ref_type": "memory_item", "ref_id": "mem-1", "support_kind": "direct"}],
                 "source_ref_hash": "hash",
@@ -98,7 +99,7 @@ class FakePG:
                 "time_window_json": {"start": "2026-01-01"},
                 "participants_json": ["operator"],
                 "status": "active",
-                "derivation_version": "r21-m0-v1",
+                "derivation_version": EPISODE_DERIVATION_VERSION,
                 "confidence": 0.8,
                 "explanation_json": {"rationale": "manual incident capture"},
                 "generation_trace_id": "rid-1",
@@ -153,8 +154,8 @@ def test_create_episode_normalizes_refs_and_returns_update_shape(monkeypatch):
         body = {
             "request_id": "rid-1",
             "owner_id": "owner",
-            "title": "Cluster 9A completion",
-            "summary": "Manual capture of the Cluster 9A milestone.",
+            "title": "Memory promotion completed",
+            "summary": "Manual capture of the memory-promotion milestone.",
             "episode_type": "milestone",
             "source_refs": [
                 {"ref_type": "memory_item", "ref_id": "mem-2"},
@@ -177,7 +178,9 @@ def test_create_episode_normalizes_refs_and_returns_update_shape(monkeypatch):
         out = response.json()
         assert out["created"] is False
         assert out["updated"] is True
+        assert out["episode"]["derivation_version"] == EPISODE_DERIVATION_VERSION
         call = pg.episode_calls[0]
+        assert call["derivation_version"] == EPISODE_DERIVATION_VERSION
         assert [ref["ref_id"] for ref in call["source_refs_json"]] == ["mem-1", "mem-2"]
         assert len(call["source_ref_hash"]) == 64
         assert len(call["episode_key"]) == 64

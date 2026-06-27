@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from services.derivation_versions import EPISODE_DERIVATION_VERSION, MEMORY_ITEM_DERIVATION_VERSION
+
 
 ACTIVE_STATUS = "active"
 DEFAULT_DERIVATION_VERSION = "v1"
@@ -188,7 +190,7 @@ def memory_item_contract_view(row: dict[str, Any]) -> dict[str, Any]:
         derivation_type=row.get("memory_type") or "memory_item",
         source_refs=row.get("source_refs_json"),
         derivation_version=row.get("derivation_version"),
-        default_derivation_version="r20-mvp-v1",
+        default_derivation_version=MEMORY_ITEM_DERIVATION_VERSION,
         status=row.get("status"),
         effective_status=row.get("freshness_state"),
         confidence=row.get("confidence"),
@@ -205,7 +207,7 @@ def episode_contract_view(row: dict[str, Any]) -> dict[str, Any]:
         derivation_type=row.get("episode_type") or "episode",
         source_refs=row.get("source_refs_json"),
         derivation_version=row.get("derivation_version"),
-        default_derivation_version="r21-m0-v1",
+        default_derivation_version=EPISODE_DERIVATION_VERSION,
         status=row.get("status"),
         confidence=row.get("confidence"),
         explanation=explanation.get("rationale") or explanation.get("explanation"),

@@ -13,6 +13,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 import pytest
 import yaml
 
+from services.derivation_versions import EPISODE_DERIVATION_VERSION, MEMORY_ITEM_DERIVATION_VERSION
 from tools import schema_migrations
 
 
@@ -220,6 +221,23 @@ def ledger_rows(dsn: str) -> list[tuple[str, str]]:
         ).fetchall()
 
 
+def column_default(dsn: str, table_name: str, column_name: str) -> str:
+    with psycopg.connect(dsn) as conn:
+        return conn.execute(
+            """
+            SELECT pg_get_expr(ad.adbin, ad.adrelid)
+            FROM pg_attrdef ad
+            JOIN pg_class cls ON cls.oid = ad.adrelid
+            JOIN pg_namespace nsp ON nsp.oid = cls.relnamespace
+            JOIN pg_attribute att ON att.attrelid = cls.oid AND att.attnum = ad.adnum
+            WHERE nsp.nspname = 'public'
+              AND cls.relname = %s
+              AND att.attname = %s
+            """,
+            (table_name, column_name),
+        ).fetchone()[0]
+
+
 def seed_baseline_without_ledger(dsn: str, db_dir: Path) -> None:
     execute_sql(dsn, (db_dir / "baseline.sql").read_text(encoding="utf-8"))
 
@@ -239,6 +257,15 @@ def seed_manual_recent_shape(dsn: str, db_dir: Path) -> None:
             / "migrations"
             / "managed"
             / "20260625120000_memory_lifecycle.sql"
+        ).read_text(encoding="utf-8"),
+    )
+    execute_sql(
+        dsn,
+        (
+            SOURCE_DB_DIR
+            / "migrations"
+            / "managed"
+            / "20260627120000_derivation_version_cleanup.sql"
         ).read_text(encoding="utf-8"),
     )
 
@@ -407,6 +434,33 @@ def test_empty_database_installs_baseline_and_records_it(pg_database: str, temp_
         "initiative_feedback",
     ):
         assert table_exists(pg_database, table_name)
+    assert column_default(pg_database, "memory_items", "derivation_version") == f"'{MEMORY_ITEM_DERIVATION_VERSION}'::text"
+    assert column_default(pg_database, "episodes", "derivation_version") == f"'{EPISODE_DERIVATION_VERSION}'::text"
+    with psycopg.connect(pg_database) as conn:
+        conn.execute(
+            """
+            INSERT INTO memory_items (owner_id, memory_type, summary, source_ref_hash, promotion_state, status)
+            VALUES ('owner-clean-install', 'preference', 'clean default memory', 'clean-memory-hash', 'promoted', 'active')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO episodes (
+              owner_id, title, summary, episode_type, source_ref_hash, episode_key, status
+            ) VALUES (
+              'owner-clean-install', 'Clean default episode', 'clean default episode', 'milestone',
+              'clean-episode-hash', 'clean-episode-key', 'active'
+            )
+            """
+        )
+        defaults = conn.execute(
+            """
+            SELECT
+              (SELECT derivation_version FROM memory_items WHERE summary = 'clean default memory'),
+              (SELECT derivation_version FROM episodes WHERE title = 'Clean default episode')
+            """
+        ).fetchone()
+    assert defaults == (MEMORY_ITEM_DERIVATION_VERSION, EPISODE_DERIVATION_VERSION)
 
 
 def test_rerunning_upgrade_is_a_no_op(pg_database: str, temp_db_dir: Path) -> None:
@@ -781,6 +835,263 @@ def test_prior_baseline_upgrades_lifecycle_without_rewriting_rows_or_events(
     assert event[0] == event_id
     assert event[1:3] == ("created", {"request_id": "preserved"})
     assert str(event[3]) == "2026-06-01 00:00:01+00:00"
+
+
+def test_derivation_version_cleanup_migrates_only_exact_legacy_values_and_defaults(
+    pg_database: str, temp_db_dir: Path
+) -> None:
+    cleanup_migration = SOURCE_DB_DIR / "migrations" / "managed" / "20260627120000_derivation_version_cleanup.sql"
+    for migration in sorted((SOURCE_DB_DIR / "migrations" / "managed").glob("*.sql")):
+        shutil.copy2(migration, temp_db_dir / "migrations" / "managed" / migration.name)
+
+    baseline_path = temp_db_dir / "baseline.sql"
+    baseline_path.write_text(
+        baseline_path.read_text(encoding="utf-8")
+        .replace(MEMORY_ITEM_DERIVATION_VERSION, "r20-mvp-v1")
+        .replace(EPISODE_DERIVATION_VERSION, "r21-m0-v1"),
+        encoding="utf-8",
+    )
+    execute_sql(pg_database, baseline_path.read_text(encoding="utf-8"))
+
+    memory_legacy_id = uuid4()
+    memory_neutral_id = uuid4()
+    memory_custom_id = uuid4()
+    memory_replacement_id = uuid4()
+    memory_event_id = uuid4()
+    episode_legacy_id = uuid4()
+    episode_neutral_id = uuid4()
+    episode_custom_id = uuid4()
+    episode_link_id = uuid4()
+    episode_event_id = uuid4()
+
+    with psycopg.connect(pg_database) as conn:
+        schema_migrations.create_ledger_table(conn)
+        conn.execute(
+            """
+            INSERT INTO schema_migrations (version, kind, checksum_sha256, execution_ms)
+            VALUES (%s, 'baseline', %s, 1),
+                   ('20260624150000', 'migration', %s, 1),
+                   ('20260625120000', 'migration', %s, 1)
+            """,
+            (
+                schema_migrations.BASELINE_VERSION,
+                next(iter(schema_migrations.COMPATIBLE_BASELINE_CHECKSUMS)),
+                schema_migrations.compute_sha256(SOURCE_DB_DIR / "migrations" / "managed" / "20260624150000_trace_summary_fields.sql"),
+                schema_migrations.compute_sha256(SOURCE_DB_DIR / "migrations" / "managed" / "20260625120000_memory_lifecycle.sql"),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO memory_items (
+              id, owner_id, memory_type, summary, source_refs_json, source_ref_hash,
+              scores_json, promotion_state, status, supersedes_memory_id,
+              superseded_by_memory_id, last_reinforced_at, expires_at, derivation_version,
+              confidence, explanation_json, generation_trace_id, created_at, updated_at
+            ) VALUES
+              (%s, 'owner-cleanup', 'preference', 'legacy memory',
+               '[{"ref_type":"message","ref_id":"msg-legacy","support_kind":"direct"}]'::jsonb,
+               'hash-legacy', '{"utility":0.9}'::jsonb, 'promoted', 'active',
+               NULL, %s, '2026-06-01T00:00:00Z', '2027-06-01T00:00:00Z',
+               'r20-mvp-v1', 0.9, '{"rationale":"legacy preserved"}'::jsonb,
+               'trace-memory-legacy', '2026-06-01T00:00:01Z', '2026-06-01T00:00:02Z'),
+              (%s, 'owner-cleanup', 'preference', 'neutral memory',
+               '[{"ref_type":"message","ref_id":"msg-neutral","support_kind":"direct"}]'::jsonb,
+               'hash-neutral', '{"utility":0.7}'::jsonb, 'promoted', 'active',
+               NULL, NULL, NULL, NULL, %s, 0.7, '{"rationale":"neutral"}'::jsonb,
+               'trace-memory-neutral', '2026-06-02T00:00:01Z', '2026-06-02T00:00:02Z'),
+              (%s, 'owner-cleanup', 'preference', 'custom memory',
+               '[{"ref_type":"message","ref_id":"msg-custom","support_kind":"direct"}]'::jsonb,
+               'hash-custom', '{"utility":0.5}'::jsonb, 'promoted', 'active',
+               NULL, NULL, NULL, NULL, 'memory-promotion-custom-v7', 0.5,
+               '{"rationale":"custom"}'::jsonb, 'trace-memory-custom',
+               '2026-06-03T00:00:01Z', '2026-06-03T00:00:02Z'),
+              (%s, 'owner-cleanup', 'preference', 'replacement memory',
+               '[{"ref_type":"message","ref_id":"msg-replacement","support_kind":"direct"}]'::jsonb,
+               'hash-replacement', '{}'::jsonb, 'promoted', 'superseded',
+               %s, NULL, NULL, NULL, 'memory-promotion-custom-v8', NULL,
+               '{}'::jsonb, NULL, '2026-06-04T00:00:01Z', '2026-06-04T00:00:02Z')
+            """,
+            (
+                memory_legacy_id,
+                memory_replacement_id,
+                memory_neutral_id,
+                MEMORY_ITEM_DERIVATION_VERSION,
+                memory_custom_id,
+                memory_replacement_id,
+                memory_legacy_id,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO memory_events (id, memory_id, owner_id, event_type, reason_json, created_at)
+            VALUES (%s, %s, 'owner-cleanup', 'created',
+                    '{"request_id":"trace-memory-legacy","payload":"r20-mvp-v1 audit history"}'::jsonb,
+                    '2026-06-01T00:00:03Z')
+            """,
+            (memory_event_id, memory_legacy_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO episodes (
+              id, owner_id, title, summary, episode_type, trigger_json, outcome,
+              significance, unresolved_json, source_refs_json, source_ref_hash,
+              episode_key, callback_candidates_json, time_window_json, participants_json,
+              status, derivation_version, confidence, explanation_json,
+              generation_trace_id, created_at, updated_at
+            ) VALUES
+              (%s, 'owner-cleanup', 'Legacy episode', 'legacy episode summary',
+               'milestone', '{"kind":"manual"}'::jsonb, 'completed', 'notable',
+               '{}'::jsonb, '[{"ref_type":"memory_item","ref_id":"mem-legacy","support_kind":"direct"}]'::jsonb,
+               'episode-hash-legacy', 'episode-key-legacy', '[]'::jsonb,
+               '{"start":"2026-06-01T00:00:00Z","end":"2026-06-01T01:00:00Z"}'::jsonb,
+               '["operator"]'::jsonb, 'active', 'r21-m0-v1', 0.8,
+               '{"rationale":"legacy episode"}'::jsonb, 'trace-episode-legacy',
+               '2026-06-01T01:00:01Z', '2026-06-01T01:00:02Z'),
+              (%s, 'owner-cleanup', 'Neutral episode', 'neutral episode summary',
+               'milestone', '{"kind":"manual"}'::jsonb, 'completed', 'notable',
+               '{}'::jsonb, '[{"ref_type":"memory_item","ref_id":"mem-neutral","support_kind":"direct"}]'::jsonb,
+               'episode-hash-neutral', 'episode-key-neutral', '[]'::jsonb,
+               '{}'::jsonb, '[]'::jsonb, 'active', %s, 0.7,
+               '{"rationale":"neutral episode"}'::jsonb, 'trace-episode-neutral',
+               '2026-06-02T01:00:01Z', '2026-06-02T01:00:02Z'),
+              (%s, 'owner-cleanup', 'Custom episode', 'custom episode summary',
+               'milestone', '{"kind":"manual"}'::jsonb, 'completed', 'notable',
+               '{}'::jsonb, '[{"ref_type":"memory_item","ref_id":"mem-custom","support_kind":"direct"}]'::jsonb,
+               'episode-hash-custom', 'episode-key-custom', '[]'::jsonb,
+               '{}'::jsonb, '[]'::jsonb, 'active', 'episode-construction-custom-v4', 0.6,
+               '{"rationale":"custom episode"}'::jsonb, 'trace-episode-custom',
+               '2026-06-03T01:00:01Z', '2026-06-03T01:00:02Z')
+            """,
+            (episode_legacy_id, episode_neutral_id, EPISODE_DERIVATION_VERSION, episode_custom_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO episode_links (id, episode_id, owner_id, ref_type, ref_id, relationship, created_at)
+            VALUES (%s, %s, 'owner-cleanup', 'memory_item', 'mem-legacy', 'supports',
+                    '2026-06-01T01:00:03Z')
+            """,
+            (episode_link_id, episode_legacy_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO episode_events (id, episode_id, owner_id, event_type, reason_json, created_at)
+            VALUES (%s, %s, 'owner-cleanup', 'created',
+                    '{"request_id":"trace-episode-legacy","payload":"r21-m0-v1 audit history"}'::jsonb,
+                    '2026-06-01T01:00:04Z')
+            """,
+            (episode_event_id, episode_legacy_id),
+        )
+        conn.commit()
+
+    payload = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
+    repeated = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
+
+    assert payload["applied_migrations"] == [cleanup_migration.name]
+    assert repeated["applied_migrations"] == []
+    assert column_default(pg_database, "memory_items", "derivation_version") == f"'{MEMORY_ITEM_DERIVATION_VERSION}'::text"
+    assert column_default(pg_database, "episodes", "derivation_version") == f"'{EPISODE_DERIVATION_VERSION}'::text"
+
+    with psycopg.connect(pg_database) as conn:
+        memory_rows = conn.execute(
+            """
+            SELECT id, owner_id, source_refs_json, source_ref_hash, scores_json,
+                   superseded_by_memory_id, supersedes_memory_id, last_reinforced_at,
+                   expires_at, derivation_version, confidence, explanation_json,
+                   generation_trace_id, created_at, updated_at
+            FROM memory_items
+            WHERE id = ANY(%s)
+            ORDER BY summary
+            """,
+            ([memory_custom_id, memory_legacy_id, memory_neutral_id, memory_replacement_id],),
+        ).fetchall()
+        episode_rows = conn.execute(
+            """
+            SELECT id, owner_id, source_refs_json, source_ref_hash, episode_key,
+                   time_window_json, participants_json, derivation_version,
+                   confidence, explanation_json, generation_trace_id, created_at, updated_at
+            FROM episodes
+            WHERE id = ANY(%s)
+            ORDER BY title
+            """,
+            ([episode_custom_id, episode_legacy_id, episode_neutral_id],),
+        ).fetchall()
+        memory_events = conn.execute(
+            "SELECT id, reason_json, created_at FROM memory_events WHERE memory_id = %s",
+            (memory_legacy_id,),
+        ).fetchall()
+        episode_links = conn.execute(
+            "SELECT id, ref_type, ref_id, relationship, created_at FROM episode_links WHERE episode_id = %s",
+            (episode_legacy_id,),
+        ).fetchall()
+        episode_events = conn.execute(
+            "SELECT id, reason_json, created_at FROM episode_events WHERE episode_id = %s",
+            (episode_legacy_id,),
+        ).fetchall()
+        conn.execute(
+            """
+            INSERT INTO memory_items (owner_id, memory_type, summary, source_ref_hash, promotion_state, status)
+            VALUES ('owner-cleanup', 'preference', 'new default memory', 'hash-new-memory', 'promoted', 'active')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO episodes (
+              owner_id, title, summary, episode_type, source_ref_hash, episode_key, status
+            ) VALUES (
+              'owner-cleanup', 'New default episode', 'new default episode', 'milestone',
+              'episode-hash-new', 'episode-key-new', 'active'
+            )
+            """
+        )
+        new_versions = conn.execute(
+            """
+            SELECT
+              (SELECT derivation_version FROM memory_items WHERE summary = 'new default memory'),
+              (SELECT derivation_version FROM episodes WHERE title = 'New default episode')
+            """
+        ).fetchone()
+
+    memory_by_id = {row[0]: row for row in memory_rows}
+    assert memory_by_id[memory_legacy_id][9] == MEMORY_ITEM_DERIVATION_VERSION
+    assert memory_by_id[memory_neutral_id][9] == MEMORY_ITEM_DERIVATION_VERSION
+    assert memory_by_id[memory_custom_id][9] == "memory-promotion-custom-v7"
+    assert memory_by_id[memory_replacement_id][9] == "memory-promotion-custom-v8"
+    assert memory_by_id[memory_legacy_id][1:7] == (
+        "owner-cleanup",
+        [{"ref_type": "message", "ref_id": "msg-legacy", "support_kind": "direct"}],
+        "hash-legacy",
+        {"utility": 0.9},
+        memory_replacement_id,
+        None,
+    )
+    assert str(memory_by_id[memory_legacy_id][7]) == "2026-06-01 00:00:00+00:00"
+    assert str(memory_by_id[memory_legacy_id][8]) == "2027-06-01 00:00:00+00:00"
+    assert memory_by_id[memory_legacy_id][10:13] == (0.9, {"rationale": "legacy preserved"}, "trace-memory-legacy")
+    assert str(memory_by_id[memory_legacy_id][13]) == "2026-06-01 00:00:01+00:00"
+    assert str(memory_by_id[memory_legacy_id][14]) == "2026-06-01 00:00:02+00:00"
+
+    episode_by_id = {row[0]: row for row in episode_rows}
+    assert episode_by_id[episode_legacy_id][7] == EPISODE_DERIVATION_VERSION
+    assert episode_by_id[episode_neutral_id][7] == EPISODE_DERIVATION_VERSION
+    assert episode_by_id[episode_custom_id][7] == "episode-construction-custom-v4"
+    assert episode_by_id[episode_legacy_id][1:7] == (
+        "owner-cleanup",
+        [{"ref_type": "memory_item", "ref_id": "mem-legacy", "support_kind": "direct"}],
+        "episode-hash-legacy",
+        "episode-key-legacy",
+        {"start": "2026-06-01T00:00:00Z", "end": "2026-06-01T01:00:00Z"},
+        ["operator"],
+    )
+    assert episode_by_id[episode_legacy_id][8:11] == (0.8, {"rationale": "legacy episode"}, "trace-episode-legacy")
+    assert str(episode_by_id[episode_legacy_id][11]) == "2026-06-01 01:00:01+00:00"
+    assert str(episode_by_id[episode_legacy_id][12]) == "2026-06-01 01:00:02+00:00"
+    assert memory_events == [(memory_event_id, {"request_id": "trace-memory-legacy", "payload": "r20-mvp-v1 audit history"}, memory_events[0][2])]
+    assert str(memory_events[0][2]) == "2026-06-01 00:00:03+00:00"
+    assert episode_links == [(episode_link_id, "memory_item", "mem-legacy", "supports", episode_links[0][4])]
+    assert str(episode_links[0][4]) == "2026-06-01 01:00:03+00:00"
+    assert episode_events == [(episode_event_id, {"request_id": "trace-episode-legacy", "payload": "r21-m0-v1 audit history"}, episode_events[0][2])]
+    assert str(episode_events[0][2]) == "2026-06-01 01:00:04+00:00"
+    assert new_versions == (MEMORY_ITEM_DERIVATION_VERSION, EPISODE_DERIVATION_VERSION)
 
 
 def test_failed_managed_migration_rolls_back_and_remains_pending(pg_database: str, temp_db_dir: Path) -> None:

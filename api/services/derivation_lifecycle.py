@@ -8,6 +8,7 @@ from uuid import UUID
 
 from services.chunking import chunk_text
 from services.derived_contract import CONTRACT_ADAPTERS, normalize_contract_source_refs
+from services.derivation_versions import EPISODE_DERIVATION_VERSION, MEMORY_ITEM_DERIVATION_VERSION
 from services.proactive import PROACTIVE_DERIVATION_VERSION, reevaluate_proactive_candidate
 
 
@@ -28,8 +29,8 @@ DERIVED_TEXT_CHUNKING_ALGORITHM_VERSION = "fixed-overlap-text-v1"
 SUPPORTED_TARGET_VERSIONS = {
     "derived_text": {DERIVED_TEXT_DERIVATION_VERSION},
     "proactive_suggestion": {PROACTIVE_DERIVATION_VERSION},
-    "memory_item": {"memory-promotion-v1"},
-    "episode": {"episode-construction-v1"},
+    "memory_item": {MEMORY_ITEM_DERIVATION_VERSION},
+    "episode": {EPISODE_DERIVATION_VERSION},
 }
 
 

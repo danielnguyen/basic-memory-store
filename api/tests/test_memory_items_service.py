@@ -1,4 +1,5 @@
 from services.derived_contract import memory_item_contract_view
+from services.derivation_versions import MEMORY_ITEM_DERIVATION_VERSION
 from services.memory_items import normalize_source_refs, source_ref_hash
 
 
@@ -34,7 +35,7 @@ def test_memory_item_contract_view_exposes_r37_fields():
             "owner_id": "owner",
             "memory_type": "core",
             "source_refs_json": [{"ref_type": "message", "ref_id": "m-1"}],
-            "derivation_version": "r20-mvp-v1",
+            "derivation_version": MEMORY_ITEM_DERIVATION_VERSION,
             "status": "active",
             "confidence": 0.9,
             "explanation_json": {"rationale": "explicit user instruction"},
@@ -50,3 +51,23 @@ def test_memory_item_contract_view_exposes_r37_fields():
         {"ref_type": "message", "ref_id": "m-1", "support_kind": "direct"}
     ]
     assert out["explanation"] == "explicit user instruction"
+
+
+def test_memory_item_contract_view_uses_neutral_compatibility_default():
+    out = memory_item_contract_view(
+        {
+            "memory_id": "mem-1",
+            "owner_id": "owner",
+            "memory_type": "core",
+            "source_refs_json": [{"ref_type": "message", "ref_id": "m-1"}],
+            "derivation_version": None,
+            "status": "active",
+            "confidence": None,
+            "explanation_json": {},
+            "generation_trace_id": None,
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+    )
+
+    assert out["derivation_version"] == MEMORY_ITEM_DERIVATION_VERSION
+    assert out["compatibility_defaults"] == ["derivation_version"]
