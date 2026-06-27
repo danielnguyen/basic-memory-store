@@ -20,7 +20,7 @@ from services.memory_items import (
     normalize_scores,
     source_ref_hash,
 )
-from services.proactive import PROACTIVE_DERIVATION_VERSION
+from services.proactive import PROACTIVE_DERIVATION_VERSION, reevaluate_proactive_candidate
 
 
 DERIVED_CLASSES = ("derived_text", "proactive_suggestion", "memory_item", "episode")
@@ -35,6 +35,14 @@ INVALIDATION_REASONS = {
 TERMINAL_RESULTS = {"identical", "replaced", "unsupported", "failed"}
 MEMORY_RECIPE_KIND = "structured-memory-promotion-v1"
 EPISODE_RECIPE_KIND = "structured-episode-construction-v1"
+DERIVED_TEXT_DERIVATION_VERSION = "file-chunk-v1"
+DERIVED_TEXT_CHUNKING_ALGORITHM_VERSION = "fixed-overlap-text-v1"
+SUPPORTED_TARGET_VERSIONS = {
+    "derived_text": {DERIVED_TEXT_DERIVATION_VERSION},
+    "proactive_suggestion": {PROACTIVE_DERIVATION_VERSION},
+    "memory_item": {"memory-promotion-v1"},
+    "episode": {"episode-construction-v1"},
+}
 
 
 def compact_json(value: Any) -> str:
@@ -72,6 +80,87 @@ def lifecycle_event(*, request_id: str, event_type: str, reason_code: str, metad
     return event
 
 
+def replay_event(
+    *,
+    request_id: str,
+    event_type: str,
+    reason_code: str,
+    result: str | None = None,
+    replacement_id: str | None = None,
+    failure_reason: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    event = lifecycle_event(request_id=request_id, event_type=event_type, reason_code=reason_code, metadata=metadata)
+    if result is not None:
+        event["result"] = result
+    if replacement_id is not None:
+        event["replacement_id"] = replacement_id
+    if failure_reason is not None:
+        event["failure_reason"] = failure_reason
+    return event
+
+
+def lifecycle_events_for(derived_class: str, row: dict[str, Any]) -> list[dict[str, Any]]:
+    if derived_class == "derived_text":
+        params = row.get("derivation_params") if isinstance(row.get("derivation_params"), dict) else {}
+        lifecycle = params.get("lifecycle") if isinstance(params.get("lifecycle"), dict) else {}
+        return [event for event in lifecycle.get("events") or [] if isinstance(event, dict)]
+    if derived_class == "proactive_suggestion":
+        evidence = row.get("evidence_json") if isinstance(row.get("evidence_json"), dict) else {}
+        lifecycle = evidence.get("lifecycle") if isinstance(evidence.get("lifecycle"), dict) else {}
+        return [event for event in lifecycle.get("events") or [] if isinstance(event, dict)]
+    return [event for event in row.get("_events") or [] if isinstance(event, dict)]
+
+
+def terminal_for_request(derived_class: str, row: dict[str, Any], request_id: str) -> dict[str, Any] | None:
+    for event in reversed(lifecycle_events_for(derived_class, row)):
+        reason = event.get("reason_json") if isinstance(event.get("reason_json"), dict) else event
+        if reason.get("request_id") != request_id:
+            continue
+        result = reason.get("result") or reason.get("terminal_result")
+        if result in TERMINAL_RESULTS:
+            return reason
+        if event.get("event_type") in {"rebuild_terminal", "terminal"}:
+            return reason
+    return None
+
+
+def current_version_for(derived_class: str, row: dict[str, Any], inspection: dict[str, Any]) -> str:
+    if derived_class == "memory_item":
+        recipe = (row.get("explanation_json") or {}).get("derivation_recipe") or {}
+        return str(recipe.get("derivation_version") or row.get("derivation_version") or inspection["contract"]["derivation_version"])
+    if derived_class == "episode":
+        recipe = (row.get("explanation_json") or {}).get("derivation_recipe") or {}
+        return str(recipe.get("derivation_version") or row.get("derivation_version") or inspection["contract"]["derivation_version"])
+    return str(inspection["contract"]["derivation_version"])
+
+
+def validate_replay_versions(
+    *,
+    derived_class: str,
+    current_version: str,
+    requested_version: str | None,
+    expected_current_version: str | None,
+) -> tuple[str | None, dict[str, Any] | None]:
+    if expected_current_version and expected_current_version != current_version:
+        return None, {
+            "result": "failed",
+            "failure_reason": "expected_current_derivation_version_mismatch",
+            "current_derivation_version": current_version,
+            "expected_current_derivation_version": expected_current_version,
+        }
+    supported = SUPPORTED_TARGET_VERSIONS[derived_class]
+    target = requested_version or current_version
+    if target not in supported:
+        return None, {
+            "result": "unsupported",
+            "failure_reason": "unsupported_derivation_version",
+            "requested_derivation_version": target,
+            "supported_derivation_versions": sorted(supported),
+        }
+    return target, None
+
+
 def append_lifecycle_event(metadata: dict[str, Any], event: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     lifecycle = metadata.get("lifecycle") if isinstance(metadata.get("lifecycle"), dict) else {}
     events = lifecycle.get("events") if isinstance(lifecycle.get("events"), list) else []
@@ -82,16 +171,34 @@ def append_lifecycle_event(metadata: dict[str, Any], event: dict[str, Any]) -> t
         if (existing.get("event_type"), existing.get("request_id"), existing.get("reason_code")) == signature:
             return metadata, False
     updated_events = [*events, event]
-    return {
-        **metadata,
-        "lifecycle": {
-            **lifecycle,
-            "status": event["event_type"] if event["event_type"] in {"invalidated", "rebuilding"} else lifecycle.get("status"),
-            "invalidated_reason": event["reason_code"] if event["event_type"] == "invalidated" else lifecycle.get("invalidated_reason"),
-            "last_request_id": event["request_id"],
-            "events": updated_events,
-        },
-    }, True
+    event_type = event["event_type"]
+    result = event.get("result") or (event.get("metadata") or {}).get("result")
+    status = lifecycle.get("status")
+    if event_type in {"invalidated", "rebuilding", "superseded"}:
+        status = event_type
+    if event_type == "rebuild_terminal":
+        if result == "identical":
+            status = "active"
+        elif result == "replaced":
+            status = "superseded"
+        elif result in {"unsupported", "failed"}:
+            status = "invalidated"
+    updated_lifecycle = {
+        **lifecycle,
+        "status": status,
+        "invalidated_reason": event["reason_code"] if event_type == "invalidated" else lifecycle.get("invalidated_reason"),
+        "last_request_id": event["request_id"],
+        "terminal_result": result or lifecycle.get("terminal_result"),
+        "replacement_id": event.get("replacement_id") or (event.get("metadata") or {}).get("replacement_id") or lifecycle.get("replacement_id"),
+        "failure_reason": event.get("failure_reason") or (event.get("metadata") or {}).get("failure_reason") or lifecycle.get("failure_reason"),
+        "events": updated_events,
+    }
+    updated = {**metadata, "lifecycle": updated_lifecycle}
+    if status:
+        updated["status"] = status
+    if updated_lifecycle.get("replacement_id"):
+        updated["replacement_id"] = updated_lifecycle["replacement_id"]
+    return updated, True
 
 
 def build_structural_snapshot(*, derived_class: str, row: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
@@ -128,6 +235,12 @@ def build_structural_snapshot(*, derived_class: str, row: dict[str, Any], contra
                 "body_hash": structural_hash(str(row.get("body") or "")),
                 "rule": explanation.get("rule"),
                 "source_event_log_id": evidence.get("source_event_log_id"),
+                "rule_inputs": {
+                    "threshold": explanation.get("threshold"),
+                    "observed_drift": explanation.get("observed_drift"),
+                    "query": explanation.get("query"),
+                    "matched_message_id": explanation.get("matched_message_id"),
+                },
             }),
         })
     elif derived_class == "memory_item":
@@ -163,9 +276,22 @@ def build_structural_snapshot(*, derived_class: str, row: dict[str, Any], contra
 def classify_rebuildability(derived_class: str, row: dict[str, Any]) -> dict[str, str]:
     if derived_class == "derived_text":
         params = row.get("derivation_params") if isinstance(row.get("derivation_params"), dict) else {}
-        if row.get("artifact_id") and params.get("derivation_version") == "file-chunk-v1":
+        required = {
+            "chunking_algorithm_version",
+            "chunk_size",
+            "chunk_overlap",
+            "chunk_index",
+            "char_start",
+            "char_end",
+        }
+        if (
+            row.get("artifact_id")
+            and params.get("derivation_version") == DERIVED_TEXT_DERIVATION_VERSION
+            and params.get("chunking_algorithm_version") == DERIVED_TEXT_CHUNKING_ALGORITHM_VERSION
+            and required <= set(params)
+        ):
             return {"classification": "rebuildable", "reason": "artifact-backed deterministic chunk derivation"}
-        return {"classification": "not_rebuildable", "reason": "missing artifact chunk recipe"}
+        return {"classification": "not_rebuildable", "reason": "missing deterministic artifact chunk recipe"}
     if derived_class == "proactive_suggestion":
         return {"classification": "replay_only", "reason": "proactive rules are deterministic but replay must not repeat delivery effects"}
     if derived_class == "memory_item":
@@ -282,12 +408,18 @@ async def invalidate_derived(
     if derived_class == "derived_text":
         params = row.get("derivation_params") if isinstance(row.get("derivation_params"), dict) else {}
         updated, changed = append_lifecycle_event(params, event)
-        saved = await pg.update_derived_text_params(derived_text_id=derived_id, owner_id=owner_id, derivation_params=updated)
+        if hasattr(pg, "append_derived_text_lifecycle_event"):
+            saved = await pg.append_derived_text_lifecycle_event(derived_text_id=derived_id, owner_id=owner_id, event=event)
+        else:
+            saved = await pg.update_derived_text_params(derived_text_id=derived_id, owner_id=owner_id, derivation_params=updated)
         return {"changed": changed, "inspection": inspect_row(derived_class=derived_class, row=saved or row)}
     if derived_class == "proactive_suggestion":
         evidence = row.get("evidence_json") if isinstance(row.get("evidence_json"), dict) else {}
         updated, changed = append_lifecycle_event(evidence, event)
-        saved = await pg.update_proactive_suggestion_evidence(suggestion_id=derived_id, owner_id=owner_id, evidence_json=updated)
+        if hasattr(pg, "append_proactive_suggestion_lifecycle_event"):
+            saved = await pg.append_proactive_suggestion_lifecycle_event(suggestion_id=derived_id, owner_id=owner_id, event=event)
+        else:
+            saved = await pg.update_proactive_suggestion_evidence(suggestion_id=derived_id, owner_id=owner_id, evidence_json=updated)
         return {"changed": changed, "inspection": inspect_row(derived_class=derived_class, row=saved or row)}
     return None
 
@@ -295,6 +427,11 @@ async def invalidate_derived(
 async def build_candidate_snapshot(pg: Any, *, derived_class: str, row: dict[str, Any], requested_version: str | None) -> dict[str, Any]:
     if derived_class == "derived_text":
         params = row.get("derivation_params") if isinstance(row.get("derivation_params"), dict) else {}
+        if params.get("chunking_algorithm_version") != DERIVED_TEXT_CHUNKING_ALGORITHM_VERSION:
+            raise ValueError("unsupported_legacy_chunk_recipe")
+        for key in ("chunk_size", "chunk_overlap", "chunk_index", "char_start", "char_end"):
+            if key not in params:
+                raise ValueError("unsupported_legacy_chunk_recipe")
         artifact = await pg.get_artifact(UUID(row["artifact_id"]))
         if artifact is None or artifact.get("owner_id") != row.get("owner_id"):
             raise KeyError("source_missing")
@@ -305,8 +442,8 @@ async def build_candidate_snapshot(pg: Any, *, derived_class: str, row: dict[str
         if not path.exists():
             raise KeyError("source_missing")
         text = path.read_text(encoding="utf-8", errors="ignore")
-        chunks = chunk_text(text, chunk_size=int(params.get("chunk_size") or 1200), chunk_overlap=int(params.get("chunk_overlap") or 120))
-        chunk_index = int(params.get("chunk_index") or 0)
+        chunks = chunk_text(text, chunk_size=int(params["chunk_size"]), chunk_overlap=int(params["chunk_overlap"]))
+        chunk_index = int(params["chunk_index"])
         if chunk_index >= len(chunks):
             raise KeyError("source_missing")
         chunk = chunks[chunk_index]
@@ -326,18 +463,41 @@ async def build_candidate_snapshot(pg: Any, *, derived_class: str, row: dict[str
             "candidate": {"text": chunk["text"], "chunk": chunk},
         }
     if derived_class == "proactive_suggestion":
+        source_event_log_id = row.get("source_event_log_id")
+        if not source_event_log_id:
+            raise KeyError("source_missing")
+        event_log = await pg.get_event_ingest_log(UUID(source_event_log_id))
+        if event_log is None:
+            raise KeyError("source_missing")
+        try:
+            candidate = reevaluate_proactive_candidate(
+                owner_id=row["owner_id"],
+                event_log=event_log,
+                stored_suggestion=row,
+                generation_trace_id="replay-validation",
+            )
+        except PermissionError as exc:
+            raise ValueError(str(exc)) from exc
+        explanation = candidate["explanation_json"]
+        evidence = candidate["evidence_json"]
         return {
             "derived_class": "proactive_suggestion",
             "derivation_version": PROACTIVE_DERIVATION_VERSION,
             "stable_object_key": f"{row.get('source_event_log_id')}:{row.get('kind')}",
             "normalized_output_hash": structural_hash({
-                "kind": row.get("kind"),
-                "title_hash": structural_hash(str(row.get("title") or "")),
-                "body_hash": structural_hash(str(row.get("body") or "")),
-                "rule": (row.get("explanation_json") or {}).get("rule") if isinstance(row.get("explanation_json"), dict) else None,
-                "source_event_log_id": (row.get("evidence_json") or {}).get("source_event_log_id") if isinstance(row.get("evidence_json"), dict) else None,
+                "kind": candidate.get("kind"),
+                "title_hash": structural_hash(str(candidate.get("title") or "")),
+                "body_hash": structural_hash(str(candidate.get("body") or "")),
+                "rule": explanation.get("rule"),
+                "source_event_log_id": evidence.get("source_event_log_id"),
+                "rule_inputs": {
+                    "threshold": explanation.get("threshold"),
+                    "observed_drift": explanation.get("observed_drift"),
+                    "query": explanation.get("query"),
+                    "matched_message_id": explanation.get("matched_message_id"),
+                },
             }),
-            "candidate": {"side_effects": "suppressed"},
+            "candidate": candidate,
         }
     if derived_class == "memory_item":
         recipe = (row.get("explanation_json") or {}).get("derivation_recipe") or {}
@@ -388,6 +548,105 @@ async def build_candidate_snapshot(pg: Any, *, derived_class: str, row: dict[str
     raise ValueError("unsupported_class")
 
 
+async def append_replay_lifecycle(
+    pg: Any,
+    *,
+    derived_class: str,
+    derived_id: UUID,
+    owner_id: str,
+    event: dict[str, Any],
+) -> dict[str, Any] | None:
+    if derived_class == "derived_text":
+        if hasattr(pg, "append_derived_text_lifecycle_event"):
+            return await pg.append_derived_text_lifecycle_event(derived_text_id=derived_id, owner_id=owner_id, event=event)
+        row = await load_derived_row(pg, derived_class=derived_class, derived_id=derived_id, owner_id=owner_id)
+        if row is None:
+            return None
+        params = row.get("derivation_params") if isinstance(row.get("derivation_params"), dict) else {}
+        updated, _ = append_lifecycle_event(params, event)
+        return await pg.update_derived_text_params(derived_text_id=derived_id, owner_id=owner_id, derivation_params=updated)
+    if derived_class == "proactive_suggestion":
+        if hasattr(pg, "append_proactive_suggestion_lifecycle_event"):
+            return await pg.append_proactive_suggestion_lifecycle_event(suggestion_id=derived_id, owner_id=owner_id, event=event)
+        row = await load_derived_row(pg, derived_class=derived_class, derived_id=derived_id, owner_id=owner_id)
+        if row is None:
+            return None
+        evidence = row.get("evidence_json") if isinstance(row.get("evidence_json"), dict) else {}
+        updated, _ = append_lifecycle_event(evidence, event)
+        return await pg.update_proactive_suggestion_evidence(suggestion_id=derived_id, owner_id=owner_id, evidence_json=updated)
+    reason_json = {**event, "terminal_result": event.get("result")}
+    if derived_class == "memory_item" and hasattr(pg, "append_memory_lifecycle_event"):
+        debug = await pg.append_memory_lifecycle_event(
+            memory_id=derived_id,
+            owner_id=owner_id,
+            event_type="state_changed",
+            reason_json=reason_json,
+        )
+        if debug is not None:
+            row = debug["memory"]
+            row["_events"] = debug.get("events") or []
+            return row
+    if derived_class == "episode" and hasattr(pg, "append_episode_lifecycle_event"):
+        debug = await pg.append_episode_lifecycle_event(
+            episode_id=derived_id,
+            owner_id=owner_id,
+            event_type="updated",
+            reason_json=reason_json,
+        )
+        if debug is not None:
+            row = debug["episode"]
+            row["_events"] = debug.get("events") or []
+            row["_links"] = debug.get("links") or []
+            return row
+    return await load_derived_row(pg, derived_class=derived_class, derived_id=derived_id, owner_id=owner_id)
+
+
+async def finalize_replay_result(
+    pg: Any,
+    *,
+    derived_class: str,
+    derived_id: UUID,
+    owner_id: str,
+    inspection: dict[str, Any],
+    request_id: str,
+    persist_replacement: bool,
+    result: str,
+    current: dict[str, Any],
+    candidate: dict[str, Any] | None = None,
+    replacement_id: str | None = None,
+    failure_reason: str | None = None,
+) -> dict[str, Any]:
+    if persist_replacement:
+        terminal = replay_event(
+            request_id=request_id,
+            event_type="rebuild_terminal",
+            reason_code="rebuild_terminal",
+            result=result,
+            replacement_id=replacement_id,
+            failure_reason=failure_reason,
+            metadata={
+                "result": result,
+                "replacement_id": replacement_id,
+                "failure_reason": failure_reason,
+            },
+        )
+        saved = await append_replay_lifecycle(pg, derived_class=derived_class, derived_id=derived_id, owner_id=owner_id, event=terminal)
+        if saved is not None:
+            inspection = inspect_row(derived_class=derived_class, row=saved)
+    replay = {
+        "request_id": request_id,
+        "mode": "persist" if persist_replacement else "validation_only",
+        "result": result,
+        "current": current,
+        "replacement_id": replacement_id,
+    }
+    if candidate is not None:
+        replay["candidate"] = candidate
+    if failure_reason:
+        replay["failure_reason"] = failure_reason
+    return {**inspection, "replay": replay}
+
+
 async def replay_derived(
     pg: Any,
     *,
@@ -397,6 +656,7 @@ async def replay_derived(
     request_id: str,
     requested_derivation_version: str | None,
     persist_replacement: bool,
+    expected_current_derivation_version: str | None = None,
 ) -> dict[str, Any] | None:
     row = await load_derived_row(pg, derived_class=derived_class, derived_id=derived_id, owner_id=owner_id)
     if row is None:
@@ -404,90 +664,172 @@ async def replay_derived(
     inspection = inspect_row(derived_class=derived_class, row=row)
     classification = inspection["rebuildability"]
     current = inspection["structural_snapshot"]
+    prior_terminal = terminal_for_request(derived_class, row, request_id)
+    if prior_terminal is not None:
+        return {
+            **inspection,
+            "replay": {
+                "request_id": request_id,
+                "mode": "persist" if persist_replacement else "validation_only",
+                "result": prior_terminal.get("result") or prior_terminal.get("terminal_result"),
+                "failure_reason": prior_terminal.get("failure_reason"),
+                "replacement_id": prior_terminal.get("replacement_id"),
+                "current": current,
+                "idempotent_replay": True,
+            },
+        }
+    target_version, version_error = validate_replay_versions(
+        derived_class=derived_class,
+        current_version=current_version_for(derived_class, row, inspection),
+        requested_version=requested_derivation_version,
+        expected_current_version=expected_current_derivation_version,
+    )
+    if version_error is not None:
+        return {
+            **inspection,
+            "replay": {
+                "request_id": request_id,
+                "mode": "persist" if persist_replacement else "validation_only",
+                "current": current,
+                **version_error,
+            },
+        }
+    if persist_replacement:
+        start = replay_event(
+            request_id=request_id,
+            event_type="rebuilding",
+            reason_code="rebuild_started",
+            metadata={
+                "requested_derivation_version": target_version,
+                "current_derivation_version": current_version_for(derived_class, row, inspection),
+                "source_ref_hash": current.get("source_ref_hash"),
+            },
+        )
+        await append_replay_lifecycle(pg, derived_class=derived_class, derived_id=derived_id, owner_id=owner_id, event=start)
     try:
-        candidate = await build_candidate_snapshot(pg, derived_class=derived_class, row=row, requested_version=requested_derivation_version)
+        candidate = await build_candidate_snapshot(pg, derived_class=derived_class, row=row, requested_version=target_version)
     except KeyError as exc:
-        return {**inspection, "replay": {"request_id": request_id, "mode": "persist" if persist_replacement else "validation_only", "result": "failed", "failure_reason": str(exc), "current": current}}
+        return await finalize_replay_result(
+            pg,
+            derived_class=derived_class,
+            derived_id=derived_id,
+            owner_id=owner_id,
+            inspection=inspection,
+            request_id=request_id,
+            persist_replacement=persist_replacement,
+            result="failed",
+            current=current,
+            failure_reason=str(exc).strip("'"),
+        )
     except ValueError as exc:
-        return {**inspection, "replay": {"request_id": request_id, "mode": "persist" if persist_replacement else "validation_only", "result": "unsupported", "failure_reason": str(exc), "current": current}}
+        return await finalize_replay_result(
+            pg,
+            derived_class=derived_class,
+            derived_id=derived_id,
+            owner_id=owner_id,
+            inspection=inspection,
+            request_id=request_id,
+            persist_replacement=persist_replacement,
+            result="unsupported",
+            current=current,
+            failure_reason=str(exc),
+        )
     same = current.get("normalized_output_hash") == candidate.get("normalized_output_hash") and current.get("derivation_version") == candidate.get("derivation_version")
     result = "identical" if same else "replaced"
     replacement_id = None
     if persist_replacement and result == "replaced":
-        if classification == "replay_only":
-            result = "unsupported"
-        elif derived_class == "memory_item":
-            recipe = candidate["candidate"]
-            created = await pg.promote_memory_item(
+        try:
+            if classification == "replay_only":
+                result = "unsupported"
+            elif derived_class == "memory_item":
+                recipe = candidate["candidate"]
+                created = await pg.promote_memory_item(
+                    owner_id=owner_id,
+                    memory_type=recipe.get("memory_type") or row.get("memory_type"),
+                    summary=recipe["summary"],
+                    source_refs_json=candidate["source_refs"],
+                    source_ref_hash=candidate["source_ref_hash"],
+                    scores_json=normalize_scores(recipe.get("scores") or {}),
+                    promotion_state="promoted",
+                    confidence=recipe.get("confidence"),
+                    explanation_json={"derivation_recipe": recipe, "rebuild": {"request_id": request_id}},
+                    generation_trace_id=request_id,
+                    expires_at=recipe.get("expires_at"),
+                    request_id=request_id,
+                    reinforce=False,
+                    supersedes_memory_id=derived_id,
+                    derivation_version=candidate["derivation_version"],
+                )
+                replacement_id = created["memory"]["memory_id"]
+            elif derived_class == "episode":
+                recipe = candidate["candidate"]
+                created = await pg.replace_episode(
+                    old_episode_id=derived_id,
+                    owner_id=owner_id,
+                    request_id=request_id,
+                    title=recipe["title"],
+                    summary=recipe["summary"],
+                    episode_type=recipe.get("episode_type") or row.get("episode_type"),
+                    trigger_json=normalize_json_map(recipe.get("trigger") or {}),
+                    outcome=recipe.get("outcome"),
+                    significance=recipe.get("significance"),
+                    unresolved_json=normalize_json_map(recipe.get("unresolved") or {}),
+                    source_refs_json=candidate["source_refs"],
+                    source_ref_hash=candidate["source_ref_hash"],
+                    episode_key=candidate["stable_object_key"],
+                    callback_candidates_json=normalize_json_list(recipe.get("callback_candidates") or []),
+                    time_window_json=normalize_json_map(recipe.get("time_window") or {}),
+                    participants_json=normalize_json_list(recipe.get("participants") or []),
+                    derivation_version=candidate["derivation_version"],
+                    confidence=recipe.get("confidence"),
+                    explanation_json={"derivation_recipe": recipe, "rebuild": {"request_id": request_id}},
+                    generation_trace_id=request_id,
+                )
+                replacement_id = created["episode"]["episode_id"]
+            elif derived_class == "derived_text":
+                params = row.get("derivation_params") or {}
+                inherited = {key: value for key, value in params.items() if key not in {"lifecycle", "replacement_id"}}
+                new_params = {
+                    **inherited,
+                    "derivation_version": candidate["derivation_version"],
+                    "generation_trace_id": request_id,
+                    "replacement_for": str(derived_id),
+                    "status": "active",
+                }
+                replacement = await pg.create_derived_text(
+                    artifact_id=UUID(row["artifact_id"]),
+                    kind=row.get("kind") or "chunk",
+                    text=candidate["candidate"]["text"],
+                    language=row.get("language"),
+                    derivation_params=new_params,
+                )
+                replacement_id = replacement["derived_text_id"]
+                event = replay_event(request_id=request_id, event_type="superseded", reason_code="rebuild_replaced", replacement_id=replacement_id)
+                await append_replay_lifecycle(pg, derived_class=derived_class, derived_id=derived_id, owner_id=owner_id, event=event)
+        except Exception as exc:
+            return await finalize_replay_result(
+                pg,
+                derived_class=derived_class,
+                derived_id=derived_id,
                 owner_id=owner_id,
-                memory_type=recipe.get("memory_type") or row.get("memory_type"),
-                summary=recipe["summary"],
-                source_refs_json=candidate["source_refs"],
-                source_ref_hash=candidate["source_ref_hash"],
-                scores_json=normalize_scores(recipe.get("scores") or {}),
-                promotion_state="promoted",
-                confidence=recipe.get("confidence"),
-                explanation_json={"derivation_recipe": recipe, "rebuild": {"request_id": request_id}},
-                generation_trace_id=request_id,
-                expires_at=recipe.get("expires_at"),
+                inspection=inspection,
                 request_id=request_id,
-                reinforce=False,
-                supersedes_memory_id=derived_id,
-                derivation_version=candidate["derivation_version"],
+                persist_replacement=persist_replacement,
+                result="failed",
+                current=current,
+                candidate={k: v for k, v in candidate.items() if k != "candidate"},
+                failure_reason=type(exc).__name__,
             )
-            replacement_id = created["memory"]["memory_id"]
-        elif derived_class == "episode":
-            recipe = candidate["candidate"]
-            created = await pg.replace_episode(
-                old_episode_id=derived_id,
-                owner_id=owner_id,
-                request_id=request_id,
-                title=recipe["title"],
-                summary=recipe["summary"],
-                episode_type=recipe.get("episode_type") or row.get("episode_type"),
-                trigger_json=normalize_json_map(recipe.get("trigger") or {}),
-                outcome=recipe.get("outcome"),
-                significance=recipe.get("significance"),
-                unresolved_json=normalize_json_map(recipe.get("unresolved") or {}),
-                source_refs_json=candidate["source_refs"],
-                source_ref_hash=candidate["source_ref_hash"],
-                episode_key=candidate["stable_object_key"],
-                callback_candidates_json=normalize_json_list(recipe.get("callback_candidates") or []),
-                time_window_json=normalize_json_map(recipe.get("time_window") or {}),
-                participants_json=normalize_json_list(recipe.get("participants") or []),
-                derivation_version=candidate["derivation_version"],
-                confidence=recipe.get("confidence"),
-                explanation_json={"derivation_recipe": recipe, "rebuild": {"request_id": request_id}},
-                generation_trace_id=request_id,
-            )
-            replacement_id = created["episode"]["episode_id"]
-        elif derived_class == "derived_text":
-            params = row.get("derivation_params") or {}
-            new_params = {
-                **params,
-                "derivation_version": candidate["derivation_version"],
-                "generation_trace_id": request_id,
-                "replacement_for": str(derived_id),
-            }
-            replacement = await pg.create_derived_text(
-                artifact_id=UUID(row["artifact_id"]),
-                kind=row.get("kind") or "chunk",
-                text=candidate["candidate"]["text"],
-                language=row.get("language"),
-                derivation_params=new_params,
-            )
-            replacement_id = replacement["derived_text_id"]
-            event = lifecycle_event(request_id=request_id, event_type="superseded", reason_code="rebuild_replaced", metadata={"replacement_id": replacement_id})
-            updated, _ = append_lifecycle_event(params, event)
-            await pg.update_derived_text_params(derived_text_id=derived_id, owner_id=owner_id, derivation_params=updated)
-    return {
-        **inspection,
-        "replay": {
-            "request_id": request_id,
-            "mode": "persist" if persist_replacement else "validation_only",
-            "result": result,
-            "current": current,
-            "candidate": {k: v for k, v in candidate.items() if k != "candidate"},
-            "replacement_id": replacement_id,
-        },
-    }
+    return await finalize_replay_result(
+        pg,
+        derived_class=derived_class,
+        derived_id=derived_id,
+        owner_id=owner_id,
+        inspection=inspection,
+        request_id=request_id,
+        persist_replacement=persist_replacement,
+        result=result,
+        current=current,
+        candidate={k: v for k, v in candidate.items() if k != "candidate"},
+        replacement_id=replacement_id,
+    )

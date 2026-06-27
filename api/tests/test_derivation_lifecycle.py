@@ -80,14 +80,19 @@ class FakePG:
         self.memory_id = str(uuid.uuid4())
         self.episode_id = str(uuid.uuid4())
         self.suggestion_id = str(uuid.uuid4())
+        self.event_id = str(uuid.uuid4())
         self.file_path = tmp_path / "source.txt"
         self.file_path.write_text("alpha beta gamma\nsecond line", encoding="utf-8")
         self.updated_text_params = []
         self.updated_suggestions = []
         self.memory_replacements = []
+        self.events = {}
+        self.memory_recipe_summary = "Use concise answers"
         self.derived_text_params = {
             "derivation_type": "chunk",
             "derivation_version": "file-chunk-v1",
+            "chunking_algorithm_version": "fixed-overlap-text-v1",
+            "chunking_algorithm": "fixed-overlap-text",
             "status": "active",
             "source_refs": [{"ref_type": "artifact", "ref_id": self.artifact_id, "support_kind": "direct"}],
             "chunk_index": 0,
@@ -128,19 +133,29 @@ class FakePG:
     async def get_proactive_suggestion(self, suggestion_id):
         if str(suggestion_id) != self.suggestion_id:
             return None
+        if self.event_id not in self.events:
+            self.events[self.event_id] = {
+                "event_log_id": self.event_id,
+                "owner_id": "owner",
+                "source_type": "portfolio",
+                "source_event_id": "portfolio-event-1",
+                "event_type": "allocation_drift",
+                "payload_json": {"account": "retirement", "summary": "drift", "allocation_drift_pct": 0.09},
+            }
         return {
             "suggestion_id": self.suggestion_id,
             "owner_id": "owner",
-            "source_event_log_id": str(uuid.uuid4()),
+            "source_event_log_id": self.event_id,
             "source_type": "portfolio",
             "kind": "portfolio_drift_review",
             "status": "pending",
-            "title": "Portfolio drift",
-            "body": "Review allocation?",
-            "explanation_json": {"derivation_version": "proactive-rules-v1", "rule": "portfolio_drift_review"},
+            "title": "Portfolio allocation drift crossed threshold",
+            "body": "Retirement allocation drifted beyond your threshold. Review the portfolio?",
+            "explanation_json": {"derivation_version": "proactive-rules-v1", "rule": "portfolio_drift_review", "threshold": 0.05, "observed_drift": 0.09},
             "evidence_json": {
-                "source_refs": [{"ref_type": "event_log", "ref_id": "event-1", "support_kind": "direct"}],
-                "source_event_log_id": "event-1",
+                "source_refs": [{"ref_type": "event_log", "ref_id": self.event_id, "support_kind": "direct"}],
+                "source_event_log_id": self.event_id,
+                "threshold": 0.05,
             },
             "target_surface": "telegram",
             "delivery_status": "not_attempted",
@@ -153,13 +168,16 @@ class FakePG:
         row = await self.get_proactive_suggestion(suggestion_id)
         return {**row, "evidence_json": evidence_json}
 
+    async def get_event_ingest_log(self, event_log_id):
+        return self.events.get(str(event_log_id))
+
     async def get_memory_debug(self, memory_id, owner_id):
         if str(memory_id) != self.memory_id or owner_id != "owner":
             return None
         recipe = {
             "kind": MEMORY_RECIPE_KIND,
             "memory_type": "preference",
-            "summary": "Use concise answers",
+            "summary": self.memory_recipe_summary,
             "source_refs": [{"ref_type": "message", "ref_id": "msg-1", "support_kind": "direct"}],
             "scores": {"utility": 0.8},
             "derivation_version": "memory-promotion-v1",
@@ -203,7 +221,16 @@ class FakePG:
 
 
 def test_classification_is_stable_and_truthful():
-    assert classify_rebuildability("derived_text", {"artifact_id": "a", "derivation_params": {"derivation_version": "file-chunk-v1"}})["classification"] == "rebuildable"
+    assert classify_rebuildability("derived_text", {"artifact_id": "a", "derivation_params": {
+        "derivation_version": "file-chunk-v1",
+        "chunking_algorithm_version": "fixed-overlap-text-v1",
+        "chunk_size": 500,
+        "chunk_overlap": 50,
+        "chunk_index": 0,
+        "char_start": 0,
+        "char_end": 10,
+    }})["classification"] == "rebuildable"
+    assert classify_rebuildability("derived_text", {"artifact_id": "a", "derivation_params": {"derivation_version": "file-chunk-v1"}})["classification"] == "not_rebuildable"
     assert classify_rebuildability("proactive_suggestion", {})["classification"] == "replay_only"
     assert classify_rebuildability("memory_item", _memory_row("m"))["classification"] == "not_rebuildable"
     assert classify_rebuildability("episode", _episode_row("e"))["classification"] == "not_rebuildable"
@@ -269,6 +296,26 @@ async def test_validation_replay_is_deterministic_and_does_not_mutate(tmp_path):
 @pytest.mark.asyncio
 async def test_persistable_memory_rebuild_uses_recipe_and_supersedes(tmp_path):
     pg = FakePG(tmp_path)
+    pg.memory_recipe_summary = "Use direct answers"
+    result = await replay_derived(
+        pg,
+        derived_class="memory_item",
+        derived_id=uuid.UUID(pg.memory_id),
+        owner_id="owner",
+        request_id="rid-rebuild",
+        requested_derivation_version="memory-promotion-v1",
+        persist_replacement=True,
+    )
+
+    assert result["replay"]["result"] == "replaced"
+    assert result["replay"]["replacement_id"]
+    assert pg.memory_replacements[0]["supersedes_memory_id"] == uuid.UUID(pg.memory_id)
+    assert pg.memory_replacements[0]["derivation_version"] == "memory-promotion-v1"
+
+
+@pytest.mark.asyncio
+async def test_replay_rejects_unsupported_requested_version_before_mutation(tmp_path):
+    pg = FakePG(tmp_path)
     result = await replay_derived(
         pg,
         derived_class="memory_item",
@@ -279,10 +326,9 @@ async def test_persistable_memory_rebuild_uses_recipe_and_supersedes(tmp_path):
         persist_replacement=True,
     )
 
-    assert result["replay"]["result"] == "replaced"
-    assert result["replay"]["replacement_id"]
-    assert pg.memory_replacements[0]["supersedes_memory_id"] == uuid.UUID(pg.memory_id)
-    assert pg.memory_replacements[0]["derivation_version"] == "memory-promotion-v2"
+    assert result["replay"]["result"] == "unsupported"
+    assert result["replay"]["failure_reason"] == "unsupported_derivation_version"
+    assert pg.memory_replacements == []
 
 
 @pytest.mark.asyncio
@@ -300,4 +346,31 @@ async def test_proactive_replay_only_does_not_create_delivery_side_effects(tmp_p
 
     assert result["rebuildability"] == "replay_only"
     assert result["replay"]["result"] == "identical"
-    assert pg.updated_suggestions == []
+    assert pg.updated_suggestions
+    assert (await pg.get_proactive_suggestion(uuid.UUID(pg.suggestion_id)))["delivery_status"] == "not_attempted"
+
+
+@pytest.mark.asyncio
+async def test_proactive_replay_is_reevaluated_from_source_event(tmp_path):
+    pg = FakePG(tmp_path)
+    before = await replay_derived(
+        pg,
+        derived_class="proactive_suggestion",
+        derived_id=uuid.UUID(pg.suggestion_id),
+        owner_id="owner",
+        request_id="rid-replay-1",
+        requested_derivation_version=None,
+        persist_replacement=False,
+    )
+    pg.events[pg.event_id]["payload_json"]["account"] = "taxable"
+    after = await replay_derived(
+        pg,
+        derived_class="proactive_suggestion",
+        derived_id=uuid.UUID(pg.suggestion_id),
+        owner_id="owner",
+        request_id="rid-replay-2",
+        requested_derivation_version=None,
+        persist_replacement=False,
+    )
+
+    assert before["replay"]["candidate"]["normalized_output_hash"] != after["replay"]["candidate"]["normalized_output_hash"]

@@ -2,58 +2,58 @@
   "schema_version": 1,
   "scenarios": [
     {
-      "name": "derived_text_identical_rebuild",
+      "name": "derived_text_identical_replay",
       "derived_class": "derived_text",
       "mode": "validation_only",
       "expected": {"result": "identical", "mutates": false}
     },
     {
-      "name": "derived_text_source_changed",
+      "name": "derived_text_changed_source",
       "derived_class": "derived_text",
       "mode": "persist_replacement",
       "expected": {"result": "replaced", "mutates": true}
     },
     {
-      "name": "derived_text_source_missing",
+      "name": "derived_text_missing_source",
       "derived_class": "derived_text",
       "mode": "validation_only",
       "expected": {"result": "failed", "failure_reason": "source_missing"}
     },
     {
-      "name": "proactive_replay_no_delivery_side_effect",
+      "name": "proactive_deterministic_reevaluation",
       "derived_class": "proactive_suggestion",
       "mode": "validation_only",
-      "expected": {"result": "identical", "mutates": false, "delivery_side_effects": false}
+      "expected": {"result": "replaced", "mutates": false, "delivery_side_effects": false}
     },
     {
-      "name": "proactive_trigger_missing",
+      "name": "proactive_missing_source_event",
       "derived_class": "proactive_suggestion",
       "mode": "validation_only",
       "expected": {"result": "failed", "failure_reason": "source_missing"}
     },
     {
-      "name": "memory_item_identical_rebuild",
+      "name": "memory_item_supported_identical_replay",
       "derived_class": "memory_item",
       "mode": "validation_only",
       "expected": {"result": "identical", "mutates": false}
     },
     {
-      "name": "memory_item_changed_rebuild_with_supersession",
+      "name": "memory_item_changed_rebuild_and_supersession",
       "derived_class": "memory_item",
       "mode": "persist_replacement",
       "expected": {"result": "replaced", "mutates": true, "relationship": "supersedes"}
     },
     {
-      "name": "episode_identical_rebuild",
+      "name": "episode_supported_identical_replay",
       "derived_class": "episode",
       "mode": "validation_only",
       "expected": {"result": "identical", "mutates": false}
     },
     {
-      "name": "unsupported_episode_without_recipe",
-      "derived_class": "episode",
+      "name": "explicitly_unsupported_subtype",
+      "derived_class": "memory_item",
       "mode": "validation_only",
-      "expected": {"result": "unsupported", "reason": "episode lacks a deterministic construction recipe"}
+      "expected": {"result": "unsupported", "reason": "missing deterministic recipe"}
     },
     {
       "name": "cross_owner_rejection",
@@ -63,7 +63,7 @@
     },
     {
       "name": "injected_persistence_failure",
-      "derived_class": "memory_item",
+      "derived_class": "derived_text",
       "mode": "persist_replacement",
       "expected": {"result": "failed", "partial_mutation": false}
     },
@@ -71,7 +71,7 @@
       "name": "repeated_request_idempotency",
       "derived_class": "derived_text",
       "mode": "persist_replacement",
-      "expected": {"result": "identical", "duplicate_replacements": false}
+      "expected": {"result": "replaced", "duplicate_replacements": false}
     }
   ],
   "privacy_banned_fields": [

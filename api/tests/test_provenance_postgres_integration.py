@@ -371,6 +371,95 @@ def test_real_creation_paths_storage_reopen_retrieval_and_owner_isolation(
         )
         assert malformed.status_code == 422
 
+        lifecycle = client.get(
+            f"/v1/internal/derived/derived_text/{derived_text_id}/lifecycle",
+            headers=_headers(),
+            params={"owner_id": "owner-a"},
+        )
+        assert lifecycle.status_code == 200, lifecycle.text
+        assert lifecycle.json()["rebuildability"] == "rebuildable"
+        snapshot = lifecycle.json()["structural_snapshot"]
+        assert snapshot["status"] == "active"
+
+        identical_replay = client.post(
+            f"/v1/internal/derived/derived_text/{derived_text_id}/replay",
+            headers=_headers("rid-derived-identical"),
+            json={
+                "request_id": "rid-derived-identical",
+                "owner_id": "owner-a",
+                "expected_current_derivation_version": "file-chunk-v1",
+                "persist_replacement": False,
+            },
+        )
+        assert identical_replay.status_code == 200, identical_replay.text
+        assert identical_replay.json()["replay"]["result"] == "identical"
+
+        unsupported_version = client.post(
+            f"/v1/internal/derived/derived_text/{derived_text_id}/replay",
+            headers=_headers("rid-derived-unsupported-version"),
+            json={
+                "request_id": "rid-derived-unsupported-version",
+                "owner_id": "owner-a",
+                "requested_derivation_version": "file-chunk-v999",
+                "persist_replacement": True,
+            },
+        )
+        assert unsupported_version.status_code == 200, unsupported_version.text
+        assert unsupported_version.json()["replay"]["result"] == "unsupported"
+        assert unsupported_version.json()["replay"]["failure_reason"] == "unsupported_derivation_version"
+
+        invalidated = client.post(
+            f"/v1/internal/derived/derived_text/{derived_text_id}/invalidate",
+            headers=_headers("rid-derived-invalidate"),
+            json={
+                "request_id": "rid-derived-invalidate",
+                "owner_id": "owner-a",
+                "reason_code": "source_changed",
+                "metadata": {"private_text": "x" * 500, "nested": {"drop": True}},
+            },
+        )
+        assert invalidated.status_code == 200, invalidated.text
+        assert invalidated.json()["changed"] is True
+        repeated_invalidated = client.post(
+            f"/v1/internal/derived/derived_text/{derived_text_id}/invalidate",
+            headers=_headers("rid-derived-invalidate"),
+            json={
+                "request_id": "rid-derived-invalidate",
+                "owner_id": "owner-a",
+                "reason_code": "source_changed",
+            },
+        )
+        assert repeated_invalidated.status_code == 200
+        assert repeated_invalidated.json()["changed"] is False
+
+        source_file.write_text("Neutral provenance fixture changed for deterministic replay.", encoding="utf-8")
+        replaced = client.post(
+            f"/v1/internal/derived/derived_text/{derived_text_id}/replay",
+            headers=_headers("rid-derived-replace"),
+            json={
+                "request_id": "rid-derived-replace",
+                "owner_id": "owner-a",
+                "expected_current_derivation_version": "file-chunk-v1",
+                "persist_replacement": True,
+            },
+        )
+        assert replaced.status_code == 200, replaced.text
+        assert replaced.json()["replay"]["result"] == "replaced"
+        replacement_id = replaced.json()["replay"]["replacement_id"]
+        assert replacement_id
+        predecessor_lifecycle = client.get(
+            f"/v1/internal/derived/derived_text/{derived_text_id}/lifecycle",
+            headers=_headers(),
+            params={"owner_id": "owner-a"},
+        )
+        assert predecessor_lifecycle.status_code == 200
+        assert predecessor_lifecycle.json()["contract"]["status"] == "superseded"
+        assert predecessor_lifecycle.json()["lifecycle_status"] == "superseded"
+        assert predecessor_lifecycle.json()["events"][-1]["result"] == "replaced"
+        replacement_inspection = _inspect(client, "derived_text", replacement_id)
+        assert replacement_inspection.status_code == 200
+        assert replacement_inspection.json()["contract"]["source_refs"] == contracts["derived_text"]["source_refs"]
+
     second_store = PostgresStore(postgres_database)
     monkeypatch.setattr(main_module, "pg", second_store, raising=True)
     with TestClient(main_module.app) as reopened_client:
@@ -383,6 +472,14 @@ def test_real_creation_paths_storage_reopen_retrieval_and_owner_isolation(
             persisted = _inspect(reopened_client, derivative_class, derived_id)
             assert persisted.status_code == 200, persisted.text
             assert persisted.json()["contract"]["source_refs"]
+        reopened_lifecycle = reopened_client.get(
+            f"/v1/internal/derived/derived_text/{derived_text_id}/lifecycle",
+            headers=_headers(),
+            params={"owner_id": "owner-a"},
+        )
+        assert reopened_lifecycle.status_code == 200
+        assert reopened_lifecycle.json()["contract"]["status"] == "superseded"
+        assert any(event.get("result") == "replaced" for event in reopened_lifecycle.json()["events"])
 
 
 def test_legacy_defaults_and_malformed_stored_provenance_are_explicit(

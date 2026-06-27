@@ -2117,6 +2117,7 @@ async def replay_derived_endpoint(derivative_class: str, derived_id: str, body: 
         request_id=request_id,
         requested_derivation_version=body.requested_derivation_version,
         persist_replacement=body.persist_replacement,
+        expected_current_derivation_version=body.expected_current_derivation_version,
     )
     if result is None:
         raise HTTPException(status_code=404, detail="derived object not found")

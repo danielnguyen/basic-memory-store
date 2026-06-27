@@ -372,6 +372,7 @@ class DerivedReplayRequest(BaseModel):
     request_id: str = Field(..., min_length=1, max_length=160)
     owner_id: str = Field(..., min_length=1, max_length=160)
     requested_derivation_version: Optional[str] = Field(default=None, max_length=160)
+    expected_current_derivation_version: Optional[str] = Field(default=None, max_length=160)
     persist_replacement: bool = False
 
 
