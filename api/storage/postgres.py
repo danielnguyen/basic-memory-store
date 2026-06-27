@@ -39,16 +39,17 @@ def _append_metadata_lifecycle_event(metadata: dict[str, Any], event: dict[str, 
     if "metadata" in safe_event:
         safe_event["metadata"] = _bounded_scalar_map(safe_event.get("metadata"))
     event_type = str(safe_event.get("event_type") or "")
-    status = lifecycle.get("status")
+    status = lifecycle.get("status") or metadata.get("status")
     if event_type in {"invalidated", "rebuilding", "superseded"}:
-        status = event_type
+        if status not in {"superseded", "invalidated"} or event_type == "superseded":
+            status = event_type
     if event_type == "rebuild_terminal":
         result = safe_event.get("result") or safe_event.get("metadata", {}).get("result")
         status = "active" if result == "identical" else status
         if result == "replaced":
             status = "superseded"
         if result in {"unsupported", "failed"}:
-            status = "invalidated"
+            status = status if status in {"superseded", "invalidated"} else "invalidated"
     updated_lifecycle = {
         **lifecycle,
         "status": status,
@@ -1708,6 +1709,148 @@ class PostgresStore:
             "created_at": str(row[6]),
             "owner_id": row[7],
         }
+
+    async def replace_derived_text_atomically(
+        self,
+        *,
+        predecessor_derived_text_id: UUID,
+        owner_id: str,
+        request_id: str,
+        kind: str,
+        text: str,
+        language: str | None,
+        derivation_params: dict[str, Any],
+        inject_failure_after_insert: bool = False,
+    ) -> dict[str, Any] | None:
+        select_cols = """
+            dt.id, dt.artifact_id, dt.kind, dt.language, dt.text,
+            dt.derivation_params, dt.created_at, a.owner_id
+        """
+
+        def row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
+            return {
+                "derived_text_id": str(row[0]),
+                "artifact_id": str(row[1]),
+                "kind": row[2],
+                "language": row[3],
+                "text": row[4],
+                "derivation_params": row[5] or {},
+                "created_at": str(row[6]),
+                "owner_id": row[7],
+            }
+
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"""
+                    SELECT {select_cols}
+                    FROM derived_text dt
+                    JOIN artifacts a ON a.id = dt.artifact_id
+                    WHERE dt.id = %s AND a.owner_id = %s
+                    FOR UPDATE OF dt;
+                    """,
+                    (predecessor_derived_text_id, owner_id),
+                )
+                predecessor_row = await cur.fetchone()
+                if predecessor_row is None:
+                    return None
+                predecessor = row_to_dict(predecessor_row)
+                predecessor_params = predecessor["derivation_params"] or {}
+                lifecycle = predecessor_params.get("lifecycle") if isinstance(predecessor_params.get("lifecycle"), dict) else {}
+                events = lifecycle.get("events") if isinstance(lifecycle.get("events"), list) else []
+                for event in reversed(events):
+                    if not isinstance(event, dict) or event.get("request_id") != request_id:
+                        continue
+                    terminal_result = event.get("result") or event.get("terminal_result")
+                    if terminal_result == "replaced" and event.get("replacement_id"):
+                        replacement_id = UUID(str(event["replacement_id"]))
+                        await cur.execute(
+                            f"""
+                            SELECT {select_cols}
+                            FROM derived_text dt
+                            JOIN artifacts a ON a.id = dt.artifact_id
+                            WHERE dt.id = %s AND a.owner_id = %s
+                            LIMIT 1;
+                            """,
+                            (replacement_id, owner_id),
+                        )
+                        replacement_row = await cur.fetchone()
+                        if replacement_row is None:
+                            raise ValueError("terminal_replacement_missing")
+                        return {
+                            "predecessor": predecessor,
+                            "replacement": row_to_dict(replacement_row),
+                            "idempotent": True,
+                        }
+                effective_status = predecessor_params.get("status") or lifecycle.get("status") or "active"
+                if effective_status == "superseded" or predecessor_params.get("replacement_id"):
+                    raise ValueError("predecessor_not_current")
+
+                replacement_params = {
+                    **derivation_params,
+                    "replacement_for": str(predecessor_derived_text_id),
+                    "status": "active",
+                }
+                await cur.execute(
+                    """
+                    INSERT INTO derived_text (artifact_id, kind, language, text, derivation_params)
+                    VALUES (%s, %s, %s, %s, %s::jsonb)
+                    RETURNING id, artifact_id, kind, language, text, derivation_params, created_at;
+                    """,
+                    (
+                        UUID(predecessor["artifact_id"]),
+                        kind,
+                        language,
+                        text,
+                        Json(replacement_params),
+                    ),
+                )
+                new_row = await cur.fetchone()
+                if inject_failure_after_insert:
+                    raise RuntimeError("injected_replace_derived_text_failure")
+                replacement_id = str(new_row[0])
+                superseded_event = {
+                    "event_type": "superseded",
+                    "request_id": request_id,
+                    "reason_code": "rebuild_replaced",
+                    "replacement_id": replacement_id,
+                }
+                terminal_event = {
+                    "event_type": "rebuild_terminal",
+                    "request_id": request_id,
+                    "reason_code": "rebuild_terminal",
+                    "result": "replaced",
+                    "replacement_id": replacement_id,
+                }
+                updated_params, _ = _append_metadata_lifecycle_event(predecessor_params, superseded_event)
+                updated_params, _ = _append_metadata_lifecycle_event(updated_params, terminal_event)
+                await cur.execute(
+                    f"""
+                    UPDATE derived_text dt
+                    SET derivation_params = %s::jsonb
+                    FROM artifacts a
+                    WHERE dt.id = %s
+                      AND dt.artifact_id = a.id
+                      AND a.owner_id = %s
+                    RETURNING {select_cols};
+                    """,
+                    (Json(updated_params), predecessor_derived_text_id, owner_id),
+                )
+                updated_predecessor_row = await cur.fetchone()
+                return {
+                    "predecessor": row_to_dict(updated_predecessor_row),
+                    "replacement": {
+                        "derived_text_id": replacement_id,
+                        "artifact_id": str(new_row[1]),
+                        "kind": new_row[2],
+                        "language": new_row[3],
+                        "text": new_row[4],
+                        "derivation_params": new_row[5] or {},
+                        "created_at": str(new_row[6]),
+                        "owner_id": owner_id,
+                    },
+                    "idempotent": False,
+                }
 
     async def get_recent_message_snippets(self, conversation_id: UUID, limit: int = 10) -> list[dict[str, Any]]:
         q = """

@@ -88,6 +88,8 @@ class FakePG:
         self.memory_replacements = []
         self.events = {}
         self.memory_recipe_summary = "Use concise answers"
+        self.memory_status = "active"
+        self.episode_status = "active"
         self.derived_text_params = {
             "derivation_type": "chunk",
             "derivation_version": "file-chunk-v1",
@@ -182,11 +184,14 @@ class FakePG:
             "scores": {"utility": 0.8},
             "derivation_version": "memory-promotion-v1",
         }
-        return {"memory": _memory_row(self.memory_id, recipe=recipe), "events": []}
+        row = _memory_row(self.memory_id, recipe=recipe)
+        row["status"] = self.memory_status
+        return {"memory": row, "events": []}
 
     async def transition_memory_item(self, **kwargs):
         row = _memory_row(str(kwargs["memory_id"]), recipe=None)
         row["status"] = kwargs["new_status"]
+        self.memory_status = kwargs["new_status"]
         return {"memory": row, "changed": True, "events_appended": ["state_changed"]}
 
     async def promote_memory_item(self, **kwargs):
@@ -217,7 +222,15 @@ class FakePG:
             "participants": ["operator"],
             "derivation_version": "episode-construction-v1",
         }
-        return {"episode": _episode_row(self.episode_id, recipe=recipe), "links": [], "events": []}
+        row = _episode_row(self.episode_id, recipe=recipe)
+        row["status"] = self.episode_status
+        return {"episode": row, "links": [], "events": []}
+
+    async def transition_episode_status(self, **kwargs):
+        row = _episode_row(str(kwargs["episode_id"]), recipe=None)
+        row["status"] = kwargs["new_status"]
+        self.episode_status = kwargs["new_status"]
+        return {"episode": row, "changed": True}
 
 
 def test_classification_is_stable_and_truthful():
@@ -234,6 +247,8 @@ def test_classification_is_stable_and_truthful():
     assert classify_rebuildability("proactive_suggestion", {})["classification"] == "replay_only"
     assert classify_rebuildability("memory_item", _memory_row("m"))["classification"] == "not_rebuildable"
     assert classify_rebuildability("episode", _episode_row("e"))["classification"] == "not_rebuildable"
+    assert classify_rebuildability("memory_item", _memory_row("m", recipe={"kind": MEMORY_RECIPE_KIND}))["classification"] == "not_rebuildable"
+    assert classify_rebuildability("episode", _episode_row("e", recipe={"kind": EPISODE_RECIPE_KIND}))["classification"] == "not_rebuildable"
 
 
 @pytest.mark.asyncio
@@ -294,7 +309,7 @@ async def test_validation_replay_is_deterministic_and_does_not_mutate(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_persistable_memory_rebuild_uses_recipe_and_supersedes(tmp_path):
+async def test_persistable_memory_rebuild_is_truthfully_unsupported_and_non_active(tmp_path):
     pg = FakePG(tmp_path)
     pg.memory_recipe_summary = "Use direct answers"
     result = await replay_derived(
@@ -307,10 +322,12 @@ async def test_persistable_memory_rebuild_uses_recipe_and_supersedes(tmp_path):
         persist_replacement=True,
     )
 
-    assert result["replay"]["result"] == "replaced"
-    assert result["replay"]["replacement_id"]
-    assert pg.memory_replacements[0]["supersedes_memory_id"] == uuid.UUID(pg.memory_id)
-    assert pg.memory_replacements[0]["derivation_version"] == "memory-promotion-v1"
+    assert result["rebuildability"] == "not_rebuildable"
+    assert result["replay"]["result"] == "unsupported"
+    assert result["replay"]["failure_reason"] == "caller_authored_no_deterministic_recipe"
+    assert result["lifecycle_status"] == "invalidated"
+    assert result["contract"]["status"] == "invalidated"
+    assert pg.memory_replacements == []
 
 
 @pytest.mark.asyncio
@@ -329,6 +346,26 @@ async def test_replay_rejects_unsupported_requested_version_before_mutation(tmp_
     assert result["replay"]["result"] == "unsupported"
     assert result["replay"]["failure_reason"] == "unsupported_derivation_version"
     assert pg.memory_replacements == []
+
+
+@pytest.mark.asyncio
+async def test_persistable_episode_rebuild_is_truthfully_unsupported_and_non_active(tmp_path):
+    pg = FakePG(tmp_path)
+    result = await replay_derived(
+        pg,
+        derived_class="episode",
+        derived_id=uuid.UUID(pg.episode_id),
+        owner_id="owner",
+        request_id="rid-episode-rebuild",
+        requested_derivation_version="episode-construction-v1",
+        persist_replacement=True,
+    )
+
+    assert result["rebuildability"] == "not_rebuildable"
+    assert result["replay"]["result"] == "unsupported"
+    assert result["replay"]["failure_reason"] == "caller_authored_no_deterministic_recipe"
+    assert result["lifecycle_status"] == "invalidated"
+    assert result["contract"]["status"] == "invalidated"
 
 
 @pytest.mark.asyncio

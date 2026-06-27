@@ -32,22 +32,22 @@
       "expected": {"result": "failed", "failure_reason": "source_missing"}
     },
     {
-      "name": "memory_item_supported_identical_replay",
+      "name": "memory_item_current_subtype_unsupported",
       "derived_class": "memory_item",
       "mode": "validation_only",
-      "expected": {"result": "identical", "mutates": false}
+      "expected": {"result": "unsupported", "mutates": false, "reason": "caller_authored_no_deterministic_recipe"}
     },
     {
-      "name": "memory_item_changed_rebuild_and_supersession",
+      "name": "memory_item_unsupported_persist_terminal",
       "derived_class": "memory_item",
       "mode": "persist_replacement",
-      "expected": {"result": "replaced", "mutates": true, "relationship": "supersedes"}
+      "expected": {"result": "unsupported", "mutates": true, "terminal_status": "invalidated"}
     },
     {
-      "name": "episode_supported_identical_replay",
+      "name": "episode_current_subtype_unsupported",
       "derived_class": "episode",
       "mode": "validation_only",
-      "expected": {"result": "identical", "mutates": false}
+      "expected": {"result": "unsupported", "mutates": false, "reason": "caller_authored_no_deterministic_recipe"}
     },
     {
       "name": "explicitly_unsupported_subtype",

@@ -4,10 +4,10 @@ import asyncio
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, Callable, Awaitable
+from typing import Any
 from uuid import UUID, uuid4
 
-from services.derivation_lifecycle import EPISODE_RECIPE_KIND, MEMORY_RECIPE_KIND, replay_derived
+from services.derivation_lifecycle import replay_derived
 from services.proactive import PROACTIVE_DERIVATION_VERSION, build_portfolio_suggestion_candidate
 
 
@@ -18,9 +18,9 @@ REQUIRED_SCENARIOS = {
     "derived_text_missing_source",
     "proactive_deterministic_reevaluation",
     "proactive_missing_source_event",
-    "memory_item_supported_identical_replay",
-    "memory_item_changed_rebuild_and_supersession",
-    "episode_supported_identical_replay",
+    "memory_item_current_subtype_unsupported",
+    "memory_item_unsupported_persist_terminal",
+    "episode_current_subtype_unsupported",
     "explicitly_unsupported_subtype",
     "cross_owner_rejection",
     "injected_persistence_failure",
@@ -94,36 +94,10 @@ class ScenarioStore:
             "created_at": _iso(),
             "updated_at": _iso(),
         }
-        self.memory = self._memory_row(self.memory_id, self._memory_recipe("Use concise answers"), "Use concise answers")
-        self.episode = self._episode_row(self.episode_id, self._episode_recipe("Milestone"), "Milestone")
+        self.memory = self._memory_row(self.memory_id, "Use concise answers")
+        self.episode = self._episode_row(self.episode_id, "Milestone")
 
-    def _memory_recipe(self, summary: str) -> dict[str, Any]:
-        return {
-            "kind": MEMORY_RECIPE_KIND,
-            "memory_type": "preference",
-            "summary": summary,
-            "source_refs": [{"ref_type": "message", "ref_id": "msg-1", "support_kind": "direct"}],
-            "scores": {"utility": 0.8},
-            "derivation_version": "memory-promotion-v1",
-        }
-
-    def _episode_recipe(self, title: str) -> dict[str, Any]:
-        return {
-            "kind": EPISODE_RECIPE_KIND,
-            "title": title,
-            "summary": "A bounded milestone happened.",
-            "episode_type": "milestone",
-            "source_refs": [{"ref_type": "message", "ref_id": "msg-1", "support_kind": "direct"}],
-            "trigger": {"kind": "manual"},
-            "time_window": {"start": "2026-01-01"},
-            "outcome": "completed",
-            "significance": "useful",
-            "participants": ["operator"],
-            "derivation_version": "episode-construction-v1",
-        }
-
-    def _memory_row(self, memory_id: str, recipe: dict[str, Any] | None, summary: str) -> dict[str, Any]:
-        explanation = {"derivation_recipe": recipe} if recipe else {}
+    def _memory_row(self, memory_id: str, summary: str) -> dict[str, Any]:
         return {
             "memory_id": memory_id,
             "owner_id": self.owner_id,
@@ -140,14 +114,13 @@ class ScenarioStore:
             "expires_at": None,
             "derivation_version": "memory-promotion-v1",
             "confidence": 0.8,
-            "explanation_json": explanation,
+            "explanation_json": {"rationale": "caller authored fixture"},
             "generation_trace_id": "seed",
             "created_at": _iso(),
             "updated_at": _iso(),
         }
 
-    def _episode_row(self, episode_id: str, recipe: dict[str, Any] | None, title: str) -> dict[str, Any]:
-        explanation = {"derivation_recipe": recipe} if recipe else {}
+    def _episode_row(self, episode_id: str, title: str) -> dict[str, Any]:
         return {
             "episode_id": episode_id,
             "owner_id": self.owner_id,
@@ -167,7 +140,7 @@ class ScenarioStore:
             "status": "active",
             "derivation_version": "episode-construction-v1",
             "confidence": 0.8,
-            "explanation_json": explanation,
+            "explanation_json": {"rationale": "caller authored fixture"},
             "generation_trace_id": "seed",
             "created_at": _iso(),
             "updated_at": _iso(),
@@ -230,11 +203,26 @@ class ScenarioStore:
         self.memory.setdefault("_events", []).append({"event_type": event_type, "reason_json": reason_json})
         return await self.get_memory_debug(memory_id, owner_id)
 
+    async def transition_memory_item(self, *, memory_id: UUID, owner_id: str, new_status: str, reason_code: str, reason_metadata: dict[str, Any], request_id: str, related_memory_id: UUID | None) -> dict[str, Any] | None:
+        if str(memory_id) != self.memory_id or owner_id != self.owner_id:
+            return None
+        self.memory["status"] = new_status
+        self.memory.setdefault("_events", []).append({
+            "event_type": "state_changed",
+            "reason_json": {
+                "request_id": request_id,
+                "reason_code": reason_code,
+                "new_status": new_status,
+                "reason_metadata": reason_metadata,
+            },
+        })
+        return {"memory": self.memory, "changed": True}
+
     async def promote_memory_item(self, **kwargs: Any) -> dict[str, Any]:
         replacement_id = str(uuid4())
         self.memory["status"] = "superseded"
         self.memory["superseded_by_memory_id"] = replacement_id
-        row = self._memory_row(replacement_id, kwargs["explanation_json"]["derivation_recipe"], kwargs["summary"])
+        row = self._memory_row(replacement_id, kwargs["summary"])
         row["supersedes_memory_id"] = self.memory_id
         self.memory_replacements.append(row)
         return {"memory": row, "events_appended": ["superseded", "created", "promoted"]}
@@ -248,10 +236,17 @@ class ScenarioStore:
         self.episode.setdefault("_events", []).append({"event_type": event_type, "reason_json": reason_json})
         return await self.get_episode_debug(episode_id, owner_id)
 
+    async def transition_episode_status(self, *, episode_id: UUID, owner_id: str, new_status: str, request_id: str, reason_json: dict[str, Any]) -> dict[str, Any] | None:
+        if str(episode_id) != self.episode_id or owner_id != self.owner_id:
+            return None
+        self.episode["status"] = new_status
+        self.episode.setdefault("_events", []).append({"event_type": "updated", "reason_json": {**reason_json, "request_id": request_id}})
+        return {"episode": self.episode, "changed": True}
+
     async def replace_episode(self, **kwargs: Any) -> dict[str, Any]:
         replacement_id = str(uuid4())
         self.episode["status"] = "superseded"
-        row = self._episode_row(replacement_id, kwargs["explanation_json"]["derivation_recipe"], kwargs["title"])
+        row = self._episode_row(replacement_id, kwargs["title"])
         row["supersedes_episode_id"] = self.episode_id
         self.episode_replacements.append(row)
         return {"episode": row}
@@ -312,12 +307,11 @@ async def _run_named(name: str, root: Path) -> dict[str, Any]:
     elif name == "proactive_missing_source_event":
         store.event_id = str(uuid4())
         replay = await _call(store, derived_class="proactive_suggestion", derived_id=store.suggestion_id, persist=False)
-    elif name == "memory_item_supported_identical_replay":
+    elif name == "memory_item_current_subtype_unsupported":
         replay = await _call(store, derived_class="memory_item", derived_id=store.memory_id, persist=False)
-    elif name == "memory_item_changed_rebuild_and_supersession":
-        store.memory["explanation_json"]["derivation_recipe"]["summary"] = "Use direct answers"
+    elif name == "memory_item_unsupported_persist_terminal":
         replay = await _call(store, derived_class="memory_item", derived_id=store.memory_id, persist=True)
-    elif name == "episode_supported_identical_replay":
+    elif name == "episode_current_subtype_unsupported":
         replay = await _call(store, derived_class="episode", derived_id=store.episode_id, persist=False)
     elif name == "explicitly_unsupported_subtype":
         store.memory["explanation_json"] = {}

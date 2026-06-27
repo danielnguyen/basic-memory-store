@@ -8,18 +8,6 @@ from uuid import UUID
 
 from services.chunking import chunk_text
 from services.derived_contract import CONTRACT_ADAPTERS, normalize_contract_source_refs
-from services.episodes import (
-    DEFAULT_DERIVATION_VERSION as EPISODE_DERIVATION_VERSION,
-    episode_key,
-    normalize_json_list,
-    normalize_json_map,
-    source_ref_hash as episode_source_ref_hash,
-)
-from services.memory_items import (
-    DEFAULT_DERIVATION_VERSION as MEMORY_DERIVATION_VERSION,
-    normalize_scores,
-    source_ref_hash,
-)
 from services.proactive import PROACTIVE_DERIVATION_VERSION, reevaluate_proactive_candidate
 
 
@@ -173,16 +161,17 @@ def append_lifecycle_event(metadata: dict[str, Any], event: dict[str, Any]) -> t
     updated_events = [*events, event]
     event_type = event["event_type"]
     result = event.get("result") or (event.get("metadata") or {}).get("result")
-    status = lifecycle.get("status")
+    status = lifecycle.get("status") or metadata.get("status")
     if event_type in {"invalidated", "rebuilding", "superseded"}:
-        status = event_type
+        if status not in {"superseded", "invalidated"} or event_type == "superseded":
+            status = event_type
     if event_type == "rebuild_terminal":
         if result == "identical":
             status = "active"
         elif result == "replaced":
             status = "superseded"
         elif result in {"unsupported", "failed"}:
-            status = "invalidated"
+            status = status if status in {"superseded", "invalidated"} else "invalidated"
     updated_lifecycle = {
         **lifecycle,
         "status": status,
@@ -295,17 +284,9 @@ def classify_rebuildability(derived_class: str, row: dict[str, Any]) -> dict[str
     if derived_class == "proactive_suggestion":
         return {"classification": "replay_only", "reason": "proactive rules are deterministic but replay must not repeat delivery effects"}
     if derived_class == "memory_item":
-        explanation = row.get("explanation_json") if isinstance(row.get("explanation_json"), dict) else {}
-        recipe = explanation.get("derivation_recipe") if isinstance(explanation.get("derivation_recipe"), dict) else {}
-        if recipe.get("kind") == MEMORY_RECIPE_KIND:
-            return {"classification": "rebuildable", "reason": "bounded memory promotion recipe is persisted"}
-        return {"classification": "not_rebuildable", "reason": "memory item lacks a deterministic promotion recipe"}
+        return {"classification": "not_rebuildable", "reason": "caller_authored_no_deterministic_recipe"}
     if derived_class == "episode":
-        explanation = row.get("explanation_json") if isinstance(row.get("explanation_json"), dict) else {}
-        recipe = explanation.get("derivation_recipe") if isinstance(explanation.get("derivation_recipe"), dict) else {}
-        if recipe.get("kind") == EPISODE_RECIPE_KIND:
-            return {"classification": "rebuildable", "reason": "bounded episode construction recipe is persisted"}
-        return {"classification": "not_rebuildable", "reason": "episode lacks a deterministic construction recipe"}
+        return {"classification": "not_rebuildable", "reason": "caller_authored_no_deterministic_recipe"}
     return {"classification": "not_rebuildable", "reason": "unsupported derived class"}
 
 
@@ -500,51 +481,9 @@ async def build_candidate_snapshot(pg: Any, *, derived_class: str, row: dict[str
             "candidate": candidate,
         }
     if derived_class == "memory_item":
-        recipe = (row.get("explanation_json") or {}).get("derivation_recipe") or {}
-        if recipe.get("kind") != MEMORY_RECIPE_KIND:
-            raise ValueError("unsupported_rebuild")
-        refs = normalize_contract_source_refs(recipe.get("source_refs") or row.get("source_refs_json"))
-        return {
-            "derived_class": "memory_item",
-            "derivation_version": requested_version or recipe.get("derivation_version") or MEMORY_DERIVATION_VERSION,
-            "source_refs": refs,
-            "source_ref_hash": source_ref_hash(refs),
-            "stable_object_key": source_ref_hash(refs),
-            "normalized_output_hash": structural_hash({
-                "memory_type": recipe.get("memory_type") or row.get("memory_type"),
-                "summary_hash": structural_hash(str(recipe.get("summary") or "")),
-                "scores": normalize_scores(recipe.get("scores") or {}),
-                "promotion_state": "promoted",
-            }),
-            "candidate": recipe,
-        }
+        raise ValueError("caller_authored_no_deterministic_recipe")
     if derived_class == "episode":
-        recipe = (row.get("explanation_json") or {}).get("derivation_recipe") or {}
-        if recipe.get("kind") != EPISODE_RECIPE_KIND:
-            raise ValueError("unsupported_rebuild")
-        refs = normalize_contract_source_refs(recipe.get("source_refs") or row.get("source_refs_json"))
-        trigger = normalize_json_map(recipe.get("trigger") or row.get("trigger_json") or {})
-        time_window = normalize_json_map(recipe.get("time_window") or row.get("time_window_json") or {})
-        ref_hash = episode_source_ref_hash(refs)
-        key = episode_key(episode_type=recipe.get("episode_type") or row.get("episode_type"), source_ref_hash_value=ref_hash, trigger_json=trigger, time_window_json=time_window)
-        return {
-            "derived_class": "episode",
-            "derivation_version": requested_version or recipe.get("derivation_version") or EPISODE_DERIVATION_VERSION,
-            "source_refs": refs,
-            "source_ref_hash": ref_hash,
-            "stable_object_key": key,
-            "normalized_output_hash": structural_hash({
-                "episode_type": recipe.get("episode_type") or row.get("episode_type"),
-                "title_hash": structural_hash(str(recipe.get("title") or "")),
-                "summary_hash": structural_hash(str(recipe.get("summary") or "")),
-                "outcome_hash": structural_hash(str(recipe.get("outcome") or "")),
-                "significance_hash": structural_hash(str(recipe.get("significance") or "")),
-                "unresolved": normalize_json_map(recipe.get("unresolved") or {}),
-                "callback_count": len(recipe.get("callback_candidates") or []),
-                "participant_count": len(recipe.get("participants") or []),
-            }),
-            "candidate": recipe,
-        }
+        raise ValueError("caller_authored_no_deterministic_recipe")
     raise ValueError("unsupported_class")
 
 
@@ -575,29 +514,73 @@ async def append_replay_lifecycle(
         updated, _ = append_lifecycle_event(evidence, event)
         return await pg.update_proactive_suggestion_evidence(suggestion_id=derived_id, owner_id=owner_id, evidence_json=updated)
     reason_json = {**event, "terminal_result": event.get("result")}
-    if derived_class == "memory_item" and hasattr(pg, "append_memory_lifecycle_event"):
-        debug = await pg.append_memory_lifecycle_event(
-            memory_id=derived_id,
-            owner_id=owner_id,
-            event_type="state_changed",
-            reason_json=reason_json,
-        )
-        if debug is not None:
-            row = debug["memory"]
-            row["_events"] = debug.get("events") or []
-            return row
-    if derived_class == "episode" and hasattr(pg, "append_episode_lifecycle_event"):
-        debug = await pg.append_episode_lifecycle_event(
-            episode_id=derived_id,
-            owner_id=owner_id,
-            event_type="updated",
-            reason_json=reason_json,
-        )
-        if debug is not None:
-            row = debug["episode"]
-            row["_events"] = debug.get("events") or []
-            row["_links"] = debug.get("links") or []
-            return row
+    terminal_result = event.get("result") or (event.get("metadata") or {}).get("result")
+    is_terminal_failure = event.get("event_type") == "rebuild_terminal" and terminal_result in {"unsupported", "failed"}
+    if derived_class == "memory_item":
+        if is_terminal_failure and hasattr(pg, "transition_memory_item"):
+            current = await load_derived_row(pg, derived_class=derived_class, derived_id=derived_id, owner_id=owner_id)
+            if current is None:
+                return None
+            if current.get("status") == "active":
+                transitioned = await pg.transition_memory_item(
+                    memory_id=derived_id,
+                    owner_id=owner_id,
+                    new_status="invalidated",
+                    reason_code=str(event.get("failure_reason") or terminal_result),
+                    reason_metadata={
+                        "terminal_result": terminal_result,
+                        "failure_reason": event.get("failure_reason"),
+                    },
+                    request_id=str(event.get("request_id")),
+                    related_memory_id=None,
+                )
+                if transitioned is not None:
+                    row = transitioned["memory"]
+                    debug = await pg.get_memory_debug(derived_id, owner_id)
+                    row["_events"] = (debug or {}).get("events") or []
+                    return row
+        if hasattr(pg, "append_memory_lifecycle_event"):
+            debug = await pg.append_memory_lifecycle_event(
+                memory_id=derived_id,
+                owner_id=owner_id,
+                event_type="state_changed",
+                reason_json=reason_json,
+            )
+            if debug is not None:
+                row = debug["memory"]
+                row["_events"] = debug.get("events") or []
+                return row
+    if derived_class == "episode":
+        if is_terminal_failure and hasattr(pg, "transition_episode_status"):
+            current = await load_derived_row(pg, derived_class=derived_class, derived_id=derived_id, owner_id=owner_id)
+            if current is None:
+                return None
+            if current.get("status") == "active":
+                transitioned = await pg.transition_episode_status(
+                    episode_id=derived_id,
+                    owner_id=owner_id,
+                    new_status="invalidated",
+                    request_id=str(event.get("request_id")),
+                    reason_json=reason_json,
+                )
+                if transitioned is not None:
+                    row = transitioned["episode"]
+                    debug = await pg.get_episode_debug(derived_id, owner_id)
+                    row["_events"] = (debug or {}).get("events") or []
+                    row["_links"] = (debug or {}).get("links") or []
+                    return row
+        if hasattr(pg, "append_episode_lifecycle_event"):
+            debug = await pg.append_episode_lifecycle_event(
+                episode_id=derived_id,
+                owner_id=owner_id,
+                event_type="updated",
+                reason_json=reason_json,
+            )
+            if debug is not None:
+                row = debug["episode"]
+                row["_events"] = debug.get("events") or []
+                row["_links"] = debug.get("links") or []
+                return row
     return await load_derived_row(pg, derived_class=derived_class, derived_id=derived_id, owner_id=owner_id)
 
 
@@ -796,17 +779,32 @@ async def replay_derived(
                     "replacement_for": str(derived_id),
                     "status": "active",
                 }
-                replacement = await pg.create_derived_text(
-                    artifact_id=UUID(row["artifact_id"]),
-                    kind=row.get("kind") or "chunk",
-                    text=candidate["candidate"]["text"],
-                    language=row.get("language"),
-                    derivation_params=new_params,
-                )
-                replacement_id = replacement["derived_text_id"]
-                event = replay_event(request_id=request_id, event_type="superseded", reason_code="rebuild_replaced", replacement_id=replacement_id)
-                await append_replay_lifecycle(pg, derived_class=derived_class, derived_id=derived_id, owner_id=owner_id, event=event)
+                if hasattr(pg, "replace_derived_text_atomically"):
+                    replacement = await pg.replace_derived_text_atomically(
+                        predecessor_derived_text_id=derived_id,
+                        owner_id=owner_id,
+                        request_id=request_id,
+                        kind=row.get("kind") or "chunk",
+                        text=candidate["candidate"]["text"],
+                        language=row.get("language"),
+                        derivation_params=new_params,
+                    )
+                    if replacement is None:
+                        raise KeyError("derived_text_predecessor_missing")
+                    replacement_id = replacement["replacement"]["derived_text_id"]
+                else:
+                    replacement = await pg.create_derived_text(
+                        artifact_id=UUID(row["artifact_id"]),
+                        kind=row.get("kind") or "chunk",
+                        text=candidate["candidate"]["text"],
+                        language=row.get("language"),
+                        derivation_params=new_params,
+                    )
+                    replacement_id = replacement["derived_text_id"]
+                    event = replay_event(request_id=request_id, event_type="superseded", reason_code="rebuild_replaced", replacement_id=replacement_id)
+                    await append_replay_lifecycle(pg, derived_class=derived_class, derived_id=derived_id, owner_id=owner_id, event=event)
         except Exception as exc:
+            failure_reason = str(exc) or type(exc).__name__
             return await finalize_replay_result(
                 pg,
                 derived_class=derived_class,
@@ -818,7 +816,7 @@ async def replay_derived(
                 result="failed",
                 current=current,
                 candidate={k: v for k, v in candidate.items() if k != "candidate"},
-                failure_reason=type(exc).__name__,
+                failure_reason=failure_reason,
             )
     return await finalize_replay_result(
         pg,
