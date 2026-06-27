@@ -77,6 +77,10 @@ async def ingest_files(
                 derivation_params={
                     "derivation_type": "chunk",
                     "derivation_version": "file-chunk-v1",
+                    "chunking_algorithm": "fixed-overlap-text",
+                    "chunking_algorithm_version": "fixed-overlap-text-v1",
+                    "chunk_size": settings.ingest_chunk_size_chars,
+                    "chunk_overlap": settings.ingest_chunk_overlap_chars,
                     "status": "active",
                     "source_refs": [
                         {

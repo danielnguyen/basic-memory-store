@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "scenarios": [
+    {
+      "name": "derived_text_identical_replay",
+      "derived_class": "derived_text",
+      "mode": "validation_only",
+      "expected": {"result": "identical", "mutates": false}
+    },
+    {
+      "name": "derived_text_changed_source",
+      "derived_class": "derived_text",
+      "mode": "persist_replacement",
+      "expected": {"result": "replaced", "mutates": true}
+    },
+    {
+      "name": "derived_text_missing_source",
+      "derived_class": "derived_text",
+      "mode": "validation_only",
+      "expected": {"result": "failed", "failure_reason": "source_missing"}
+    },
+    {
+      "name": "proactive_deterministic_reevaluation",
+      "derived_class": "proactive_suggestion",
+      "mode": "validation_only",
+      "expected": {"result": "replaced", "mutates": false, "delivery_side_effects": false}
+    },
+    {
+      "name": "proactive_missing_source_event",
+      "derived_class": "proactive_suggestion",
+      "mode": "validation_only",
+      "expected": {"result": "failed", "failure_reason": "source_missing"}
+    },
+    {
+      "name": "memory_item_current_subtype_unsupported",
+      "derived_class": "memory_item",
+      "mode": "validation_only",
+      "expected": {"result": "unsupported", "mutates": false, "reason": "caller_authored_no_deterministic_recipe"}
+    },
+    {
+      "name": "memory_item_unsupported_persist_terminal",
+      "derived_class": "memory_item",
+      "mode": "persist_replacement",
+      "expected": {"result": "unsupported", "mutates": true, "terminal_status": "invalidated"}
+    },
+    {
+      "name": "episode_current_subtype_unsupported",
+      "derived_class": "episode",
+      "mode": "validation_only",
+      "expected": {"result": "unsupported", "mutates": false, "reason": "caller_authored_no_deterministic_recipe"}
+    },
+    {
+      "name": "explicitly_unsupported_subtype",
+      "derived_class": "memory_item",
+      "mode": "validation_only",
+      "expected": {"result": "unsupported", "reason": "missing deterministic recipe"}
+    },
+    {
+      "name": "cross_owner_rejection",
+      "derived_class": "memory_item",
+      "mode": "validation_only",
+      "expected": {"result": "not_found", "reveals_object": false}
+    },
+    {
+      "name": "injected_persistence_failure",
+      "derived_class": "derived_text",
+      "mode": "persist_replacement",
+      "expected": {"result": "failed", "partial_mutation": false}
+    },
+    {
+      "name": "repeated_request_idempotency",
+      "derived_class": "derived_text",
+      "mode": "persist_replacement",
+      "expected": {"result": "replaced", "duplicate_replacements": false}
+    }
+  ],
+  "privacy_banned_fields": [
+    "artifact_text",
+    "message_content",
+    "prompt",
+    "summary",
+    "body"
+  ]
+}

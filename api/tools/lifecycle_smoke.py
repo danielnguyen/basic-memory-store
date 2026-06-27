@@ -4,10 +4,11 @@ import argparse
 import asyncio
 import json
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from services.memory_items import normalize_source_refs, source_ref_hash
 from services.memory_lifecycle import effective_freshness_state
+from services.derivation_lifecycle import replay_derived
 from storage.postgres import PostgresStore
 from tools import schema_migrations
 
@@ -90,6 +91,47 @@ async def run_smoke(*, dsn: str, db_dir: Path) -> dict[str, object]:
             request_id="lifecycle-smoke-corrected",
             related_memory_id=original_id,
         )
+        artifact_id = uuid4()
+        source_path = Path("/tmp") / f"wave2c-lifecycle-smoke-{artifact_id}.txt"
+        source_path.write_text("Wave 2C lifecycle smoke source.", encoding="utf-8")
+        artifact = await store.create_artifact(
+            artifact_id=artifact_id,
+            owner_id=owner_id,
+            filename=source_path.name,
+            mime="text/plain",
+            size=source_path.stat().st_size,
+            object_uri=f"file://{source_path}",
+            status="completed",
+        )
+        derived = await store.create_derived_text(
+            artifact_id=UUID(artifact["artifact_id"]),
+            kind="chunk",
+            text="Wave 2C lifecycle smoke source.",
+            language=None,
+            derivation_params={
+                "derivation_type": "chunk",
+                "derivation_version": "file-chunk-v1",
+                "chunking_algorithm": "fixed-overlap-text",
+                "chunking_algorithm_version": "fixed-overlap-text-v1",
+                "chunk_size": 400,
+                "chunk_overlap": 0,
+                "status": "active",
+                "source_refs": [{"ref_type": "artifact", "ref_id": artifact["artifact_id"], "support_kind": "direct"}],
+                "chunk_index": 0,
+                "char_start": 0,
+                "char_end": len("Wave 2C lifecycle smoke source."),
+            },
+        )
+        wave2c_replay = await replay_derived(
+            store,
+            derived_class="derived_text",
+            derived_id=UUID(derived["derived_text_id"]),
+            owner_id=owner_id,
+            request_id="lifecycle-smoke-wave2c-replay",
+            requested_derivation_version=None,
+            persist_replacement=True,
+            expected_current_derivation_version="file-chunk-v1",
+        )
     finally:
         await store.close()
 
@@ -98,6 +140,7 @@ async def run_smoke(*, dsn: str, db_dir: Path) -> dict[str, object]:
     try:
         original_debug = await reopened.get_memory_debug(original_id, owner_id)
         replacement_debug = await reopened.get_memory_debug(replacement_id, owner_id)
+        wave2c_debug = await reopened.get_derived_text_for_owner(UUID(derived["derived_text_id"]), owner_id)
     finally:
         await reopened.close()
 
@@ -109,6 +152,10 @@ async def run_smoke(*, dsn: str, db_dir: Path) -> dict[str, object]:
     assert replacement_debug["memory"]["status"] == "corrected"
     assert replacement_debug["memory"]["supersedes_memory_id"] == str(original_id)
     assert effective_freshness_state(replacement_debug["memory"]) == "corrected"
+    assert wave2c_replay is not None
+    assert wave2c_replay["replay"]["result"] == "identical"
+    assert wave2c_debug is not None
+    assert wave2c_debug["derivation_params"]["lifecycle"]["terminal_result"] == "identical"
     lifecycle_events = [
         event for event in original_debug["events"] if event["event_type"] == "state_changed"
     ]
@@ -126,6 +173,8 @@ async def run_smoke(*, dsn: str, db_dir: Path) -> dict[str, object]:
         "original_event_count": len(original_debug["events"]),
         "replacement_event_count": len(replacement_debug["events"]),
         "reopen_verified": True,
+        "wave2c_replay_result": wave2c_replay["replay"]["result"],
+        "wave2c_recipe_chunk_size": wave2c_debug["derivation_params"]["chunk_size"],
         "migration_state": status["state"],
         "migration_check_state": check["state"],
         "applied_migrations": upgrade["applied_migrations"],

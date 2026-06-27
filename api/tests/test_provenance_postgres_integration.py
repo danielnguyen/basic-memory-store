@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import types
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 import psycopg
+import pytest
 
 import main as main_module
 from storage.postgres import PostgresStore
@@ -278,10 +280,54 @@ def test_real_creation_paths_storage_reopen_retrieval_and_owner_isolation(
             {"ref_type": "event_log", "ref_id": event_log_id, "support_kind": "direct"}
         ]
         assert contracts["proactive_suggestion"]["generation_trace_id"] == "rid-proactive"
+        assert contracts["proactive_suggestion"]["status"] == "pending"
+        assert contracts["proactive_suggestion"]["effective_status"] is None
         assert contracts["memory_item"]["confidence"] == 0.8
         assert contracts["memory_item"]["generation_trace_id"] == "trace-memory"
         assert contracts["episode"]["confidence"] == 0.7
         assert contracts["episode"]["generation_trace_id"] == "trace-episode"
+
+        proactive_identical = client.post(
+            f"/v1/internal/derived/proactive_suggestion/{proactive_id}/replay",
+            headers=_headers("rid-proactive-identical"),
+            json={
+                "request_id": "rid-proactive-identical",
+                "owner_id": "owner-a",
+                "expected_current_derivation_version": "proactive-rules-v1",
+                "persist_replacement": True,
+            },
+        )
+        assert proactive_identical.status_code == 200, proactive_identical.text
+        assert proactive_identical.json()["replay"]["result"] == "identical"
+        assert proactive_identical.json()["inspection"]["contract"]["status"] == "pending"
+        assert proactive_identical.json()["inspection"]["contract"]["effective_status"] == "active"
+        assert proactive_identical.json()["inspection"]["lifecycle_status"] == "active"
+
+        with psycopg.connect(postgres_database) as conn:
+            conn.execute(
+                """
+                UPDATE event_ingest_log
+                SET payload_json = payload_json || '{"account": "taxable"}'::jsonb
+                WHERE id = %s
+                """,
+                (event_log_id,),
+            )
+        proactive_changed = client.post(
+            f"/v1/internal/derived/proactive_suggestion/{proactive_id}/replay",
+            headers=_headers("rid-proactive-changed"),
+            json={
+                "request_id": "rid-proactive-changed",
+                "owner_id": "owner-a",
+                "expected_current_derivation_version": "proactive-rules-v1",
+                "persist_replacement": True,
+            },
+        )
+        assert proactive_changed.status_code == 200, proactive_changed.text
+        assert proactive_changed.json()["replay"]["result"] == "unsupported"
+        assert proactive_changed.json()["inspection"]["contract"]["status"] == "pending"
+        assert proactive_changed.json()["inspection"]["contract"]["effective_status"] == "invalidated"
+        assert proactive_changed.json()["inspection"]["lifecycle_status"] == "invalidated"
+        assert "evidence_json" not in proactive_changed.json()["inspection"]["contract"]
 
         retrieval = client.post(
             f"/v2/conversations/{conversation_id}/retrieve",
@@ -371,6 +417,257 @@ def test_real_creation_paths_storage_reopen_retrieval_and_owner_isolation(
         )
         assert malformed.status_code == 422
 
+        lifecycle = client.get(
+            f"/v1/internal/derived/derived_text/{derived_text_id}/lifecycle",
+            headers=_headers(),
+            params={"owner_id": "owner-a"},
+        )
+        assert lifecycle.status_code == 200, lifecycle.text
+        assert lifecycle.json()["rebuildability"] == "rebuildable"
+        snapshot = lifecycle.json()["structural_snapshot"]
+        assert snapshot["status"] == "active"
+
+        identical_replay = client.post(
+            f"/v1/internal/derived/derived_text/{derived_text_id}/replay",
+            headers=_headers("rid-derived-identical"),
+            json={
+                "request_id": "rid-derived-identical",
+                "owner_id": "owner-a",
+                "expected_current_derivation_version": "file-chunk-v1",
+                "persist_replacement": False,
+            },
+        )
+        assert identical_replay.status_code == 200, identical_replay.text
+        assert identical_replay.json()["replay"]["result"] == "identical"
+
+        unsupported_version = client.post(
+            f"/v1/internal/derived/derived_text/{derived_text_id}/replay",
+            headers=_headers("rid-derived-unsupported-version"),
+            json={
+                "request_id": "rid-derived-unsupported-version",
+                "owner_id": "owner-a",
+                "requested_derivation_version": "file-chunk-v999",
+                "persist_replacement": True,
+            },
+        )
+        assert unsupported_version.status_code == 200, unsupported_version.text
+        assert unsupported_version.json()["replay"]["result"] == "unsupported"
+        assert unsupported_version.json()["replay"]["failure_reason"] == "unsupported_derivation_version"
+
+        invalidated = client.post(
+            f"/v1/internal/derived/derived_text/{derived_text_id}/invalidate",
+            headers=_headers("rid-derived-invalidate"),
+            json={
+                "request_id": "rid-derived-invalidate",
+                "owner_id": "owner-a",
+                "reason_code": "source_changed",
+                "metadata": {"private_text": "x" * 500, "nested": {"drop": True}},
+            },
+        )
+        assert invalidated.status_code == 200, invalidated.text
+        assert invalidated.json()["changed"] is True
+        repeated_invalidated = client.post(
+            f"/v1/internal/derived/derived_text/{derived_text_id}/invalidate",
+            headers=_headers("rid-derived-invalidate"),
+            json={
+                "request_id": "rid-derived-invalidate",
+                "owner_id": "owner-a",
+                "reason_code": "source_changed",
+            },
+        )
+        assert repeated_invalidated.status_code == 200
+        assert repeated_invalidated.json()["changed"] is False
+
+        source_file.write_text("Neutral provenance fixture changed for deterministic replay.", encoding="utf-8")
+        replaced = client.post(
+            f"/v1/internal/derived/derived_text/{derived_text_id}/replay",
+            headers=_headers("rid-derived-replace"),
+            json={
+                "request_id": "rid-derived-replace",
+                "owner_id": "owner-a",
+                "expected_current_derivation_version": "file-chunk-v1",
+                "persist_replacement": True,
+            },
+        )
+        assert replaced.status_code == 200, replaced.text
+        assert replaced.json()["replay"]["result"] == "replaced"
+        replacement_id = replaced.json()["replay"]["replacement_id"]
+        assert replacement_id
+        repeated_replaced = client.post(
+            f"/v1/internal/derived/derived_text/{derived_text_id}/replay",
+            headers=_headers("rid-derived-replace"),
+            json={
+                "request_id": "rid-derived-replace",
+                "owner_id": "owner-a",
+                "expected_current_derivation_version": "file-chunk-v1",
+                "persist_replacement": True,
+            },
+        )
+        assert repeated_replaced.status_code == 200, repeated_replaced.text
+        assert repeated_replaced.json()["replay"]["result"] == "replaced"
+        assert repeated_replaced.json()["replay"]["replacement_id"] == replacement_id
+        assert repeated_replaced.json()["replay"]["idempotent_replay"] is True
+
+        competing_replay = client.post(
+            f"/v1/internal/derived/derived_text/{derived_text_id}/replay",
+            headers=_headers("rid-derived-competing"),
+            json={
+                "request_id": "rid-derived-competing",
+                "owner_id": "owner-a",
+                "expected_current_derivation_version": "file-chunk-v1",
+                "persist_replacement": True,
+            },
+        )
+        assert competing_replay.status_code == 200, competing_replay.text
+        assert competing_replay.json()["replay"]["result"] == "failed"
+        assert competing_replay.json()["replay"]["failure_reason"] == "predecessor_not_current"
+
+        predecessor_lifecycle = client.get(
+            f"/v1/internal/derived/derived_text/{derived_text_id}/lifecycle",
+            headers=_headers(),
+            params={"owner_id": "owner-a"},
+        )
+        assert predecessor_lifecycle.status_code == 200
+        assert predecessor_lifecycle.json()["contract"]["status"] == "superseded"
+        assert predecessor_lifecycle.json()["lifecycle_status"] == "superseded"
+        predecessor_events = predecessor_lifecycle.json()["events"]
+        assert any(
+            event.get("event_type") == "rebuild_terminal"
+            and event.get("request_id") == "rid-derived-replace"
+            and event.get("result") == "replaced"
+            and event.get("replacement_id") == replacement_id
+            for event in predecessor_events
+        )
+        assert any(
+            event.get("event_type") == "rebuild_terminal"
+            and event.get("request_id") == "rid-derived-competing"
+            and event.get("result") == "failed"
+            and event.get("failure_reason") == "predecessor_not_current"
+            for event in predecessor_events
+        )
+        replacement_inspection = _inspect(client, "derived_text", replacement_id)
+        assert replacement_inspection.status_code == 200
+        assert replacement_inspection.json()["contract"]["source_refs"] == contracts["derived_text"]["source_refs"]
+        with psycopg.connect(postgres_database) as conn:
+            rows = conn.execute(
+                """
+                SELECT id
+                FROM derived_text
+                WHERE derivation_params->>'replacement_for' = %s
+                """,
+                (derived_text_id,),
+            ).fetchall()
+        assert [str(row[0]) for row in rows] == [replacement_id]
+
+        unsupported_memory = client.post(
+            "/v1/internal/memory/promote",
+            headers=_headers("rid-memory-unsupported"),
+            json={
+                "request_id": "rid-memory-unsupported",
+                "owner_id": "owner-a",
+                "memory_type": "preference",
+                "summary": "Unsupported replay fixture.",
+                "source_refs": [{"ref_type": "message", "ref_id": "missing-message"}],
+            },
+        )
+        assert unsupported_memory.status_code == 200, unsupported_memory.text
+        unsupported_memory_id = unsupported_memory.json()["memory"]["memory_id"]
+        memory_replay = client.post(
+            f"/v1/internal/derived/memory_item/{unsupported_memory_id}/replay",
+            headers=_headers("rid-memory-unsupported-replay"),
+            json={
+                "request_id": "rid-memory-unsupported-replay",
+                "owner_id": "owner-a",
+                "requested_derivation_version": "memory-promotion-v1",
+                "persist_replacement": True,
+            },
+        )
+        assert memory_replay.status_code == 200, memory_replay.text
+        assert memory_replay.json()["replay"]["result"] == "unsupported"
+        assert memory_replay.json()["replay"]["failure_reason"] == "caller_authored_no_deterministic_recipe"
+        assert memory_replay.json()["inspection"]["lifecycle_status"] == "invalidated"
+        assert memory_replay.json()["inspection"]["contract"]["status"] == "invalidated"
+        with psycopg.connect(postgres_database) as conn:
+            memory_event_count = conn.execute(
+                "SELECT count(*) FROM memory_events WHERE memory_id = %s",
+                (unsupported_memory_id,),
+            ).fetchone()[0]
+        retry_memory_replay = client.post(
+            f"/v1/internal/derived/memory_item/{unsupported_memory_id}/replay",
+            headers=_headers("rid-memory-unsupported-replay"),
+            json={
+                "request_id": "rid-memory-unsupported-replay",
+                "owner_id": "owner-a",
+                "requested_derivation_version": "memory-promotion-v1",
+                "persist_replacement": True,
+            },
+        )
+        assert retry_memory_replay.status_code == 200, retry_memory_replay.text
+        assert retry_memory_replay.json()["replay"]["result"] == "unsupported"
+        assert retry_memory_replay.json()["replay"]["failure_reason"] == "caller_authored_no_deterministic_recipe"
+        assert retry_memory_replay.json()["replay"]["idempotent_replay"] is True
+        assert retry_memory_replay.json()["inspection"]["contract"]["status"] == "invalidated"
+        with psycopg.connect(postgres_database) as conn:
+            retry_memory_event_count = conn.execute(
+                "SELECT count(*) FROM memory_events WHERE memory_id = %s",
+                (unsupported_memory_id,),
+            ).fetchone()[0]
+        assert retry_memory_event_count == memory_event_count
+        distinct_memory_replay = client.post(
+            f"/v1/internal/derived/memory_item/{unsupported_memory_id}/replay",
+            headers=_headers("rid-memory-unsupported-distinct"),
+            json={
+                "request_id": "rid-memory-unsupported-distinct",
+                "owner_id": "owner-a",
+                "requested_derivation_version": "memory-promotion-v1",
+                "persist_replacement": True,
+            },
+        )
+        assert distinct_memory_replay.status_code == 200, distinct_memory_replay.text
+        assert distinct_memory_replay.json()["replay"]["result"] == "unsupported"
+        assert distinct_memory_replay.json()["inspection"]["contract"]["status"] == "invalidated"
+        cross_owner_memory_replay = client.post(
+            f"/v1/internal/derived/memory_item/{unsupported_memory_id}/replay",
+            headers=_headers("rid-memory-cross-owner-replay"),
+            json={
+                "request_id": "rid-memory-cross-owner-replay",
+                "owner_id": "owner-b",
+                "requested_derivation_version": "memory-promotion-v1",
+                "persist_replacement": True,
+            },
+        )
+        assert cross_owner_memory_replay.status_code == 404
+
+        unsupported_episode = client.post(
+            "/v1/internal/episodes",
+            headers=_headers("rid-episode-unsupported"),
+            json={
+                "request_id": "rid-episode-unsupported",
+                "owner_id": "owner-a",
+                "title": "Unsupported replay episode",
+                "summary": "Unsupported replay fixture.",
+                "episode_type": "milestone",
+                "source_refs": [{"ref_type": "message", "ref_id": "missing-message"}],
+            },
+        )
+        assert unsupported_episode.status_code == 200, unsupported_episode.text
+        unsupported_episode_id = unsupported_episode.json()["episode"]["episode_id"]
+        episode_replay = client.post(
+            f"/v1/internal/derived/episode/{unsupported_episode_id}/replay",
+            headers=_headers("rid-episode-unsupported-replay"),
+            json={
+                "request_id": "rid-episode-unsupported-replay",
+                "owner_id": "owner-a",
+                "requested_derivation_version": "episode-construction-v1",
+                "persist_replacement": True,
+            },
+        )
+        assert episode_replay.status_code == 200, episode_replay.text
+        assert episode_replay.json()["replay"]["result"] == "unsupported"
+        assert episode_replay.json()["replay"]["failure_reason"] == "caller_authored_no_deterministic_recipe"
+        assert episode_replay.json()["inspection"]["lifecycle_status"] == "invalidated"
+        assert episode_replay.json()["inspection"]["contract"]["status"] == "invalidated"
+
     second_store = PostgresStore(postgres_database)
     monkeypatch.setattr(main_module, "pg", second_store, raising=True)
     with TestClient(main_module.app) as reopened_client:
@@ -383,6 +680,31 @@ def test_real_creation_paths_storage_reopen_retrieval_and_owner_isolation(
             persisted = _inspect(reopened_client, derivative_class, derived_id)
             assert persisted.status_code == 200, persisted.text
             assert persisted.json()["contract"]["source_refs"]
+            if derivative_class == "proactive_suggestion":
+                assert persisted.json()["contract"]["status"] == "pending"
+                assert persisted.json()["contract"]["effective_status"] == "invalidated"
+        reopened_lifecycle = reopened_client.get(
+            f"/v1/internal/derived/derived_text/{derived_text_id}/lifecycle",
+            headers=_headers(),
+            params={"owner_id": "owner-a"},
+        )
+        assert reopened_lifecycle.status_code == 200
+        assert reopened_lifecycle.json()["contract"]["status"] == "superseded"
+        assert any(event.get("result") == "replaced" for event in reopened_lifecycle.json()["events"])
+        reopened_memory = reopened_client.get(
+            f"/v1/internal/derived/memory_item/{unsupported_memory_id}/lifecycle",
+            headers=_headers(),
+            params={"owner_id": "owner-a"},
+        )
+        assert reopened_memory.status_code == 200
+        assert reopened_memory.json()["contract"]["status"] == "invalidated"
+        reopened_episode = reopened_client.get(
+            f"/v1/internal/derived/episode/{unsupported_episode_id}/lifecycle",
+            headers=_headers(),
+            params={"owner_id": "owner-a"},
+        )
+        assert reopened_episode.status_code == 200
+        assert reopened_episode.json()["contract"]["status"] == "invalidated"
 
 
 def test_legacy_defaults_and_malformed_stored_provenance_are_explicit(
@@ -453,3 +775,80 @@ def test_legacy_defaults_and_malformed_stored_provenance_are_explicit(
         debug = retrieval.json()["bundle"]["retrieval_debug"]
         assert debug["malformed_artifact_provenance_count"] == 1
         assert "malformed_derivative_provenance" in debug["artifact_omission_reasons"]
+
+
+def test_derived_text_atomic_replacement_rolls_back_injected_mid_transaction_failure(
+    postgres_database,
+    tmp_path,
+):
+    async def run_case():
+        store = PostgresStore(postgres_database)
+        await store.open()
+        try:
+            source_path = tmp_path / "atomic.txt"
+            source_path.write_text("Atomic replacement source.", encoding="utf-8")
+            artifact_id = uuid4()
+            artifact = await store.create_artifact(
+                artifact_id=artifact_id,
+                owner_id="owner-atomic",
+                filename="atomic.txt",
+                mime="text/plain",
+                size=source_path.stat().st_size,
+                object_uri=f"file://{source_path}",
+                status="completed",
+            )
+            predecessor = await store.create_derived_text(
+                artifact_id=UUID(artifact["artifact_id"]),
+                kind="chunk",
+                text="Atomic replacement source.",
+                language=None,
+                derivation_params={
+                    "derivation_type": "chunk",
+                    "derivation_version": "file-chunk-v1",
+                    "chunking_algorithm": "fixed-overlap-text",
+                    "chunking_algorithm_version": "fixed-overlap-text-v1",
+                    "chunk_size": 400,
+                    "chunk_overlap": 0,
+                    "status": "active",
+                    "source_refs": [{"ref_type": "artifact", "ref_id": artifact["artifact_id"], "support_kind": "direct"}],
+                    "chunk_index": 0,
+                    "char_start": 0,
+                    "char_end": len("Atomic replacement source."),
+                },
+            )
+            replacement_params = {
+                **predecessor["derivation_params"],
+                "generation_trace_id": "rid-atomic-replace",
+                "replacement_for": predecessor["derived_text_id"],
+                "status": "active",
+            }
+            with pytest.raises(RuntimeError):
+                await store.replace_derived_text_atomically(
+                    predecessor_derived_text_id=UUID(predecessor["derived_text_id"]),
+                    owner_id="owner-atomic",
+                    request_id="rid-atomic-replace",
+                    kind="chunk",
+                    text="Atomic replacement source changed.",
+                    language=None,
+                    derivation_params=replacement_params,
+                    inject_failure_after_insert=True,
+                )
+            return predecessor["derived_text_id"], artifact["artifact_id"]
+        finally:
+            await store.close()
+
+    predecessor_id, artifact_id = asyncio.run(run_case())
+    with psycopg.connect(postgres_database) as conn:
+        rows = conn.execute(
+            """
+            SELECT id, derivation_params
+            FROM derived_text
+            WHERE artifact_id = %s
+            ORDER BY created_at ASC, id ASC
+            """,
+            (artifact_id,),
+        ).fetchall()
+    assert len(rows) == 1
+    assert str(rows[0][0]) == predecessor_id
+    assert rows[0][1]["status"] == "active"
+    assert "lifecycle" not in rows[0][1]

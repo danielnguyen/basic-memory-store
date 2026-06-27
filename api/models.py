@@ -347,6 +347,61 @@ class DerivedInspectionResponse(BaseModel):
     contract: DerivedProvenance
 
 
+DerivedClass = Literal["derived_text", "proactive_suggestion", "memory_item", "episode"]
+DerivedInvalidationReason = Literal[
+    "source_changed",
+    "source_missing",
+    "source_access_lost",
+    "derivation_version_changed",
+    "explicit_retraction",
+    "existing_lifecycle_conflict",
+]
+DerivedReplayResult = Literal["identical", "replaced", "unsupported", "failed"]
+
+
+class DerivedInvalidationRequest(BaseModel):
+    request_id: str = Field(..., min_length=1, max_length=160)
+    owner_id: str = Field(..., min_length=1, max_length=160)
+    reason_code: DerivedInvalidationReason
+    metadata: Dict[str, Any] = Field(default_factory=dict, max_length=8)
+    source_ref: Optional[Dict[str, Any]] = None
+    derivation_version: Optional[str] = Field(default=None, max_length=160)
+
+
+class DerivedReplayRequest(BaseModel):
+    request_id: str = Field(..., min_length=1, max_length=160)
+    owner_id: str = Field(..., min_length=1, max_length=160)
+    requested_derivation_version: Optional[str] = Field(default=None, max_length=160)
+    expected_current_derivation_version: Optional[str] = Field(default=None, max_length=160)
+    persist_replacement: bool = False
+
+
+class DerivedLifecycleInspection(BaseModel):
+    derived_class: DerivedClass
+    derived_id: str
+    owner_id: str
+    contract: DerivedProvenance
+    rebuildability: Literal["rebuildable", "replay_only", "not_rebuildable"]
+    rebuildability_reason: str
+    lifecycle_status: str
+    invalidation: Dict[str, Any] = Field(default_factory=dict)
+    source_summary: Dict[str, Any] = Field(default_factory=dict)
+    events: List[Dict[str, Any]] = Field(default_factory=list)
+    structural_snapshot: Dict[str, Any] = Field(default_factory=dict)
+
+
+class DerivedInvalidationResponse(BaseModel):
+    request_id: str
+    changed: bool
+    inspection: DerivedLifecycleInspection
+
+
+class DerivedReplayResponse(BaseModel):
+    request_id: str
+    inspection: DerivedLifecycleInspection
+    replay: Dict[str, Any] = Field(default_factory=dict)
+
+
 # ---- Ingestion ----
 
 class FileIngestionRequest(BaseModel):

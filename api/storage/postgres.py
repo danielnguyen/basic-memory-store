@@ -10,6 +10,64 @@ from psycopg.types.json import Json
 
 from services.memory_lifecycle import bounded_transition_reason
 
+
+def _bounded_scalar_map(value: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))[:12]:
+        safe_key = str(key).strip()[:64]
+        if not safe_key:
+            continue
+        if isinstance(item, str):
+            out[safe_key] = item[:200]
+        elif isinstance(item, (int, float, bool)) or item is None:
+            out[safe_key] = item
+    return out
+
+
+def _append_metadata_lifecycle_event(metadata: dict[str, Any], event: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    lifecycle = metadata.get("lifecycle") if isinstance(metadata.get("lifecycle"), dict) else {}
+    events = lifecycle.get("events") if isinstance(lifecycle.get("events"), list) else []
+    signature = (event.get("event_type"), event.get("request_id"), event.get("reason_code"))
+    for existing in events:
+        if not isinstance(existing, dict):
+            continue
+        if (existing.get("event_type"), existing.get("request_id"), existing.get("reason_code")) == signature:
+            return metadata, False
+    safe_event = {**event}
+    if "metadata" in safe_event:
+        safe_event["metadata"] = _bounded_scalar_map(safe_event.get("metadata"))
+    event_type = str(safe_event.get("event_type") or "")
+    status = lifecycle.get("status") or metadata.get("status")
+    if event_type in {"invalidated", "rebuilding", "superseded"}:
+        if status not in {"superseded", "invalidated"} or event_type == "superseded":
+            status = event_type
+    if event_type == "rebuild_terminal":
+        result = safe_event.get("result") or safe_event.get("metadata", {}).get("result")
+        status = "active" if result == "identical" else status
+        if result == "replaced":
+            status = "superseded"
+        if result in {"unsupported", "failed"}:
+            status = status if status in {"superseded", "invalidated"} else "invalidated"
+    updated_lifecycle = {
+        **lifecycle,
+        "status": status,
+        "invalidated_reason": safe_event.get("reason_code") if event_type == "invalidated" else lifecycle.get("invalidated_reason"),
+        "last_request_id": safe_event.get("request_id") or lifecycle.get("last_request_id"),
+        "terminal_result": safe_event.get("result") or safe_event.get("metadata", {}).get("result") or lifecycle.get("terminal_result"),
+        "replacement_id": safe_event.get("replacement_id") or safe_event.get("metadata", {}).get("replacement_id") or lifecycle.get("replacement_id"),
+        "failure_reason": safe_event.get("failure_reason") or safe_event.get("metadata", {}).get("failure_reason") or lifecycle.get("failure_reason"),
+        "events": [*events, safe_event],
+    }
+    updated = {**metadata, "lifecycle": updated_lifecycle}
+    if status:
+        updated["status"] = status
+    if updated_lifecycle.get("replacement_id"):
+        updated["replacement_id"] = updated_lifecycle["replacement_id"]
+    return updated, True
+
+
 @dataclass
 class Conversation:
     id: UUID
@@ -626,6 +684,106 @@ class PostgresStore:
                 row = await cur.fetchone()
         if row is None:
             return None
+        return {
+            "suggestion_id": str(row[0]),
+            "owner_id": row[1],
+            "source_event_log_id": str(row[2]) if row[2] else None,
+            "source_type": row[3],
+            "kind": row[4],
+            "status": row[5],
+            "title": row[6],
+            "body": row[7],
+            "explanation_json": row[8] or {},
+            "evidence_json": row[9] or {},
+            "target_surface": row[10],
+            "delivery_surface": row[11],
+            "delivery_status": row[12],
+            "delivery_external_id": row[13],
+            "delivery_error": row[14],
+            "delivered_at": str(row[15]) if row[15] else None,
+            "created_at": str(row[16]),
+            "updated_at": str(row[17]),
+        }
+
+    async def update_proactive_suggestion_evidence(
+        self,
+        *,
+        suggestion_id: UUID,
+        owner_id: str,
+        evidence_json: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        q = """
+        UPDATE proactive_suggestions
+        SET evidence_json = %s::jsonb,
+            updated_at = now()
+        WHERE id = %s AND owner_id = %s
+        RETURNING id, owner_id, source_event_log_id, source_type, kind, status, title, body,
+                  explanation_json, evidence_json, target_surface, delivery_surface,
+                  delivery_status, delivery_external_id, delivery_error, delivered_at,
+                  created_at, updated_at;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (Json(evidence_json), suggestion_id, owner_id))
+                row = await cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "suggestion_id": str(row[0]),
+            "owner_id": row[1],
+            "source_event_log_id": str(row[2]) if row[2] else None,
+            "source_type": row[3],
+            "kind": row[4],
+            "status": row[5],
+            "title": row[6],
+            "body": row[7],
+            "explanation_json": row[8] or {},
+            "evidence_json": row[9] or {},
+            "target_surface": row[10],
+            "delivery_surface": row[11],
+            "delivery_status": row[12],
+            "delivery_external_id": row[13],
+            "delivery_error": row[14],
+            "delivered_at": str(row[15]) if row[15] else None,
+            "created_at": str(row[16]),
+            "updated_at": str(row[17]),
+        }
+
+    async def append_proactive_suggestion_lifecycle_event(
+        self,
+        *,
+        suggestion_id: UUID,
+        owner_id: str,
+        event: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        select_cols = """
+            id, owner_id, source_event_log_id, source_type, kind, status, title, body,
+            explanation_json, evidence_json, target_surface, delivery_surface,
+            delivery_status, delivery_external_id, delivery_error, delivered_at,
+            created_at, updated_at
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"SELECT {select_cols} FROM proactive_suggestions WHERE id = %s AND owner_id = %s FOR UPDATE;",
+                    (suggestion_id, owner_id),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    return None
+                evidence = row[9] or {}
+                updated, _ = _append_metadata_lifecycle_event(evidence, event)
+                await cur.execute(
+                    f"""
+                    UPDATE proactive_suggestions
+                    SET evidence_json = %s::jsonb,
+                        updated_at = now()
+                    WHERE id = %s AND owner_id = %s
+                    RETURNING {select_cols};
+                    """,
+                    (Json(updated), suggestion_id, owner_id),
+                )
+                row = await cur.fetchone()
         return {
             "suggestion_id": str(row[0]),
             "owner_id": row[1],
@@ -1465,6 +1623,234 @@ class PostgresStore:
             "created_at": str(row[6]),
             "owner_id": row[7],
         }
+
+    async def update_derived_text_params(
+        self,
+        *,
+        derived_text_id: UUID,
+        owner_id: str,
+        derivation_params: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        q = """
+        UPDATE derived_text dt
+        SET derivation_params = %s::jsonb
+        FROM artifacts a
+        WHERE dt.id = %s
+          AND dt.artifact_id = a.id
+          AND a.owner_id = %s
+        RETURNING dt.id, dt.artifact_id, dt.kind, dt.language, dt.text,
+                  dt.derivation_params, dt.created_at, a.owner_id;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (Json(derivation_params), derived_text_id, owner_id))
+                row = await cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "derived_text_id": str(row[0]),
+            "artifact_id": str(row[1]),
+            "kind": row[2],
+            "language": row[3],
+            "text": row[4],
+            "derivation_params": row[5] or {},
+            "created_at": str(row[6]),
+            "owner_id": row[7],
+        }
+
+    async def append_derived_text_lifecycle_event(
+        self,
+        *,
+        derived_text_id: UUID,
+        owner_id: str,
+        event: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        select_cols = """
+            dt.id, dt.artifact_id, dt.kind, dt.language, dt.text,
+            dt.derivation_params, dt.created_at, a.owner_id
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"""
+                    SELECT {select_cols}
+                    FROM derived_text dt
+                    JOIN artifacts a ON a.id = dt.artifact_id
+                    WHERE dt.id = %s AND a.owner_id = %s
+                    FOR UPDATE OF dt;
+                    """,
+                    (derived_text_id, owner_id),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    return None
+                params = row[5] or {}
+                updated, _ = _append_metadata_lifecycle_event(params, event)
+                await cur.execute(
+                    f"""
+                    UPDATE derived_text dt
+                    SET derivation_params = %s::jsonb
+                    FROM artifacts a
+                    WHERE dt.id = %s
+                      AND dt.artifact_id = a.id
+                      AND a.owner_id = %s
+                    RETURNING {select_cols};
+                    """,
+                    (Json(updated), derived_text_id, owner_id),
+                )
+                row = await cur.fetchone()
+        return {
+            "derived_text_id": str(row[0]),
+            "artifact_id": str(row[1]),
+            "kind": row[2],
+            "language": row[3],
+            "text": row[4],
+            "derivation_params": row[5] or {},
+            "created_at": str(row[6]),
+            "owner_id": row[7],
+        }
+
+    async def replace_derived_text_atomically(
+        self,
+        *,
+        predecessor_derived_text_id: UUID,
+        owner_id: str,
+        request_id: str,
+        kind: str,
+        text: str,
+        language: str | None,
+        derivation_params: dict[str, Any],
+        inject_failure_after_insert: bool = False,
+    ) -> dict[str, Any] | None:
+        select_cols = """
+            dt.id, dt.artifact_id, dt.kind, dt.language, dt.text,
+            dt.derivation_params, dt.created_at, a.owner_id
+        """
+
+        def row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
+            return {
+                "derived_text_id": str(row[0]),
+                "artifact_id": str(row[1]),
+                "kind": row[2],
+                "language": row[3],
+                "text": row[4],
+                "derivation_params": row[5] or {},
+                "created_at": str(row[6]),
+                "owner_id": row[7],
+            }
+
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"""
+                    SELECT {select_cols}
+                    FROM derived_text dt
+                    JOIN artifacts a ON a.id = dt.artifact_id
+                    WHERE dt.id = %s AND a.owner_id = %s
+                    FOR UPDATE OF dt;
+                    """,
+                    (predecessor_derived_text_id, owner_id),
+                )
+                predecessor_row = await cur.fetchone()
+                if predecessor_row is None:
+                    return None
+                predecessor = row_to_dict(predecessor_row)
+                predecessor_params = predecessor["derivation_params"] or {}
+                lifecycle = predecessor_params.get("lifecycle") if isinstance(predecessor_params.get("lifecycle"), dict) else {}
+                events = lifecycle.get("events") if isinstance(lifecycle.get("events"), list) else []
+                for event in reversed(events):
+                    if not isinstance(event, dict) or event.get("request_id") != request_id:
+                        continue
+                    terminal_result = event.get("result") or event.get("terminal_result")
+                    if terminal_result == "replaced" and event.get("replacement_id"):
+                        replacement_id = UUID(str(event["replacement_id"]))
+                        await cur.execute(
+                            f"""
+                            SELECT {select_cols}
+                            FROM derived_text dt
+                            JOIN artifacts a ON a.id = dt.artifact_id
+                            WHERE dt.id = %s AND a.owner_id = %s
+                            LIMIT 1;
+                            """,
+                            (replacement_id, owner_id),
+                        )
+                        replacement_row = await cur.fetchone()
+                        if replacement_row is None:
+                            raise ValueError("terminal_replacement_missing")
+                        return {
+                            "predecessor": predecessor,
+                            "replacement": row_to_dict(replacement_row),
+                            "idempotent": True,
+                        }
+                effective_status = predecessor_params.get("status") or lifecycle.get("status") or "active"
+                if effective_status == "superseded" or predecessor_params.get("replacement_id"):
+                    raise ValueError("predecessor_not_current")
+
+                replacement_params = {
+                    **derivation_params,
+                    "replacement_for": str(predecessor_derived_text_id),
+                    "status": "active",
+                }
+                await cur.execute(
+                    """
+                    INSERT INTO derived_text (artifact_id, kind, language, text, derivation_params)
+                    VALUES (%s, %s, %s, %s, %s::jsonb)
+                    RETURNING id, artifact_id, kind, language, text, derivation_params, created_at;
+                    """,
+                    (
+                        UUID(predecessor["artifact_id"]),
+                        kind,
+                        language,
+                        text,
+                        Json(replacement_params),
+                    ),
+                )
+                new_row = await cur.fetchone()
+                if inject_failure_after_insert:
+                    raise RuntimeError("injected_replace_derived_text_failure")
+                replacement_id = str(new_row[0])
+                superseded_event = {
+                    "event_type": "superseded",
+                    "request_id": request_id,
+                    "reason_code": "rebuild_replaced",
+                    "replacement_id": replacement_id,
+                }
+                terminal_event = {
+                    "event_type": "rebuild_terminal",
+                    "request_id": request_id,
+                    "reason_code": "rebuild_terminal",
+                    "result": "replaced",
+                    "replacement_id": replacement_id,
+                }
+                updated_params, _ = _append_metadata_lifecycle_event(predecessor_params, superseded_event)
+                updated_params, _ = _append_metadata_lifecycle_event(updated_params, terminal_event)
+                await cur.execute(
+                    f"""
+                    UPDATE derived_text dt
+                    SET derivation_params = %s::jsonb
+                    FROM artifacts a
+                    WHERE dt.id = %s
+                      AND dt.artifact_id = a.id
+                      AND a.owner_id = %s
+                    RETURNING {select_cols};
+                    """,
+                    (Json(updated_params), predecessor_derived_text_id, owner_id),
+                )
+                updated_predecessor_row = await cur.fetchone()
+                return {
+                    "predecessor": row_to_dict(updated_predecessor_row),
+                    "replacement": {
+                        "derived_text_id": replacement_id,
+                        "artifact_id": str(new_row[1]),
+                        "kind": new_row[2],
+                        "language": new_row[3],
+                        "text": new_row[4],
+                        "derivation_params": new_row[5] or {},
+                        "created_at": str(new_row[6]),
+                        "owner_id": owner_id,
+                    },
+                    "idempotent": False,
+                }
 
     async def get_recent_message_snippets(self, conversation_id: UUID, limit: int = 10) -> list[dict[str, Any]]:
         q = """
@@ -2479,6 +2865,55 @@ class PostgresStore:
             "events": [self._memory_event_from_row(event_row) for event_row in event_rows],
         }
 
+    async def append_memory_lifecycle_event(
+        self,
+        *,
+        memory_id: UUID,
+        owner_id: str,
+        event_type: str,
+        reason_json: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        select_cols = """
+            id, owner_id, memory_type, summary, source_refs_json, source_ref_hash,
+            scores_json, promotion_state, status, supersedes_memory_id,
+            superseded_by_memory_id, last_reinforced_at, expires_at,
+            derivation_version, confidence, explanation_json, generation_trace_id,
+            created_at, updated_at
+        """
+        request_id = reason_json.get("request_id")
+        reason_code = reason_json.get("reason_code")
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"SELECT {select_cols} FROM memory_items WHERE id = %s AND owner_id = %s FOR UPDATE;",
+                    (memory_id, owner_id),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    return None
+                await cur.execute(
+                    """
+                    SELECT id FROM memory_events
+                    WHERE memory_id = %s
+                      AND owner_id = %s
+                      AND event_type = %s
+                      AND reason_json->>'request_id' IS NOT DISTINCT FROM %s
+                      AND reason_json->>'reason_code' IS NOT DISTINCT FROM %s
+                    LIMIT 1;
+                    """,
+                    (memory_id, owner_id, event_type, request_id, reason_code),
+                )
+                existing = await cur.fetchone()
+                if existing is None:
+                    await cur.execute(
+                        """
+                        INSERT INTO memory_events (memory_id, owner_id, event_type, reason_json)
+                        VALUES (%s, %s, %s, %s::jsonb);
+                        """,
+                        (memory_id, owner_id, event_type, Json(reason_json)),
+                    )
+        return await self.get_memory_debug(memory_id, owner_id)
+
 
     def _episode_from_row(self, row: tuple[Any, ...]) -> dict[str, Any]:
         return {
@@ -2822,6 +3257,202 @@ class PostgresStore:
             "links": [self._episode_link_from_row(link_row) for link_row in link_rows],
             "events": [self._episode_event_from_row(event_row) for event_row in event_rows],
         }
+
+    async def transition_episode_status(
+        self,
+        *,
+        episode_id: UUID,
+        owner_id: str,
+        new_status: str,
+        request_id: str,
+        reason_json: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        select_cols = """
+            id, owner_id, title, summary, episode_type, trigger_json,
+            outcome, significance, unresolved_json, source_refs_json,
+            source_ref_hash, episode_key, callback_candidates_json,
+            time_window_json, participants_json, status, derivation_version,
+            confidence, explanation_json, generation_trace_id, created_at, updated_at
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"SELECT {select_cols} FROM episodes WHERE id = %s AND owner_id = %s FOR UPDATE;",
+                    (episode_id, owner_id),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    return None
+                current = self._episode_from_row(row)
+                if current["status"] == new_status:
+                    return {"episode": current, "changed": False}
+                await cur.execute(
+                    f"""
+                    UPDATE episodes
+                    SET status = %s,
+                        updated_at = now()
+                    WHERE id = %s AND owner_id = %s
+                    RETURNING {select_cols};
+                    """,
+                    (new_status, episode_id, owner_id),
+                )
+                updated = await cur.fetchone()
+                await cur.execute(
+                    """
+                    INSERT INTO episode_events (episode_id, owner_id, event_type, reason_json)
+                    VALUES (%s, %s, 'updated', %s::jsonb);
+                    """,
+                    (episode_id, owner_id, Json({**reason_json, "request_id": request_id})),
+                )
+        return {"episode": self._episode_from_row(updated), "changed": True}
+
+    async def append_episode_lifecycle_event(
+        self,
+        *,
+        episode_id: UUID,
+        owner_id: str,
+        event_type: str,
+        reason_json: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        request_id = reason_json.get("request_id")
+        reason_code = reason_json.get("reason_code")
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT id FROM episodes WHERE id = %s AND owner_id = %s FOR UPDATE;",
+                    (episode_id, owner_id),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    return None
+                await cur.execute(
+                    """
+                    SELECT id FROM episode_events
+                    WHERE episode_id = %s
+                      AND owner_id = %s
+                      AND event_type = %s
+                      AND reason_json->>'request_id' IS NOT DISTINCT FROM %s
+                      AND reason_json->>'reason_code' IS NOT DISTINCT FROM %s
+                    LIMIT 1;
+                    """,
+                    (episode_id, owner_id, event_type, request_id, reason_code),
+                )
+                existing = await cur.fetchone()
+                if existing is None:
+                    await cur.execute(
+                        """
+                        INSERT INTO episode_events (episode_id, owner_id, event_type, reason_json)
+                        VALUES (%s, %s, %s, %s::jsonb);
+                        """,
+                        (episode_id, owner_id, event_type, Json(reason_json)),
+                    )
+        return await self.get_episode_debug(episode_id, owner_id)
+
+    async def replace_episode(
+        self,
+        *,
+        old_episode_id: UUID,
+        owner_id: str,
+        request_id: str,
+        title: str,
+        summary: str,
+        episode_type: str,
+        trigger_json: dict[str, Any],
+        outcome: str | None,
+        significance: str | None,
+        unresolved_json: dict[str, Any],
+        source_refs_json: list[dict[str, Any]],
+        source_ref_hash: str,
+        episode_key: str,
+        callback_candidates_json: list[Any],
+        time_window_json: dict[str, Any],
+        participants_json: list[Any],
+        derivation_version: str,
+        confidence: float | None,
+        explanation_json: dict[str, Any],
+        generation_trace_id: str,
+    ) -> dict[str, Any]:
+        select_cols = """
+            id, owner_id, title, summary, episode_type, trigger_json,
+            outcome, significance, unresolved_json, source_refs_json,
+            source_ref_hash, episode_key, callback_candidates_json,
+            time_window_json, participants_json, status, derivation_version,
+            confidence, explanation_json, generation_trace_id, created_at, updated_at
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"SELECT {select_cols} FROM episodes WHERE id = %s AND owner_id = %s FOR UPDATE;",
+                    (old_episode_id, owner_id),
+                )
+                old_row = await cur.fetchone()
+                if old_row is None:
+                    raise KeyError("episode not found")
+                await cur.execute(
+                    f"""
+                    INSERT INTO episodes (
+                        owner_id, title, summary, episode_type, trigger_json,
+                        outcome, significance, unresolved_json, source_refs_json,
+                        source_ref_hash, episode_key, callback_candidates_json,
+                        time_window_json, participants_json, status,
+                        derivation_version, confidence, explanation_json,
+                        generation_trace_id
+                    ) VALUES (
+                        %s, %s, %s, %s, %s::jsonb,
+                        %s, %s, %s::jsonb, %s::jsonb,
+                        %s, %s, %s::jsonb,
+                        %s::jsonb, %s::jsonb, 'active',
+                        %s, %s, %s::jsonb,
+                        %s
+                    ) RETURNING {select_cols};
+                    """,
+                    (
+                        owner_id,
+                        title,
+                        summary,
+                        episode_type,
+                        Json(trigger_json),
+                        outcome,
+                        significance,
+                        Json(unresolved_json),
+                        Json(source_refs_json),
+                        source_ref_hash,
+                        episode_key,
+                        Json(callback_candidates_json),
+                        Json(time_window_json),
+                        Json(participants_json),
+                        derivation_version,
+                        confidence,
+                        Json(explanation_json),
+                        generation_trace_id,
+                    ),
+                )
+                new_row = await cur.fetchone()
+                new_id = new_row[0]
+                await cur.execute(
+                    """
+                    UPDATE episodes
+                    SET status = 'superseded',
+                        updated_at = now()
+                    WHERE id = %s AND owner_id = %s;
+                    """,
+                    (old_episode_id, owner_id),
+                )
+                await cur.execute(
+                    """
+                    INSERT INTO episode_events (episode_id, owner_id, event_type, reason_json)
+                    VALUES (%s, %s, 'updated', %s::jsonb), (%s, %s, 'created', %s::jsonb);
+                    """,
+                    (
+                        old_episode_id,
+                        owner_id,
+                        Json({"request_id": request_id, "reason_code": "rebuild_replaced", "replacement_episode_id": str(new_id)}),
+                        new_id,
+                        owner_id,
+                        Json({"request_id": request_id, "replaces_episode_id": str(old_episode_id)}),
+                    ),
+                )
+        return {"episode": self._episode_from_row(new_row)}
 
     def _recall_decision_from_row(self, row: tuple[Any, ...]) -> dict[str, Any]:
         return {

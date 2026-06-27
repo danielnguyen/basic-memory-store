@@ -202,6 +202,194 @@ def _base_reason(
     }
 
 
+def build_git_suggestion_candidate(
+    *,
+    owner_id: str,
+    event_log: dict[str, Any],
+    matched_message: dict[str, Any],
+    score_details: dict[str, Any],
+    query: str,
+    delivery_surface: str,
+    generation_trace_id: str,
+) -> dict[str, Any]:
+    payload = event_log.get("payload_json") or {}
+    normalized_subject = _normalized_git_subject(payload)
+    cooldown_identity_key = _cooldown_key(
+        owner_id=owner_id,
+        kind=GIT_RULE_KIND,
+        delivery_surface=delivery_surface,
+        source_type="git",
+        normalized_subject=normalized_subject,
+    )
+    topic = _first_string(payload, "title", "summary", "repo") or "this topic"
+    return {
+        "owner_id": owner_id,
+        "source_event_log_id": UUID(event_log["event_log_id"]),
+        "source_type": "git",
+        "kind": GIT_RULE_KIND,
+        "title": "Related git change may need a risk scan",
+        "body": f"You discussed {topic} recently; this new git event touches it. Want a quick risk scan?",
+        "explanation_json": {
+            "rule": GIT_RULE_KIND,
+            "because": "A recent git event matched prior discussion in time-aware retrieval.",
+            "derivation_version": PROACTIVE_DERIVATION_VERSION,
+            "generation_trace_id": generation_trace_id,
+            "query": query,
+            "matched_message_id": matched_message["message_id"],
+            "score_details": score_details,
+            "initiative": {
+                "normalized_subject": normalized_subject,
+                "cooldown_identity_key": cooldown_identity_key,
+                "delivery_surface": delivery_surface,
+            },
+        },
+        "evidence_json": {
+            "source_refs": [
+                {
+                    "ref_type": "event_log",
+                    "ref_id": event_log["event_log_id"],
+                    "support_kind": "direct",
+                },
+                {
+                    "ref_type": "message",
+                    "ref_id": matched_message["message_id"],
+                    "support_kind": "corroborating",
+                },
+            ],
+            "source_event_log_id": event_log["event_log_id"],
+            "source_event_id": event_log["source_event_id"],
+            "event_type": event_log["event_type"],
+            "payload_summary": payload.get("summary"),
+            "payload_title": payload.get("title"),
+            "repo": payload.get("repo"),
+            "branch": payload.get("branch"),
+            "matched_message": {
+                "message_id": matched_message["message_id"],
+                "conversation_id": matched_message.get("conversation_id"),
+                "created_at": matched_message.get("created_at"),
+            },
+        },
+        "target_surface": delivery_surface,
+        "normalized_subject": normalized_subject,
+        "cooldown_identity_key": cooldown_identity_key,
+    }
+
+
+def build_portfolio_suggestion_candidate(
+    *,
+    owner_id: str,
+    event_log: dict[str, Any],
+    threshold: float,
+    delivery_surface: str,
+    generation_trace_id: str,
+) -> dict[str, Any]:
+    payload = event_log.get("payload_json") or {}
+    drift = _extract_portfolio_drift(payload)
+    if drift is None:
+        raise ValueError("portfolio_drift_missing")
+    normalized_subject = _normalized_portfolio_subject(payload, PORTFOLIO_RULE_KIND)
+    cooldown_identity_key = _cooldown_key(
+        owner_id=owner_id,
+        kind=PORTFOLIO_RULE_KIND,
+        delivery_surface=delivery_surface,
+        source_type="portfolio",
+        normalized_subject=normalized_subject,
+    )
+    account = _first_string(payload, "account") or "portfolio"
+    return {
+        "owner_id": owner_id,
+        "source_event_log_id": UUID(event_log["event_log_id"]),
+        "source_type": "portfolio",
+        "kind": PORTFOLIO_RULE_KIND,
+        "title": "Portfolio allocation drift crossed threshold",
+        "body": f"{account.capitalize()} allocation drifted beyond your threshold. Review the portfolio?",
+        "explanation_json": {
+            "rule": PORTFOLIO_RULE_KIND,
+            "because": "A portfolio event reported allocation drift above the configured threshold.",
+            "derivation_version": PROACTIVE_DERIVATION_VERSION,
+            "generation_trace_id": generation_trace_id,
+            "observed_drift": drift,
+            "threshold": threshold,
+            "initiative": {
+                "normalized_subject": normalized_subject,
+                "cooldown_identity_key": cooldown_identity_key,
+                "delivery_surface": delivery_surface,
+            },
+        },
+        "evidence_json": {
+            "source_refs": [
+                {
+                    "ref_type": "event_log",
+                    "ref_id": event_log["event_log_id"],
+                    "support_kind": "direct",
+                }
+            ],
+            "source_event_log_id": event_log["event_log_id"],
+            "source_event_id": event_log["source_event_id"],
+            "event_type": event_log["event_type"],
+            "account": payload.get("account"),
+            "symbol": payload.get("symbol"),
+            "summary": payload.get("summary"),
+            "observed_drift": drift,
+            "threshold": threshold,
+        },
+        "target_surface": delivery_surface,
+        "normalized_subject": normalized_subject,
+        "cooldown_identity_key": cooldown_identity_key,
+    }
+
+
+def reevaluate_proactive_candidate(
+    *,
+    owner_id: str,
+    event_log: dict[str, Any],
+    stored_suggestion: dict[str, Any],
+    generation_trace_id: str,
+) -> dict[str, Any]:
+    if event_log.get("owner_id") != owner_id:
+        raise PermissionError("owner_scope_mismatch")
+    explanation = stored_suggestion.get("explanation_json") if isinstance(stored_suggestion.get("explanation_json"), dict) else {}
+    evidence = stored_suggestion.get("evidence_json") if isinstance(stored_suggestion.get("evidence_json"), dict) else {}
+    kind = stored_suggestion.get("kind") or explanation.get("rule")
+    delivery_surface = (
+        stored_suggestion.get("target_surface")
+        or (explanation.get("initiative") or {}).get("delivery_surface")
+        or "telegram"
+    )
+    if kind == PORTFOLIO_RULE_KIND and event_log.get("source_type") == "portfolio":
+        threshold = _coerce_float(explanation.get("threshold"))
+        if threshold is None:
+            threshold = _coerce_float(evidence.get("threshold"))
+        if threshold is None:
+            raise ValueError("unsupported_legacy_proactive_rule_inputs")
+        candidate = build_portfolio_suggestion_candidate(
+            owner_id=owner_id,
+            event_log=event_log,
+            threshold=threshold,
+            delivery_surface=delivery_surface,
+            generation_trace_id=generation_trace_id,
+        )
+        if candidate["explanation_json"]["observed_drift"] <= threshold:
+            raise ValueError("proactive_rule_no_longer_triggers")
+        return candidate
+    if kind == GIT_RULE_KIND and event_log.get("source_type") == "git":
+        matched = evidence.get("matched_message")
+        if not isinstance(matched, dict) or not matched.get("message_id"):
+            raise ValueError("unsupported_legacy_proactive_rule_inputs")
+        query = str(explanation.get("query") or _build_git_query(event_log.get("payload_json") or {}, event_log["event_type"]))
+        score_details = explanation.get("score_details") if isinstance(explanation.get("score_details"), dict) else {}
+        return build_git_suggestion_candidate(
+            owner_id=owner_id,
+            event_log=event_log,
+            matched_message=matched,
+            score_details=score_details,
+            query=query,
+            delivery_surface=delivery_surface,
+            generation_trace_id=generation_trace_id,
+        )
+    raise ValueError("unsupported_legacy_proactive_rule_inputs")
+
+
 async def evaluate_event(
     *,
     pg: Any,
@@ -562,55 +750,25 @@ async def _evaluate_git_event(
         )
         return decision, None
 
-    topic = _first_string(payload, "title", "summary", "repo") or "this topic"
-    suggestion, _ = await pg.create_proactive_suggestion(
+    candidate = build_git_suggestion_candidate(
         owner_id=owner_id,
-        source_event_log_id=UUID(event_log["event_log_id"]),
-        source_type="git",
-        kind=GIT_RULE_KIND,
-        title="Related git change may need a risk scan",
-        body=f"You discussed {topic} recently; this new git event touches it. Want a quick risk scan?",
-        explanation_json={
-            "rule": GIT_RULE_KIND,
-            "because": "A recent git event matched prior discussion in time-aware retrieval.",
-            "derivation_version": PROACTIVE_DERIVATION_VERSION,
-            "generation_trace_id": generation_trace_id,
-            "query": query,
-            "matched_message_id": matched_snippet["message_id"],
-            "score_details": score_details,
-            "initiative": {
-                "normalized_subject": normalized_subject,
-                "cooldown_identity_key": cooldown_identity_key,
-                "delivery_surface": delivery_surface,
-            },
-        },
-        evidence_json={
-            "source_refs": [
-                {
-                    "ref_type": "event_log",
-                    "ref_id": event_log["event_log_id"],
-                    "support_kind": "direct",
-                },
-                {
-                    "ref_type": "message",
-                    "ref_id": matched_snippet["message_id"],
-                    "support_kind": "corroborating",
-                },
-            ],
-            "source_event_log_id": event_log["event_log_id"],
-            "source_event_id": event_log["source_event_id"],
-            "event_type": event_log["event_type"],
-            "payload_summary": payload.get("summary"),
-            "payload_title": payload.get("title"),
-            "repo": payload.get("repo"),
-            "branch": payload.get("branch"),
-            "matched_message": {
-                "message_id": matched_snippet["message_id"],
-                "conversation_id": matched_snippet["conversation_id"],
-                "created_at": matched_snippet["created_at"],
-            },
-        },
-        target_surface=delivery_surface,
+        event_log=event_log,
+        matched_message=matched_snippet,
+        score_details=score_details,
+        query=query,
+        delivery_surface=delivery_surface,
+        generation_trace_id=generation_trace_id,
+    )
+    suggestion, _ = await pg.create_proactive_suggestion(
+        owner_id=candidate["owner_id"],
+        source_event_log_id=candidate["source_event_log_id"],
+        source_type=candidate["source_type"],
+        kind=candidate["kind"],
+        title=candidate["title"],
+        body=candidate["body"],
+        explanation_json=candidate["explanation_json"],
+        evidence_json=candidate["evidence_json"],
+        target_surface=candidate["target_surface"],
     )
     cooldown_until = (datetime.now(UTC) + timedelta(hours=_cooldown_hours(prefs, GIT_RULE_KIND))).isoformat()
     decision = await _record_decision(
@@ -697,45 +855,23 @@ async def _evaluate_portfolio_event(
         )
         return decision, None
 
-    account = _first_string(payload, "account") or "portfolio"
-    suggestion, _ = await pg.create_proactive_suggestion(
+    candidate = build_portfolio_suggestion_candidate(
         owner_id=owner_id,
-        source_event_log_id=UUID(event_log["event_log_id"]),
-        source_type="portfolio",
-        kind=PORTFOLIO_RULE_KIND,
-        title="Portfolio allocation drift crossed threshold",
-        body=f"{account.capitalize()} allocation drifted beyond your threshold. Review the portfolio?",
-        explanation_json={
-            "rule": PORTFOLIO_RULE_KIND,
-            "because": "A portfolio event reported allocation drift above the configured threshold.",
-            "derivation_version": PROACTIVE_DERIVATION_VERSION,
-            "generation_trace_id": generation_trace_id,
-            "observed_drift": drift,
-            "threshold": threshold,
-            "initiative": {
-                "normalized_subject": normalized_subject,
-                "cooldown_identity_key": cooldown_identity_key,
-                "delivery_surface": delivery_surface,
-            },
-        },
-        evidence_json={
-            "source_refs": [
-                {
-                    "ref_type": "event_log",
-                    "ref_id": event_log["event_log_id"],
-                    "support_kind": "direct",
-                }
-            ],
-            "source_event_log_id": event_log["event_log_id"],
-            "source_event_id": event_log["source_event_id"],
-            "event_type": event_log["event_type"],
-            "account": payload.get("account"),
-            "symbol": payload.get("symbol"),
-            "summary": payload.get("summary"),
-            "observed_drift": drift,
-            "threshold": threshold,
-        },
-        target_surface=delivery_surface,
+        event_log=event_log,
+        threshold=threshold,
+        delivery_surface=delivery_surface,
+        generation_trace_id=generation_trace_id,
+    )
+    suggestion, _ = await pg.create_proactive_suggestion(
+        owner_id=candidate["owner_id"],
+        source_event_log_id=candidate["source_event_log_id"],
+        source_type=candidate["source_type"],
+        kind=candidate["kind"],
+        title=candidate["title"],
+        body=candidate["body"],
+        explanation_json=candidate["explanation_json"],
+        evidence_json=candidate["evidence_json"],
+        target_surface=candidate["target_surface"],
     )
     cooldown_until = (datetime.now(UTC) + timedelta(hours=_cooldown_hours(prefs, PORTFOLIO_RULE_KIND))).isoformat()
     decision = await _record_decision(

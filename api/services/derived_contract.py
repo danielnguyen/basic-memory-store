@@ -161,6 +161,7 @@ def derived_text_contract_view(row: dict[str, Any]) -> dict[str, Any]:
 def proactive_suggestion_contract_view(row: dict[str, Any]) -> dict[str, Any]:
     evidence = row.get("evidence_json") if isinstance(row.get("evidence_json"), dict) else {}
     explanation = row.get("explanation_json") if isinstance(row.get("explanation_json"), dict) else {}
+    lifecycle = evidence.get("lifecycle") if isinstance(evidence.get("lifecycle"), dict) else {}
     refs = evidence.get("source_refs")
     event_id = row.get("source_event_log_id")
     if not refs and event_id:
@@ -172,6 +173,7 @@ def proactive_suggestion_contract_view(row: dict[str, Any]) -> dict[str, Any]:
         source_refs=refs,
         derivation_version=explanation.get("derivation_version"),
         status=row.get("status"),
+        effective_status=lifecycle.get("status"),
         confidence=explanation.get("confidence"),
         explanation=explanation.get("rationale") or explanation.get("explanation") or explanation.get("because"),
         generation_trace_id=explanation.get("generation_trace_id"),
