@@ -1,4 +1,5 @@
 from services.derived_contract import episode_contract_view
+from services.derivation_versions import EPISODE_DERIVATION_VERSION
 from services.episodes import episode_key, normalize_json_map, normalize_source_refs, source_ref_hash
 
 
@@ -65,7 +66,7 @@ def test_episode_contract_view_exposes_r37_fields():
             "owner_id": "owner",
             "episode_type": "milestone",
             "source_refs_json": [{"ref_type": "message", "ref_id": "m-1"}],
-            "derivation_version": "r21-m0-v1",
+            "derivation_version": EPISODE_DERIVATION_VERSION,
             "status": "active",
             "confidence": 0.9,
             "explanation_json": {"rationale": "manual incident capture"},
@@ -81,6 +82,26 @@ def test_episode_contract_view_exposes_r37_fields():
         {"ref_type": "message", "ref_id": "m-1", "support_kind": "direct"}
     ]
     assert out["explanation"] == "manual incident capture"
+
+
+def test_episode_contract_view_uses_neutral_compatibility_default():
+    out = episode_contract_view(
+        {
+            "episode_id": "ep-1",
+            "owner_id": "owner",
+            "episode_type": "milestone",
+            "source_refs_json": [{"ref_type": "message", "ref_id": "m-1"}],
+            "derivation_version": None,
+            "status": "active",
+            "confidence": None,
+            "explanation_json": {},
+            "generation_trace_id": None,
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+    )
+
+    assert out["derivation_version"] == EPISODE_DERIVATION_VERSION
+    assert out["compatibility_defaults"] == ["derivation_version"]
 
 
 def test_normalize_json_map_is_deterministic():

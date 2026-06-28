@@ -10,6 +10,7 @@ os.environ.setdefault("QDRANT_URL", "http://localhost:6333")
 os.environ.setdefault("LITELLM_BASE_URL", "http://localhost:4000")
 
 import main as main_module
+from services.derivation_versions import MEMORY_ITEM_DERIVATION_VERSION
 
 
 class FakePG:
@@ -46,7 +47,7 @@ class FakePG:
                 "superseded_by_memory_id": None,
                 "last_reinforced_at": now if kwargs["reinforce"] else None,
                 "expires_at": kwargs["expires_at"],
-                "derivation_version": "r20-mvp-v1",
+                "derivation_version": kwargs.get("derivation_version", MEMORY_ITEM_DERIVATION_VERSION),
                 "confidence": kwargs["confidence"],
                 "explanation_json": kwargs["explanation_json"],
                 "generation_trace_id": kwargs["generation_trace_id"],
@@ -77,7 +78,7 @@ class FakePG:
             "superseded_by_memory_id": None,
             "last_reinforced_at": now,
             "expires_at": None,
-            "derivation_version": "r20-mvp-v1",
+            "derivation_version": MEMORY_ITEM_DERIVATION_VERSION,
             "confidence": None,
             "explanation_json": {},
             "generation_trace_id": None,
@@ -105,7 +106,7 @@ class FakePG:
                 "superseded_by_memory_id": None,
                 "last_reinforced_at": None,
                 "expires_at": None,
-                "derivation_version": "r20-mvp-v1",
+                "derivation_version": MEMORY_ITEM_DERIVATION_VERSION,
                 "confidence": None,
                 "explanation_json": {},
                 "generation_trace_id": None,
@@ -133,7 +134,7 @@ class FakePG:
                 "superseded_by_memory_id": None,
                 "last_reinforced_at": None,
                 "expires_at": None,
-                "derivation_version": "r20-mvp-v1",
+                "derivation_version": MEMORY_ITEM_DERIVATION_VERSION,
                 "confidence": 0.8,
                 "explanation_json": {"rationale": "explicit"},
                 "generation_trace_id": "rid-1",
@@ -201,7 +202,9 @@ def test_promote_normalizes_refs_and_returns_deterministic_audit_order(monkeypat
         assert out["events_appended"] == ["updated", "reinforced"]
         assert out["updated"] is True
         assert out["reinforced"] is True
+        assert out["memory"]["derivation_version"] == MEMORY_ITEM_DERIVATION_VERSION
         call = pg.promote_calls[0]
+        assert "derivation_version" not in call
         assert [ref["ref_id"] for ref in call["source_refs_json"]] == ["m-1", "m-2"]
         assert len(call["source_ref_hash"]) == 64
     finally:
