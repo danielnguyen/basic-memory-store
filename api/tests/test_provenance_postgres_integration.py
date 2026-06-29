@@ -17,6 +17,7 @@ class FakeQdrant:
         self.derived_text_ids: list[str] = []
         self.vector_unavailable = False
         self.artifact_unavailable = False
+        self.search_calls: list[dict] = []
 
     def ping(self):
         return True
@@ -28,6 +29,7 @@ class FakeQdrant:
         return None
 
     async def search(self, **kwargs):
+        self.search_calls.append(kwargs)
         if self.vector_unavailable:
             raise RuntimeError("vector unavailable")
         return []
@@ -73,6 +75,7 @@ def _settings():
         min_index_chars=3,
         index_assistant_messages=True,
         index_user_questions=True,
+        enable_trace_storage=True,
     )
 
 
@@ -705,6 +708,105 @@ def test_real_creation_paths_storage_reopen_retrieval_and_owner_isolation(
         )
         assert reopened_episode.status_code == 200
         assert reopened_episode.json()["contract"]["status"] == "invalidated"
+
+
+def test_raw_compare_modes_and_traces_use_real_postgres_storage_path(
+    monkeypatch,
+    postgres_database,
+    tmp_path,
+):
+    qdrant = FakeQdrant()
+    store = PostgresStore(postgres_database)
+    monkeypatch.setattr(main_module, "settings", _settings(), raising=True)
+    monkeypatch.setattr(main_module, "pg", store, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", qdrant, raising=True)
+
+    source_file = tmp_path / "raw_compare.txt"
+    source_file.write_text("Private raw compare storage fixture.", encoding="utf-8")
+
+    with TestClient(main_module.app) as client:
+        conversation = client.post(
+            "/v1/conversations",
+            headers=_headers(),
+            json={"owner_id": "owner-real-storage", "client_id": "client-real-storage"},
+        )
+        assert conversation.status_code == 200, conversation.text
+        conversation_id = conversation.json()["conversation_id"]
+        message = client.post(
+            f"/v1/conversations/{conversation_id}/messages",
+            headers=_headers(),
+            json={
+                "owner_id": "owner-real-storage",
+                "client_id": "client-real-storage",
+                "role": "user",
+                "content": "Private canonical real storage fixture.",
+            },
+        )
+        assert message.status_code == 200, message.text
+        ingested = client.post(
+            "/v1/ingestion/files",
+            headers=_headers(),
+            json={
+                "owner_id": "owner-real-storage",
+                "client_id": "client-real-storage",
+                "repo_name": "fixture",
+                "paths": [str(source_file)],
+            },
+        )
+        assert ingested.status_code == 200, ingested.text
+        assert qdrant.derived_text_ids
+
+        raw_rid = "rid-real-storage-raw"
+        raw = client.post(
+            f"/v2/conversations/{conversation_id}/retrieve",
+            headers=_headers(raw_rid),
+            json={
+                "request_id": raw_rid,
+                "owner_id": "owner-real-storage",
+                "query": " PRIVATE-REAL-STORAGE-QUERY ",
+                "mode": "raw",
+            },
+        )
+        assert raw.status_code == 200, raw.text
+        raw_body = raw.json()
+        assert raw_body["bundle"]["recent"]
+        assert raw_body["bundle"]["artifact_refs"] == []
+        assert raw_body["diagnostics"]["owner_id"] == "owner-real-storage"
+        assert raw_body["diagnostics"]["request_id"] == raw_rid
+
+        compare_rid = "rid-real-storage-compare"
+        compare = client.post(
+            f"/v2/conversations/{conversation_id}/retrieve",
+            headers=_headers(compare_rid),
+            json={
+                "request_id": compare_rid,
+                "owner_id": "owner-real-storage",
+                "query": " PRIVATE-REAL-STORAGE-QUERY ",
+                "mode": "compare",
+            },
+        )
+        assert compare.status_code == 200, compare.text
+        compare_body = compare.json()
+        assert len(qdrant.search_calls) >= 3
+        assert qdrant.search_calls[-2]["query"] == "PRIVATE-REAL-STORAGE-QUERY"
+        assert qdrant.search_calls[-1]["query"] == "PRIVATE-REAL-STORAGE-QUERY"
+        assert compare_body["raw_bundle"]["artifact_refs"] == []
+        assert compare_body["augmented_bundle"]["artifact_refs"]
+        assert compare_body["comparison"]["shared_normalized_input"] is True
+        assert compare_body["comparison"]["normalization_applied"] is True
+        assert "PRIVATE-REAL-STORAGE-QUERY" not in str(compare_body["comparison"])
+        assert "PRIVATE-REAL-STORAGE-QUERY" not in str(compare_body["diagnostics"])
+
+        trace = client.get(f"/v1/traces/{compare_rid}", headers=_headers())
+        assert trace.status_code == 200, trace.text
+        trace_body = trace.json()
+        assert trace_body["request_id"] == compare_rid
+        assert trace_body["owner_id"] == "owner-real-storage"
+        assert trace_body["conversation_id"] == conversation_id
+        assert trace_body["retrieval"]["mode"] == "compare"
+        assert trace_body["retrieval"]["request_id"] == compare_rid
+        assert trace_body["retrieval"]["owner_id"] == "owner-real-storage"
+        assert "PRIVATE-REAL-STORAGE-QUERY" not in str(trace_body["retrieval"])
 
 
 def test_legacy_defaults_and_malformed_stored_provenance_are_explicit(

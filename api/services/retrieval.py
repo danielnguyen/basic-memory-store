@@ -18,6 +18,7 @@ from models import (
 )
 from services.memory_lifecycle import effective_freshness_state
 from services.derived_contract import derived_text_contract_view
+from services.retrieval_debug import compare_bundle_summaries, summarize_bundle
 
 
 SOURCE_AVAILABLE = "available"
@@ -422,6 +423,45 @@ def _qualification_reasons(*, freshness_state: str, durable_status: str | None) 
     return list(dict.fromkeys(reasons))
 
 
+def _state_counts_for_items(items: list[Any]) -> dict[str, int]:
+    counts = {
+        "stale": 0,
+        "contradicted": 0,
+        "superseded": 0,
+        "retracted": 0,
+        "unsupported_validation_state": 0,
+    }
+    unsupported_statuses = {"invalidated", "expired", "forgotten_or_demoted", "rebuilding"}
+    for item in items:
+        freshness_state = str(getattr(item, "freshness_state", "") or "")
+        durable_status = str(getattr(item, "durable_status", "") or "")
+        if freshness_state == "stale" or durable_status == "stale":
+            counts["stale"] += 1
+        if durable_status == "contradicted":
+            counts["contradicted"] += 1
+        if freshness_state == "superseded" or durable_status == "superseded":
+            counts["superseded"] += 1
+        if durable_status == "retracted":
+            counts["retracted"] += 1
+        if durable_status in unsupported_statuses:
+            counts["unsupported_validation_state"] += 1
+    return counts
+
+
+def _merge_state_counts(*states: dict[str, int]) -> dict[str, int]:
+    merged = {
+        "stale": 0,
+        "contradicted": 0,
+        "superseded": 0,
+        "retracted": 0,
+        "unsupported_validation_state": 0,
+    }
+    for state in states:
+        for key in merged:
+            merged[key] += int(state.get(key, 0))
+    return merged
+
+
 def _domain_filter_state(
     *,
     policy_metadata: RetrievalPolicyMetadata,
@@ -815,6 +855,7 @@ async def build_retrieval_bundle(
         if item.qualification_reasons:
             truth_debug["derived_degraded_count"] += 1
             truth_debug["lifecycle_restricted_derived_count"] += 1
+    truth_debug["derivative_state_counts"] = _state_counts_for_items(artifact_refs)
 
     allowed_domain_set = set(_normalize_domain_values(allowed_memory_domains or []))
     blocked_domain_set = set(_normalize_domain_values(blocked_memory_domains or []))
@@ -864,6 +905,8 @@ async def build_retrieval_bundle(
         ),
         retrieval_debug={
             **message_results["retrieval_debug"],
+            "retrieval_contract_mode": "augmented" if include_artifacts else "raw",
+            "contract_version": "raw-retrieval-debug.v1",
             "artifacts_included": include_artifacts,
             "artifact_candidates": len(artifact_snips),
             "artifact_ranked": len(ranked_artifacts),
@@ -892,3 +935,282 @@ async def build_retrieval_bundle(
             **domain_filter_debug,
         },
     )
+
+
+def _diagnostic_reason_codes(debug: dict[str, Any]) -> list[str]:
+    codes: list[str] = []
+    truth = debug.get("truth_qualification") if isinstance(debug.get("truth_qualification"), dict) else {}
+    if truth.get("canonical_result_count", 0) > 0:
+        codes.append("canonical_evidence_used")
+    if truth.get("derived_result_count", 0) > 0:
+        codes.append("derivative_augmentation_used")
+    if truth.get("source_missing_count", 0) > 0:
+        codes.append("source_missing_or_unavailable")
+    if truth.get("source_unavailable_count", 0) > 0:
+        codes.append("source_missing_or_unavailable")
+    if truth.get("source_malformed_count", 0) > 0:
+        codes.append("provenance_missing_or_invalid")
+    if truth.get("source_owner_mismatch_count", 0) > 0:
+        codes.append("validation_violation")
+    omissions = truth.get("derivative_omissions_by_reason") or {}
+    for reason in omissions:
+        if reason in {"missing_derivative_source_refs", "malformed_derivative_provenance", "malformed_derivative_source_ref"}:
+            codes.append("provenance_missing_or_invalid")
+        elif reason == "cross_owner_derivative_source_ref":
+            codes.append("validation_violation")
+        elif "missing" in reason or "unavailable" in reason:
+            codes.append("source_missing_or_unavailable")
+    if truth.get("derived_degraded_count", 0) > 0:
+        codes.append("derivative_ineligible")
+    state_counts = truth.get("derivative_state_counts") if isinstance(truth.get("derivative_state_counts"), dict) else {}
+    for state, count in state_counts.items():
+        if int(count or 0) > 0:
+            codes.append(f"derivative_{state}")
+    if truth.get("canonical_fallback_reasons"):
+        codes.append("fallback_to_raw")
+    if debug.get("vector_status") == "unavailable" or debug.get("artifact_status") == "unavailable":
+        codes.append("advanced_dependency_unavailable")
+    if debug.get("artifact_status") in {"degraded", "unavailable"}:
+        codes.append("validation_violation")
+    return list(dict.fromkeys(codes))
+
+
+def doctrine_diagnostics_for_bundle(
+    *,
+    request_id: str,
+    conversation_id: str,
+    owner_id: str,
+    mode: str,
+    bundle: RetrievalBundle | None = None,
+    raw_bundle: RetrievalBundle | None = None,
+    augmented_bundle: RetrievalBundle | None = None,
+    comparison: dict[str, Any] | None = None,
+    status: str = "ok",
+    error: str | None = None,
+) -> dict[str, Any]:
+    selected = augmented_bundle or bundle or raw_bundle
+    debug = selected.retrieval_debug if selected is not None else {}
+    raw_ids = summarize_bundle(raw_bundle)["semantic_ids"] if raw_bundle is not None else []
+    augmented_ids = summarize_bundle(augmented_bundle)["semantic_ids"] if augmented_bundle is not None else []
+    selected_state_counts = (
+        _state_counts_for_items([*selected.recent, *selected.semantic, *selected.artifact_refs])
+        if selected is not None
+        else _merge_state_counts()
+    )
+    diagnostics = {
+        "contract_version": "raw-retrieval-debug.v1",
+        "request_id": request_id,
+        "conversation_id": conversation_id,
+        "owner_id": owner_id,
+        "mode": mode,
+        "status": status,
+        "retrieval_path": mode,
+        "canonical_used": False,
+        "derived_used": False,
+        "reason_codes": [],
+        "raw_result_ids": raw_ids,
+        "augmented_result_ids": augmented_ids,
+        "comparison": comparison or {},
+        "fallback_to_raw": False,
+        "fallback_reasons": [],
+        "provenance_summary": {},
+        "validation": {},
+    }
+    if selected is not None:
+        truth = debug.get("truth_qualification") if isinstance(debug.get("truth_qualification"), dict) else {}
+        diagnostics.update(
+            {
+                "canonical_used": truth.get("canonical_result_count", 0) > 0,
+                "derived_used": truth.get("derived_result_count", 0) > 0,
+                "fallback_to_raw": bool(truth.get("canonical_fallback_reasons")),
+                "fallback_reasons": list(truth.get("canonical_fallback_reasons") or []),
+                "provenance_summary": {
+                    "derivative_source_checks_attempted": truth.get("derivative_source_checks_attempted", 0),
+                    "source_available_count": truth.get("source_available_count", 0),
+                    "source_missing_count": truth.get("source_missing_count", 0),
+                    "source_malformed_count": truth.get("source_malformed_count", 0),
+                    "source_unavailable_count": truth.get("source_unavailable_count", 0),
+                    "source_owner_mismatch_count": truth.get("source_owner_mismatch_count", 0),
+                    "derivative_omissions_by_reason": truth.get("derivative_omissions_by_reason", {}),
+                },
+                "validation": {
+                    "vector_retrieval_status": truth.get("vector_retrieval_status", debug.get("vector_status")),
+                    "derivative_retrieval_status": truth.get("derivative_retrieval_status", debug.get("artifact_status")),
+                    "derived_degraded_count": truth.get("derived_degraded_count", 0),
+                    "lifecycle_restricted_derived_count": truth.get("lifecycle_restricted_derived_count", 0),
+                    "derivative_state_counts": truth.get("derivative_state_counts", selected_state_counts),
+                    "artifact_omission_reasons": list(debug.get("artifact_omission_reasons") or []),
+                },
+            }
+        )
+        diagnostics["reason_codes"] = _diagnostic_reason_codes(debug)
+    if mode == "compare":
+        diagnostics["reason_codes"] = list(
+            dict.fromkeys([*diagnostics["reason_codes"], "compare_mode_requested", "compare_mode_completed"])
+        )
+    if error:
+        diagnostics["error"] = error[:160]
+        diagnostics["reason_codes"] = list(dict.fromkeys([*diagnostics["reason_codes"], "retrieval_failed"]))
+    return diagnostics
+
+
+async def build_retrieval_response_payload(
+    *,
+    pg: Any,
+    qdrant: Any,
+    settings: Any,
+    request_id: str,
+    owner_id: str,
+    conversation_id: UUID,
+    client_id: str | None,
+    query: str,
+    opts: RetrievalOptions,
+    mode: str,
+    include_artifacts: bool,
+    allowed_memory_domains: list[str] | None = None,
+    blocked_memory_domains: list[str] | None = None,
+) -> dict[str, Any]:
+    normalized_query = query.strip()
+    normalization_applied = normalized_query != query
+    if mode == "raw":
+        bundle = await build_retrieval_bundle(
+            pg=pg,
+            qdrant=qdrant,
+            settings=settings,
+            owner_id=owner_id,
+            conversation_id=conversation_id,
+            client_id=client_id,
+            query=normalized_query,
+            opts=opts,
+            include_artifacts=False,
+            allowed_memory_domains=allowed_memory_domains,
+            blocked_memory_domains=blocked_memory_domains,
+        )
+        diagnostics = doctrine_diagnostics_for_bundle(
+            request_id=request_id,
+            conversation_id=str(conversation_id),
+            owner_id=owner_id,
+            mode=mode,
+            bundle=bundle,
+        )
+        return {"bundle": bundle, "diagnostics": diagnostics}
+
+    if mode == "compare":
+        raw_bundle = await build_retrieval_bundle(
+            pg=pg,
+            qdrant=qdrant,
+            settings=settings,
+            owner_id=owner_id,
+            conversation_id=conversation_id,
+            client_id=client_id,
+            query=normalized_query,
+            opts=opts,
+            include_artifacts=False,
+            allowed_memory_domains=allowed_memory_domains,
+            blocked_memory_domains=blocked_memory_domains,
+        )
+        raw_summary = summarize_bundle(raw_bundle)
+        augmented_bundle: RetrievalBundle | None = None
+        augmented_failure_reason: str | None = None
+        try:
+            augmented_bundle = await build_retrieval_bundle(
+                pg=pg,
+                qdrant=qdrant,
+                settings=settings,
+                owner_id=owner_id,
+                conversation_id=conversation_id,
+                client_id=client_id,
+                query=normalized_query,
+                opts=opts,
+                include_artifacts=include_artifacts,
+                allowed_memory_domains=allowed_memory_domains,
+                blocked_memory_domains=blocked_memory_domains,
+            )
+            augmented_summary = summarize_bundle(augmented_bundle)
+            comparison = compare_bundle_summaries(raw_summary, augmented_summary)
+            status = "ok"
+        except Exception:
+            augmented_failure_reason = "augmented_retrieval_failed"
+            augmented_summary = None
+            comparison = {
+                "contract_version": "raw-retrieval-debug.v1",
+                "same_semantic_order": False,
+                "raw_only_semantic_ids": raw_summary["semantic_ids"],
+                "augmented_only_semantic_ids": [],
+                "raw_order": raw_summary["semantic_ids"],
+                "augmented_order": [],
+                "added": [],
+                "removed": [
+                    {"id": item, "result_type": "message", "reason_codes": ["augmented_unavailable"]}
+                    for item in raw_summary["semantic_ids"]
+                ],
+                "moved": [],
+                "rank_deltas": [],
+                "artifact_delta": 0 - raw_summary["artifact_count"],
+                "token_delta": 0 - (raw_summary.get("token_estimate_total") or 0),
+            }
+            status = "degraded"
+        comparison.update(
+            {
+                "mode": "compare",
+                "request_id": request_id,
+                "conversation_id": str(conversation_id),
+                "owner_id": owner_id,
+                "shared_normalized_input": True,
+                "normalization_applied": normalization_applied,
+                "scope": opts.scope,
+            }
+        )
+        diagnostics = doctrine_diagnostics_for_bundle(
+            request_id=request_id,
+            conversation_id=str(conversation_id),
+            owner_id=owner_id,
+            mode=mode,
+            raw_bundle=raw_bundle,
+            augmented_bundle=augmented_bundle,
+            comparison=comparison,
+            status=status,
+        )
+        if augmented_failure_reason:
+            diagnostics["fallback_to_raw"] = True
+            diagnostics["fallback_reasons"] = [augmented_failure_reason]
+            diagnostics["reason_codes"] = list(
+                dict.fromkeys([
+                    *diagnostics.get("reason_codes", []),
+                    "advanced_dependency_unavailable",
+                    "augmented_retrieval_failed",
+                    "fallback_to_raw",
+                    "compare_mode_degraded",
+                ])
+            )
+            diagnostics["validation"]["derivative_retrieval_status"] = "failed"
+            diagnostics["validation"]["augmented_failure_reason"] = augmented_failure_reason
+        return {
+            "bundle": augmented_bundle or raw_bundle,
+            "raw_bundle": raw_bundle,
+            "augmented_bundle": augmented_bundle,
+            "comparison": comparison,
+            "diagnostics": diagnostics,
+        }
+
+    bundle = await build_retrieval_bundle(
+        pg=pg,
+        qdrant=qdrant,
+        settings=settings,
+        owner_id=owner_id,
+        conversation_id=conversation_id,
+        client_id=client_id,
+        query=normalized_query,
+        opts=opts,
+        include_artifacts=include_artifacts,
+        allowed_memory_domains=allowed_memory_domains,
+        blocked_memory_domains=blocked_memory_domains,
+    )
+    diagnostics = doctrine_diagnostics_for_bundle(
+        request_id=request_id,
+        conversation_id=str(conversation_id),
+        owner_id=owner_id,
+        mode=mode,
+        bundle=bundle,
+    )
+    return {"bundle": bundle, "diagnostics": diagnostics}

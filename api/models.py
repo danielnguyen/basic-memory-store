@@ -10,6 +10,7 @@ Role = Literal["user", "assistant", "system", "tool"]
 RetrievalScope = Literal["conversation", "client", "owner"]
 TimeWindow = Literal["7d", "30d", "90d", "all"]
 RetrievalMode = Literal["recent", "balanced", "historical"]
+RetrievalContractMode = Literal["augmented", "raw", "compare"]
 RetrievalSourceType = Literal["message", "derived_text"]
 RetrievalEvidenceRole = Literal["canonical", "derived"]
 RetrievalSourceAvailability = Literal[
@@ -237,6 +238,10 @@ class RetrieveBundleRequest(BaseModel):
     request_id: str
     owner_id: str
     query: str
+    mode: RetrievalContractMode = Field(
+        default="augmented",
+        description="Retrieval contract mode: augmented, raw canonical-only, or structural compare.",
+    )
     retrieval: Optional[RetrievalOptions] = None
     include_artifacts: Optional[bool] = None
     allowed_memory_domains: Optional[List[str]] = Field(default=None, max_length=16)
@@ -340,6 +345,10 @@ class RetrieveBundleResponse(BaseModel):
     request_id: str
     conversation_id: str
     bundle: RetrievalBundle
+    raw_bundle: Optional[RetrievalBundle] = None
+    augmented_bundle: Optional[RetrievalBundle] = None
+    comparison: Optional[Dict[str, Any]] = None
+    diagnostics: Dict[str, Any] = Field(default_factory=dict)
 
 
 class DerivedInspectionResponse(BaseModel):

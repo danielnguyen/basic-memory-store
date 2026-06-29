@@ -10,8 +10,8 @@ from services.retrieval_replay import replay_raw_vs_augmented, structural_diff
 from tools.replay_scenarios import run_corpus
 
 
-async def fake_runner(*, settings, conversation_id, opts, **kwargs):
-    artifact_k = getattr(settings, "retrieval_artifact_k", 3)
+async def fake_runner(*, settings, conversation_id, opts, include_artifacts=True, **kwargs):
+    artifact_k = getattr(settings, "retrieval_artifact_k", 3) if include_artifacts else 0
     artifacts = []
     if artifact_k:
         artifacts = [
@@ -62,11 +62,27 @@ async def test_replay_raw_vs_augmented_is_deterministic_and_fake_friendly():
     assert out["raw"]["artifact_count"] == 0
     assert out["augmented"]["artifact_ids"] == ["artifact-1"]
     assert out["comparison"] == {
+        "contract_version": "raw-retrieval-debug.v1",
         "same_semantic_order": True,
         "raw_only_semantic_ids": [],
         "augmented_only_semantic_ids": [],
+        "raw_order": ["message-1"],
+        "augmented_order": ["message-1"],
+        "added": [
+            {
+                "id": "artifact-1",
+                "result_type": "artifact",
+                "reason_codes": ["derivative_augmentation_used"],
+            }
+        ],
+        "removed": [],
+        "moved": [],
+        "rank_deltas": [],
         "artifact_delta": 1,
         "token_delta": 20,
+        "shared_normalized_input": True,
+        "normalization_applied": False,
+        "augmented_failed": False,
     }
 
 
@@ -80,7 +96,7 @@ async def test_persisted_replay_corpus_matches_twice_from_clean_fixture_state():
     assert first_failures == []
     assert second_failures == []
     assert first == second
-    assert len(first) == 13
+    assert len(first) == 18
 
 
 def test_persisted_replay_corpus_covers_required_retrieval_matrix():
@@ -110,6 +126,12 @@ def test_persisted_replay_corpus_covers_required_retrieval_matrix():
         "superseded",
         "cross-owner",
         "source-traversal",
+        "normalized-input",
+        "privacy",
+        "augmented-failure",
+        "canonical-failure",
+        "retracted",
+        "unsupported-validation-state",
     } <= categories
 
 
@@ -126,6 +148,7 @@ def test_replay_snapshots_are_privacy_safe_and_structural_diff_is_readable():
     assert "contradicted derivative fixture" not in serialized_expected
     assert "cross owner derivative fixture" not in serialized_expected
     assert "source traversal unavailable fixture" not in serialized_expected
+    assert "PRIVATE-QUERY-SENTINEL-REPLAY" not in serialized_expected
     diff = structural_diff({"ids": ["a"]}, {"ids": ["b"]})
     assert "--- expected" in diff
     assert "+++ actual" in diff

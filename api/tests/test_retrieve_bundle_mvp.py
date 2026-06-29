@@ -17,6 +17,8 @@ class FakePG:
         memory_items_by_ref=None,
         artifact_owner_by_id=None,
         source_lookup_fails=False,
+        derived_text_lookup_fails=False,
+        unique_derived_snippets=False,
     ):
         self.message_times = message_times or ["2026-01-01T00:00:00+00:00"]
         self.message_metadata = message_metadata or {}
@@ -24,7 +26,10 @@ class FakePG:
         self.memory_items_by_ref = memory_items_by_ref or {}
         self.artifact_owner_by_id = artifact_owner_by_id or {}
         self.source_lookup_fails = source_lookup_fails
+        self.derived_text_lookup_fails = derived_text_lookup_fails
+        self.unique_derived_snippets = unique_derived_snippets
         self.last_conversation_id = None
+        self.traces = {}
 
     async def open(self):
         return None
@@ -81,6 +86,18 @@ class FakePG:
         ]
 
     async def get_derived_text_snippets_by_ids(self, ids):
+        if self.derived_text_lookup_fails and ids:
+            raise RuntimeError("derived text store unavailable")
+        def _text(idx):
+            if self.unique_derived_snippets and idx > 0:
+                return f"def important_helper_{idx}(): pass"
+            return "def important_helper(): pass"
+
+        def _file_path(idx):
+            if self.unique_derived_snippets and idx > 0:
+                return f"api/helpers_{idx}.py"
+            return "api/helpers.py"
+
         return (
             [
                 {
@@ -88,14 +105,14 @@ class FakePG:
                     "artifact_id": str(uuid.uuid4()),
                     "owner_id": "owner",
                     "kind": "chunk",
-                    "text": "def important_helper(): pass",
+                    "text": _text(idx),
                     "derivation_params": self.artifact_metadata.get(str(item), {}),
                     "created_at": "2026-01-01T00:00:00+00:00",
-                    "file_path": "api/helpers.py",
+                    "file_path": _file_path(idx),
                     "repo_name": "basic-memory-store",
                     "mime": "text/plain",
                 }
-                for item in ids
+                for idx, item in enumerate(ids)
             ]
             if ids
             else []
@@ -126,16 +143,31 @@ class FakePG:
                 out[key] = self.memory_items_by_ref[key]
         return out
 
+    async def create_trace(self, trace):
+        trace_id = str(uuid.uuid4())
+        self.traces[trace["request_id"]] = {
+            "trace_id": trace_id,
+            **trace,
+            "conversation_id": str(trace["conversation_id"]),
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+        return trace_id
+
+    async def get_trace_by_request_id(self, request_id):
+        return self.traces.get(request_id)
+
 
 class FakeQdrant:
     def __init__(self, *, message_scores=None):
         self.message_scores = message_scores or [0.77]
         self.artifact_search_calls = []
+        self.search_calls = []
 
     def ping(self):
         return True
 
     async def search(self, **kwargs):
+        self.search_calls.append(kwargs)
         return [
             types.SimpleNamespace(message_id=str(uuid.uuid4()), score=score)
             for score in self.message_scores
@@ -1024,3 +1056,335 @@ async def test_vector_and_artifact_failure_preserve_canonical_recent_without_fab
     assert debug["truth_qualification"]["canonical_result_count"] == 1
     assert debug["truth_qualification"]["derived_result_count"] == 0
     assert debug["truth_qualification"]["canonical_fallback_reasons"] == ["vector_unavailable"]
+
+
+@pytest.mark.asyncio
+async def test_raw_mode_excludes_derivative_assistance_through_api(monkeypatch):
+    fake_pg = FakePG()
+    fake_qdrant = FakeQdrant()
+    fake_settings = types.SimpleNamespace(
+        memory_api_key="testkey",
+        require_request_id=True,
+        enforce_request_id_header_body_match=True,
+        retrieval_k=8,
+        retrieval_recent_half_life_days=14,
+        retrieval_balanced_half_life_days=45,
+        retrieval_historical_half_life_days=365,
+        retrieval_conversation_boost=0.08,
+        retrieval_pinned_bias=0.12,
+        retrieval_missing_penalty_cap=0.15,
+        recent_turns=10,
+        enable_trace_storage=True,
+    )
+    monkeypatch.setattr(main_module, "settings", fake_settings, raising=True)
+    monkeypatch.setattr(main_module, "pg", fake_pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", fake_qdrant, raising=True)
+
+    rid = "rid-raw-mode"
+    conversation_id = str(uuid.uuid4())
+    r = await _post_retrieve_bundle(
+        conversation_id=conversation_id,
+        request_id=rid,
+        body={"request_id": rid, "owner_id": "owner", "query": "helper", "mode": "raw"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["bundle"]["artifact_refs"] == []
+    assert fake_qdrant.artifact_search_calls == []
+    assert body["bundle"]["retrieval_debug"]["retrieval_contract_mode"] == "raw"
+    assert body["bundle"]["retrieval_debug"]["artifacts_included"] is False
+    assert body["diagnostics"]["mode"] == "raw"
+    assert body["diagnostics"]["canonical_used"] is True
+    assert body["diagnostics"]["derived_used"] is False
+    assert "derivative_augmentation_used" not in body["diagnostics"]["reason_codes"]
+
+    trace = await fake_pg.get_trace_by_request_id(rid)
+    assert trace["retrieval"]["mode"] == "raw"
+    assert trace["retrieval"]["owner_id"] == "owner"
+    assert trace["retrieval"]["request_id"] == rid
+
+
+@pytest.mark.asyncio
+async def test_compare_mode_runs_raw_and_augmented_from_same_normalized_request(monkeypatch):
+    semantic_id = "11111111-1111-4111-8111-111111111111"
+    derived_text_id = "55555555-5555-4555-8555-555555555555"
+    private_query = " PRIVATE-QUERY-SENTINEL-2E "
+    fake_pg = FakePG()
+    fake_qdrant = FakeQdrant()
+
+    async def fixed_search(**kwargs):
+        fake_qdrant.search_calls.append(kwargs)
+        return [types.SimpleNamespace(message_id=semantic_id, score=0.77)]
+
+    async def fixed_artifact_search(**kwargs):
+        fake_qdrant.artifact_search_calls.append(kwargs)
+        return [types.SimpleNamespace(derived_text_id=derived_text_id, score=0.66)]
+
+    fake_qdrant.search = fixed_search
+    fake_qdrant.search_artifact_chunks = fixed_artifact_search
+    fake_settings = types.SimpleNamespace(
+        memory_api_key="testkey",
+        require_request_id=True,
+        enforce_request_id_header_body_match=True,
+        retrieval_k=8,
+        retrieval_recent_half_life_days=14,
+        retrieval_balanced_half_life_days=45,
+        retrieval_historical_half_life_days=365,
+        retrieval_conversation_boost=0.08,
+        retrieval_pinned_bias=0.12,
+        retrieval_missing_penalty_cap=0.15,
+        recent_turns=10,
+        enable_trace_storage=True,
+    )
+    monkeypatch.setattr(main_module, "settings", fake_settings, raising=True)
+    monkeypatch.setattr(main_module, "pg", fake_pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", fake_qdrant, raising=True)
+
+    rid = "rid-compare-mode"
+    conversation_id = str(uuid.uuid4())
+    r = await _post_retrieve_bundle(
+        conversation_id=conversation_id,
+        request_id=rid,
+        body={"request_id": rid, "owner_id": "owner", "query": private_query, "mode": "compare"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert len(fake_qdrant.search_calls) == 2
+    assert {call["query"] for call in fake_qdrant.search_calls} == {"PRIVATE-QUERY-SENTINEL-2E"}
+    assert body["raw_bundle"]["artifact_refs"] == []
+    assert len(body["augmented_bundle"]["artifact_refs"]) == 1
+    assert body["comparison"]["mode"] == "compare"
+    assert body["comparison"]["shared_normalized_input"] is True
+    assert body["comparison"]["normalization_applied"] is True
+    assert body["comparison"]["raw_order"] == [semantic_id]
+    assert body["comparison"]["augmented_order"] == [semantic_id]
+    assert body["comparison"]["artifact_delta"] == 1
+    assert body["comparison"]["added"][0]["result_type"] == "artifact"
+    assert body["diagnostics"]["mode"] == "compare"
+    assert "compare_mode_completed" in body["diagnostics"]["reason_codes"]
+    serialized_diagnostics = str(body["diagnostics"]) + str(body["comparison"])
+    assert "PRIVATE-QUERY-SENTINEL-2E" not in serialized_diagnostics
+    assert "semantic result" not in serialized_diagnostics
+    assert "def important_helper" not in serialized_diagnostics
+
+    trace = await fake_pg.get_trace_by_request_id(rid)
+    assert trace["retrieval"]["comparison"]["artifact_delta"] == 1
+    assert trace["retrieval"]["raw_result_ids"] == [semantic_id]
+    assert "PRIVATE-QUERY-SENTINEL-2E" not in str(trace["retrieval"])
+
+
+@pytest.mark.asyncio
+async def test_compare_augmented_failure_preserves_raw_bundle_and_trace(monkeypatch):
+    semantic_id = "11111111-1111-4111-8111-111111111112"
+    fake_pg = FakePG(derived_text_lookup_fails=True)
+    fake_qdrant = FakeQdrant()
+
+    async def fixed_search(**kwargs):
+        fake_qdrant.search_calls.append(kwargs)
+        return [types.SimpleNamespace(message_id=semantic_id, score=0.77)]
+
+    fake_qdrant.search = fixed_search
+    fake_settings = types.SimpleNamespace(
+        memory_api_key="testkey",
+        require_request_id=True,
+        enforce_request_id_header_body_match=True,
+        retrieval_k=8,
+        retrieval_recent_half_life_days=14,
+        retrieval_balanced_half_life_days=45,
+        retrieval_historical_half_life_days=365,
+        retrieval_conversation_boost=0.08,
+        retrieval_pinned_bias=0.12,
+        retrieval_missing_penalty_cap=0.15,
+        recent_turns=10,
+        enable_trace_storage=True,
+    )
+    monkeypatch.setattr(main_module, "settings", fake_settings, raising=True)
+    monkeypatch.setattr(main_module, "pg", fake_pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", fake_qdrant, raising=True)
+
+    rid = "rid-augmented-failure"
+    conversation_id = str(uuid.uuid4())
+    r = await _post_retrieve_bundle(
+        conversation_id=conversation_id,
+        request_id=rid,
+        body={"request_id": rid, "owner_id": "owner", "query": "helper", "mode": "compare"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["raw_bundle"]["semantic"][0]["message_id"] == semantic_id
+    assert body["bundle"] == body["raw_bundle"]
+    assert body["augmented_bundle"] is None
+    assert body["diagnostics"]["status"] == "degraded"
+    assert body["diagnostics"]["fallback_to_raw"] is True
+    assert body["diagnostics"]["fallback_reasons"] == ["augmented_retrieval_failed"]
+    assert "canonical_retrieval_failed" not in str(body["diagnostics"])
+
+    trace = await fake_pg.get_trace_by_request_id(rid)
+    assert trace["status"] == "degraded"
+    assert trace["retrieval"]["fallback_to_raw"] is True
+    assert trace["retrieval"]["fallback_reasons"] == ["augmented_retrieval_failed"]
+    assert "canonical_retrieval_failed" not in str(trace["retrieval"])
+
+
+@pytest.mark.asyncio
+async def test_doctrine_diagnostics_distinguish_supported_lifecycle_states(monkeypatch):
+    derived_ids = [
+        "55555555-5555-4555-8555-555555555551",
+        "55555555-5555-4555-8555-555555555552",
+        "55555555-5555-4555-8555-555555555553",
+        "55555555-5555-4555-8555-555555555554",
+        "55555555-5555-4555-8555-555555555555",
+    ]
+    statuses = ["stale", "contradicted", "superseded", "retracted", "rebuilding"]
+    fake_pg = FakePG(
+        unique_derived_snippets=True,
+        memory_items_by_ref={
+            ("derived_text", derived_id): {
+                "memory_id": str(uuid.uuid4()),
+                "status": status,
+                "last_reinforced_at": None,
+                "updated_at": "2026-06-12T00:00:00+00:00",
+                "confidence": 0.4,
+                "supersedes_memory_id": None,
+                "superseded_by_memory_id": (
+                    str(uuid.uuid4()) if status == "superseded" else None
+                ),
+            }
+            for derived_id, status in zip(derived_ids, statuses)
+        }
+    )
+    fake_qdrant = FakeQdrant()
+
+    async def fixed_artifact_search(**kwargs):
+        fake_qdrant.artifact_search_calls.append(kwargs)
+        return [
+            types.SimpleNamespace(derived_text_id=derived_id, score=0.7 - idx * 0.01)
+            for idx, derived_id in enumerate(derived_ids)
+        ]
+
+    fake_qdrant.search_artifact_chunks = fixed_artifact_search
+    fake_settings = types.SimpleNamespace(
+        memory_api_key="testkey",
+        require_request_id=True,
+        enforce_request_id_header_body_match=True,
+        retrieval_k=8,
+        retrieval_recent_half_life_days=14,
+        retrieval_balanced_half_life_days=45,
+        retrieval_historical_half_life_days=365,
+        retrieval_conversation_boost=0.08,
+        retrieval_pinned_bias=0.12,
+        retrieval_missing_penalty_cap=0.15,
+        retrieval_artifact_k=5,
+        recent_turns=10,
+        enable_trace_storage=True,
+    )
+    monkeypatch.setattr(main_module, "settings", fake_settings, raising=True)
+    monkeypatch.setattr(main_module, "pg", fake_pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", fake_qdrant, raising=True)
+
+    rid = "rid-state-diagnostics"
+    conversation_id = str(uuid.uuid4())
+    r = await _post_retrieve_bundle(
+        conversation_id=conversation_id,
+        request_id=rid,
+        body={"request_id": rid, "owner_id": "owner", "query": "states", "mode": "compare"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    state_counts = body["diagnostics"]["validation"]["derivative_state_counts"]
+    assert state_counts == {
+        "stale": 1,
+        "contradicted": 1,
+        "superseded": 1,
+        "retracted": 1,
+        "unsupported_validation_state": 1,
+    }
+    assert {
+        "derivative_stale",
+        "derivative_contradicted",
+        "derivative_superseded",
+        "derivative_retracted",
+        "derivative_unsupported_validation_state",
+    } <= set(body["diagnostics"]["reason_codes"])
+    trace = await fake_pg.get_trace_by_request_id(rid)
+    assert trace["retrieval"]["validation"]["derivative_state_counts"] == state_counts
+
+
+@pytest.mark.asyncio
+async def test_retrieve_mode_rejects_unknown_and_identity_mismatch(monkeypatch):
+    fake_pg = FakePG()
+    fake_settings = types.SimpleNamespace(
+        memory_api_key="testkey",
+        require_request_id=True,
+        enforce_request_id_header_body_match=True,
+        retrieval_k=8,
+        recent_turns=10,
+    )
+    monkeypatch.setattr(main_module, "settings", fake_settings, raising=True)
+    monkeypatch.setattr(main_module, "pg", fake_pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", FakeQdrant(), raising=True)
+
+    rid = "rid-invalid-mode"
+    conversation_id = str(uuid.uuid4())
+    invalid = await _post_retrieve_bundle(
+        conversation_id=conversation_id,
+        request_id=rid,
+        body={"request_id": rid, "owner_id": "owner", "query": "hello", "mode": "debug"},
+    )
+    assert invalid.status_code == 422
+
+    mismatch = await _post_retrieve_bundle(
+        conversation_id=conversation_id,
+        request_id="rid-owner-mismatch",
+        body={
+            "request_id": "rid-owner-mismatch",
+            "owner_id": "other-owner",
+            "query": "hello",
+            "mode": "raw",
+        },
+    )
+    assert mismatch.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_canonical_retrieval_failure_is_bounded_explicit_failure(monkeypatch):
+    class FailingCanonicalPG(FakePG):
+        async def get_recent_message_items(self, conversation_id, limit):
+            raise RuntimeError("canonical store unavailable")
+
+    fake_pg = FailingCanonicalPG()
+    fake_settings = types.SimpleNamespace(
+        memory_api_key="testkey",
+        require_request_id=True,
+        enforce_request_id_header_body_match=True,
+        retrieval_k=8,
+        retrieval_recent_half_life_days=14,
+        retrieval_balanced_half_life_days=45,
+        retrieval_historical_half_life_days=365,
+        retrieval_conversation_boost=0.08,
+        retrieval_pinned_bias=0.12,
+        retrieval_missing_penalty_cap=0.15,
+        recent_turns=10,
+        enable_trace_storage=True,
+    )
+    monkeypatch.setattr(main_module, "settings", fake_settings, raising=True)
+    monkeypatch.setattr(main_module, "pg", fake_pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", FakeQdrant(), raising=True)
+
+    rid = "rid-canonical-failure"
+    conversation_id = str(uuid.uuid4())
+    r = await _post_retrieve_bundle(
+        conversation_id=conversation_id,
+        request_id=rid,
+        body={"request_id": rid, "owner_id": "owner", "query": "hello", "mode": "raw"},
+    )
+    assert r.status_code == 503
+    assert r.json()["detail"] == {
+        "error": "canonical_retrieval_failed",
+        "request_id": rid,
+        "mode": "raw",
+    }
+    trace = await fake_pg.get_trace_by_request_id(rid)
+    assert trace["status"] == "failed"
+    assert trace["retrieval"]["status"] == "failed"
+    assert "fallback_to_raw" not in trace["retrieval"]["reason_codes"]
