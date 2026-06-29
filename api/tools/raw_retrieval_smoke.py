@@ -137,13 +137,14 @@ class SmokeQdrant:
 
 
 async def _post(client: httpx.AsyncClient, pg: SmokePG, request_id: str, mode: str):
+    query = " PRIVATE-SMOKE-QUERY " if mode == "compare" else "smoke"
     return await client.post(
         f"/v2/conversations/{pg.conversation_id}/retrieve",
         headers={"X-API-Key": "testkey", "X-Request-ID": request_id},
         json={
             "request_id": request_id,
             "owner_id": pg.owner_id,
-            "query": "smoke",
+            "query": query,
             "mode": mode,
         },
     )
@@ -183,6 +184,9 @@ async def main() -> None:
             assert compare_body["raw_bundle"]["artifact_refs"] == []
             assert len(compare_body["augmented_bundle"]["artifact_refs"]) == 1
             assert compare_body["comparison"]["artifact_delta"] == 1
+            assert compare_body["comparison"]["shared_normalized_input"] is True
+            assert compare_body["comparison"]["normalization_applied"] is True
+            assert "PRIVATE-SMOKE-QUERY" not in str(compare_body["comparison"])
             assert "private canonical smoke content" not in str(compare_body["comparison"])
             assert "private derived smoke content" not in str(compare_body["diagnostics"])
 
@@ -194,6 +198,7 @@ async def main() -> None:
             trace_body = trace.json()
             assert trace_body["retrieval"]["mode"] == "compare"
             assert trace_body["retrieval"]["request_id"] == "smoke-compare"
+            assert "PRIVATE-SMOKE-QUERY" not in str(trace_body["retrieval"])
 
             unauthorized = await client.post(
                 f"/v2/conversations/{pg.conversation_id}/retrieve",

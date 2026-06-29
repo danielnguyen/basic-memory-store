@@ -41,6 +41,8 @@ class FixturePG:
         return None
 
     async def get_derived_text_snippets_by_ids(self, ids: list[UUID]) -> list[dict[str, Any]]:
+        if self.fixture.get("derived_text_status") == "unavailable" and ids:
+            raise RuntimeError("fixture derived text store unavailable")
         by_id = {item["derived_text_id"]: item for item in self.fixture.get("artifact_sources", [])}
         rows = [deepcopy(by_id[str(item)]) for item in ids if str(item) in by_id]
         for row in rows:
@@ -105,6 +107,8 @@ class FixturePG:
         conversation_id: UUID,
         limit: int,
     ) -> list[dict[str, Any]]:
+        if self.fixture.get("canonical_status") == "unavailable":
+            raise RuntimeError("fixture canonical store unavailable")
         return deepcopy(self.fixture.get("recent_messages", []))[:limit]
 
     async def get_memory_items_for_source_refs(
@@ -187,7 +191,9 @@ def _outcome(snapshot: dict[str, Any]) -> dict[str, Any]:
     reasons = list(augmented_debug.get("fallback_to_raw_reasons") or [])
     reasons.extend(augmented_debug.get("artifact_omission_reasons") or [])
     reasons = list(dict.fromkeys(reasons))
-    if any(
+    if "augmented_retrieval_failed" in reasons:
+        fallback = "raw_canonical"
+    elif any(
         reason in {"vector_unavailable", "malformed_vector_result", "missing_canonical_source"}
         for reason in reasons
     ):
@@ -218,16 +224,72 @@ async def run_scenario(scenario: dict[str, Any]) -> dict[str, Any]:
         retrieval_missing_penalty_cap=0.15,
         recent_turns=10,
     )
-    replay = await replay_raw_vs_augmented(
-        pg=FixturePG(fixture, request["owner_id"]),
-        qdrant=FixtureQdrant(fixture),
-        settings=settings,
-        owner_id=request["owner_id"],
-        conversation_id=UUID(request["conversation_id"]),
-        client_id=request.get("client_id"),
-        query=retrieval["query"],
-        opts=RetrievalOptions(**retrieval.get("options", {})),
-    )
+    try:
+        replay = await replay_raw_vs_augmented(
+            pg=FixturePG(fixture, request["owner_id"]),
+            qdrant=FixtureQdrant(fixture),
+            settings=settings,
+            owner_id=request["owner_id"],
+            conversation_id=UUID(request["conversation_id"]),
+            client_id=request.get("client_id"),
+            query=retrieval["query"],
+            opts=RetrievalOptions(**retrieval.get("options", {})),
+        )
+    except Exception:
+        if fixture.get("canonical_status") != "unavailable":
+            raise
+        return {
+            "raw": {
+                "recent_ids": [],
+                "semantic_ids": [],
+                "artifact_ids": [],
+                "recent": [],
+                "semantic": [],
+                "artifacts": [],
+                "source_refs": [],
+                "token_estimate_total": None,
+                "diagnostics": {"status": "failed", "reason": "canonical_retrieval_failed"},
+            },
+            "augmented": {
+                "recent_ids": [],
+                "semantic_ids": [],
+                "artifact_ids": [],
+                "recent": [],
+                "semantic": [],
+                "artifacts": [],
+                "source_refs": [],
+                "token_estimate_total": None,
+                "diagnostics": {"status": "not_run"},
+            },
+            "comparison": {
+                "contract_version": "raw-retrieval-debug.v1",
+                "status": "failed",
+                "reason": "canonical_retrieval_failed",
+                "shared_normalized_input": True,
+                "normalization_applied": retrieval["query"].strip() != retrieval["query"],
+            },
+            "provenance": {
+                "raw_source_refs": [],
+                "augmented_source_refs": [],
+                "raw_freshness": [],
+                "augmented_freshness": [],
+                "truth_qualification": {},
+            },
+            "outcome": {
+                "status": "failed",
+                "fallback": "none",
+                "reasons": ["canonical_retrieval_failed"],
+            },
+            "contract": {
+                "request_id": request["request_id"],
+                "conversation_id": request["conversation_id"],
+                "owner_id": request["owner_id"],
+                "client_id": request.get("client_id"),
+                "surface": request["surface"],
+                "profile": request.get("profile"),
+                "consumer_context": scenario.get("consumer_context", {}),
+            },
+        }
     replay_view = {
         **replay,
         "raw": _summary_view(replay["raw"]),

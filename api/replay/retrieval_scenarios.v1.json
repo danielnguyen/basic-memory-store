@@ -58,6 +58,13 @@
               "derivative_omissions_by_reason": {},
               "derivative_retrieval_status": "ok",
               "derivative_source_checks_attempted": 1,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
               "derived_degraded_count": 1,
               "derived_result_count": 1,
               "lifecycle_restricted_derived_count": 1,
@@ -151,12 +158,14 @@
             }
           ],
           "artifact_delta": 1,
+          "augmented_failed": false,
           "augmented_only_semantic_ids": [],
           "augmented_order": [
             "00000000-0000-0000-0000-000000000202"
           ],
           "contract_version": "raw-retrieval-debug.v1",
           "moved": [],
+          "normalization_applied": false,
           "rank_deltas": [],
           "raw_only_semantic_ids": [],
           "raw_order": [
@@ -164,6 +173,7 @@
           ],
           "removed": [],
           "same_semantic_order": true,
+          "shared_normalized_input": true,
           "token_delta": 6
         },
         "contract": {
@@ -235,6 +245,13 @@
             "derivative_omissions_by_reason": {},
             "derivative_retrieval_status": "ok",
             "derivative_source_checks_attempted": 1,
+            "derivative_state_counts": {
+              "contradicted": 0,
+              "retracted": 0,
+              "stale": 0,
+              "superseded": 0,
+              "unsupported_validation_state": 0
+            },
             "derived_degraded_count": 1,
             "derived_result_count": 1,
             "lifecycle_restricted_derived_count": 1,
@@ -263,6 +280,13 @@
               "derivative_omissions_by_reason": {},
               "derivative_retrieval_status": "not_requested",
               "derivative_source_checks_attempted": 0,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
               "derived_degraded_count": 0,
               "derived_result_count": 0,
               "lifecycle_restricted_derived_count": 0,
@@ -468,6 +492,13 @@
               "derivative_omissions_by_reason": {},
               "derivative_retrieval_status": "ok",
               "derivative_source_checks_attempted": 1,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 1,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
               "derived_degraded_count": 1,
               "derived_result_count": 1,
               "lifecycle_restricted_derived_count": 1,
@@ -536,12 +567,14 @@
             }
           ],
           "artifact_delta": 1,
+          "augmented_failed": false,
           "augmented_only_semantic_ids": [],
           "augmented_order": [
             "00000000-0000-0000-0000-000000000203"
           ],
           "contract_version": "raw-retrieval-debug.v1",
           "moved": [],
+          "normalization_applied": false,
           "rank_deltas": [],
           "raw_only_semantic_ids": [],
           "raw_order": [
@@ -549,6 +582,7 @@
           ],
           "removed": [],
           "same_semantic_order": true,
+          "shared_normalized_input": true,
           "token_delta": 6
         },
         "contract": {
@@ -604,6 +638,13 @@
             "derivative_omissions_by_reason": {},
             "derivative_retrieval_status": "ok",
             "derivative_source_checks_attempted": 1,
+            "derivative_state_counts": {
+              "contradicted": 0,
+              "retracted": 0,
+              "stale": 1,
+              "superseded": 0,
+              "unsupported_validation_state": 0
+            },
             "derived_degraded_count": 1,
             "derived_result_count": 1,
             "lifecycle_restricted_derived_count": 1,
@@ -632,6 +673,13 @@
               "derivative_omissions_by_reason": {},
               "derivative_retrieval_status": "not_requested",
               "derivative_source_checks_attempted": 0,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
               "derived_degraded_count": 0,
               "derived_result_count": 0,
               "lifecycle_restricted_derived_count": 0,
@@ -779,6 +827,13 @@
               "derivative_omissions_by_reason": {},
               "derivative_retrieval_status": "degraded",
               "derivative_source_checks_attempted": 0,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
               "derived_degraded_count": 0,
               "derived_result_count": 0,
               "lifecycle_restricted_derived_count": 0,
@@ -801,15 +856,18 @@
         "comparison": {
           "added": [],
           "artifact_delta": 0,
+          "augmented_failed": false,
           "augmented_only_semantic_ids": [],
           "augmented_order": [],
           "contract_version": "raw-retrieval-debug.v1",
           "moved": [],
+          "normalization_applied": false,
           "rank_deltas": [],
           "raw_only_semantic_ids": [],
           "raw_order": [],
           "removed": [],
           "same_semantic_order": true,
+          "shared_normalized_input": true,
           "token_delta": 0
         },
         "contract": {
@@ -839,6 +897,13 @@
             "derivative_omissions_by_reason": {},
             "derivative_retrieval_status": "degraded",
             "derivative_source_checks_attempted": 0,
+            "derivative_state_counts": {
+              "contradicted": 0,
+              "retracted": 0,
+              "stale": 0,
+              "superseded": 0,
+              "unsupported_validation_state": 0
+            },
             "derived_degraded_count": 0,
             "derived_result_count": 0,
             "lifecycle_restricted_derived_count": 0,
@@ -867,6 +932,13 @@
               "derivative_omissions_by_reason": {},
               "derivative_retrieval_status": "not_requested",
               "derivative_source_checks_attempted": 0,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
               "derived_degraded_count": 0,
               "derived_result_count": 0,
               "lifecycle_restricted_derived_count": 0,
@@ -949,6 +1021,13 @@
               "derivative_omissions_by_reason": {},
               "derivative_retrieval_status": "degraded",
               "derivative_source_checks_attempted": 0,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
               "derived_degraded_count": 0,
               "derived_result_count": 0,
               "lifecycle_restricted_derived_count": 0,
@@ -971,15 +1050,18 @@
         "comparison": {
           "added": [],
           "artifact_delta": 0,
+          "augmented_failed": false,
           "augmented_only_semantic_ids": [],
           "augmented_order": [],
           "contract_version": "raw-retrieval-debug.v1",
           "moved": [],
+          "normalization_applied": false,
           "rank_deltas": [],
           "raw_only_semantic_ids": [],
           "raw_order": [],
           "removed": [],
           "same_semantic_order": true,
+          "shared_normalized_input": true,
           "token_delta": 0
         },
         "contract": {
@@ -1012,6 +1094,13 @@
             "derivative_omissions_by_reason": {},
             "derivative_retrieval_status": "degraded",
             "derivative_source_checks_attempted": 0,
+            "derivative_state_counts": {
+              "contradicted": 0,
+              "retracted": 0,
+              "stale": 0,
+              "superseded": 0,
+              "unsupported_validation_state": 0
+            },
             "derived_degraded_count": 0,
             "derived_result_count": 0,
             "lifecycle_restricted_derived_count": 0,
@@ -1044,6 +1133,13 @@
               "derivative_omissions_by_reason": {},
               "derivative_retrieval_status": "not_requested",
               "derivative_source_checks_attempted": 0,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
               "derived_degraded_count": 0,
               "derived_result_count": 0,
               "lifecycle_restricted_derived_count": 0,
@@ -1129,6 +1225,13 @@
               "derivative_omissions_by_reason": {},
               "derivative_retrieval_status": "not_requested",
               "derivative_source_checks_attempted": 0,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
               "derived_degraded_count": 0,
               "derived_result_count": 0,
               "lifecycle_restricted_derived_count": 0,
@@ -1177,15 +1280,18 @@
         "comparison": {
           "added": [],
           "artifact_delta": 0,
+          "augmented_failed": false,
           "augmented_only_semantic_ids": [],
           "augmented_order": [],
           "contract_version": "raw-retrieval-debug.v1",
           "moved": [],
+          "normalization_applied": false,
           "rank_deltas": [],
           "raw_only_semantic_ids": [],
           "raw_order": [],
           "removed": [],
           "same_semantic_order": true,
+          "shared_normalized_input": true,
           "token_delta": 0
         },
         "contract": {
@@ -1237,6 +1343,13 @@
             "derivative_omissions_by_reason": {},
             "derivative_retrieval_status": "not_requested",
             "derivative_source_checks_attempted": 0,
+            "derivative_state_counts": {
+              "contradicted": 0,
+              "retracted": 0,
+              "stale": 0,
+              "superseded": 0,
+              "unsupported_validation_state": 0
+            },
             "derived_degraded_count": 0,
             "derived_result_count": 0,
             "lifecycle_restricted_derived_count": 0,
@@ -1269,6 +1382,13 @@
               "derivative_omissions_by_reason": {},
               "derivative_retrieval_status": "not_requested",
               "derivative_source_checks_attempted": 0,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
               "derived_degraded_count": 0,
               "derived_result_count": 0,
               "lifecycle_restricted_derived_count": 0,
@@ -1379,6 +1499,13 @@
               "derivative_omissions_by_reason": {},
               "derivative_retrieval_status": "unavailable",
               "derivative_source_checks_attempted": 0,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
               "derived_degraded_count": 0,
               "derived_result_count": 0,
               "lifecycle_restricted_derived_count": 0,
@@ -1435,12 +1562,14 @@
         "comparison": {
           "added": [],
           "artifact_delta": 0,
+          "augmented_failed": false,
           "augmented_only_semantic_ids": [],
           "augmented_order": [
             "00000000-0000-0000-0000-000000000205"
           ],
           "contract_version": "raw-retrieval-debug.v1",
           "moved": [],
+          "normalization_applied": false,
           "rank_deltas": [],
           "raw_only_semantic_ids": [],
           "raw_order": [
@@ -1448,6 +1577,7 @@
           ],
           "removed": [],
           "same_semantic_order": true,
+          "shared_normalized_input": true,
           "token_delta": 0
         },
         "contract": {
@@ -1497,6 +1627,13 @@
             "derivative_omissions_by_reason": {},
             "derivative_retrieval_status": "unavailable",
             "derivative_source_checks_attempted": 0,
+            "derivative_state_counts": {
+              "contradicted": 0,
+              "retracted": 0,
+              "stale": 0,
+              "superseded": 0,
+              "unsupported_validation_state": 0
+            },
             "derived_degraded_count": 0,
             "derived_result_count": 0,
             "lifecycle_restricted_derived_count": 0,
@@ -1525,6 +1662,13 @@
               "derivative_omissions_by_reason": {},
               "derivative_retrieval_status": "not_requested",
               "derivative_source_checks_attempted": 0,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
               "derived_degraded_count": 0,
               "derived_result_count": 0,
               "lifecycle_restricted_derived_count": 0,
@@ -1650,6 +1794,13 @@
               "derivative_omissions_by_reason": {},
               "derivative_retrieval_status": "not_requested",
               "derivative_source_checks_attempted": 0,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
               "derived_degraded_count": 0,
               "derived_result_count": 0,
               "lifecycle_restricted_derived_count": 0,
@@ -1672,15 +1823,18 @@
         "comparison": {
           "added": [],
           "artifact_delta": 0,
+          "augmented_failed": false,
           "augmented_only_semantic_ids": [],
           "augmented_order": [],
           "contract_version": "raw-retrieval-debug.v1",
           "moved": [],
+          "normalization_applied": false,
           "rank_deltas": [],
           "raw_only_semantic_ids": [],
           "raw_order": [],
           "removed": [],
           "same_semantic_order": true,
+          "shared_normalized_input": true,
           "token_delta": 0
         },
         "contract": {
@@ -1712,6 +1866,13 @@
             "derivative_omissions_by_reason": {},
             "derivative_retrieval_status": "not_requested",
             "derivative_source_checks_attempted": 0,
+            "derivative_state_counts": {
+              "contradicted": 0,
+              "retracted": 0,
+              "stale": 0,
+              "superseded": 0,
+              "unsupported_validation_state": 0
+            },
             "derived_degraded_count": 0,
             "derived_result_count": 0,
             "lifecycle_restricted_derived_count": 0,
@@ -1740,6 +1901,13 @@
               "derivative_omissions_by_reason": {},
               "derivative_retrieval_status": "not_requested",
               "derivative_source_checks_attempted": 0,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
               "derived_degraded_count": 0,
               "derived_result_count": 0,
               "lifecycle_restricted_derived_count": 0,
@@ -1815,6 +1983,13 @@
               "derivative_omissions_by_reason": {},
               "derivative_retrieval_status": "not_requested",
               "derivative_source_checks_attempted": 0,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
               "derived_degraded_count": 0,
               "derived_result_count": 0,
               "lifecycle_restricted_derived_count": 0,
@@ -1837,15 +2012,18 @@
         "comparison": {
           "added": [],
           "artifact_delta": 0,
+          "augmented_failed": false,
           "augmented_only_semantic_ids": [],
           "augmented_order": [],
           "contract_version": "raw-retrieval-debug.v1",
           "moved": [],
+          "normalization_applied": false,
           "rank_deltas": [],
           "raw_only_semantic_ids": [],
           "raw_order": [],
           "removed": [],
           "same_semantic_order": true,
+          "shared_normalized_input": true,
           "token_delta": 0
         },
         "contract": {
@@ -1877,6 +2055,13 @@
             "derivative_omissions_by_reason": {},
             "derivative_retrieval_status": "not_requested",
             "derivative_source_checks_attempted": 0,
+            "derivative_state_counts": {
+              "contradicted": 0,
+              "retracted": 0,
+              "stale": 0,
+              "superseded": 0,
+              "unsupported_validation_state": 0
+            },
             "derived_degraded_count": 0,
             "derived_result_count": 0,
             "lifecycle_restricted_derived_count": 0,
@@ -1905,6 +2090,13 @@
               "derivative_omissions_by_reason": {},
               "derivative_retrieval_status": "not_requested",
               "derivative_source_checks_attempted": 0,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
               "derived_degraded_count": 0,
               "derived_result_count": 0,
               "lifecycle_restricted_derived_count": 0,
@@ -2014,6 +2206,13 @@
               "derivative_omissions_by_reason": {},
               "derivative_retrieval_status": "ok",
               "derivative_source_checks_attempted": 1,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
               "derived_degraded_count": 1,
               "derived_result_count": 1,
               "lifecycle_restricted_derived_count": 1,
@@ -2074,15 +2273,18 @@
             }
           ],
           "artifact_delta": 1,
+          "augmented_failed": false,
           "augmented_only_semantic_ids": [],
           "augmented_order": [],
           "contract_version": "raw-retrieval-debug.v1",
           "moved": [],
+          "normalization_applied": false,
           "rank_deltas": [],
           "raw_only_semantic_ids": [],
           "raw_order": [],
           "removed": [],
           "same_semantic_order": true,
+          "shared_normalized_input": true,
           "token_delta": 6
         },
         "contract": {
@@ -2138,6 +2340,13 @@
             "derivative_omissions_by_reason": {},
             "derivative_retrieval_status": "ok",
             "derivative_source_checks_attempted": 1,
+            "derivative_state_counts": {
+              "contradicted": 0,
+              "retracted": 0,
+              "stale": 0,
+              "superseded": 0,
+              "unsupported_validation_state": 0
+            },
             "derived_degraded_count": 1,
             "derived_result_count": 1,
             "lifecycle_restricted_derived_count": 1,
@@ -2166,6 +2375,13 @@
               "derivative_omissions_by_reason": {},
               "derivative_retrieval_status": "not_requested",
               "derivative_source_checks_attempted": 0,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
               "derived_degraded_count": 0,
               "derived_result_count": 0,
               "lifecycle_restricted_derived_count": 0,
@@ -2346,6 +2562,13 @@
               "derivative_omissions_by_reason": {},
               "derivative_retrieval_status": "ok",
               "derivative_source_checks_attempted": 1,
+              "derivative_state_counts": {
+                "contradicted": 1,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
               "derived_degraded_count": 1,
               "derived_result_count": 1,
               "lifecycle_restricted_derived_count": 1,
@@ -2406,15 +2629,18 @@
             }
           ],
           "artifact_delta": 1,
+          "augmented_failed": false,
           "augmented_only_semantic_ids": [],
           "augmented_order": [],
           "contract_version": "raw-retrieval-debug.v1",
           "moved": [],
+          "normalization_applied": false,
           "rank_deltas": [],
           "raw_only_semantic_ids": [],
           "raw_order": [],
           "removed": [],
           "same_semantic_order": true,
+          "shared_normalized_input": true,
           "token_delta": 7
         },
         "contract": {
@@ -2470,6 +2696,13 @@
             "derivative_omissions_by_reason": {},
             "derivative_retrieval_status": "ok",
             "derivative_source_checks_attempted": 1,
+            "derivative_state_counts": {
+              "contradicted": 1,
+              "retracted": 0,
+              "stale": 0,
+              "superseded": 0,
+              "unsupported_validation_state": 0
+            },
             "derived_degraded_count": 1,
             "derived_result_count": 1,
             "lifecycle_restricted_derived_count": 1,
@@ -2498,6 +2731,13 @@
               "derivative_omissions_by_reason": {},
               "derivative_retrieval_status": "not_requested",
               "derivative_source_checks_attempted": 0,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
               "derived_degraded_count": 0,
               "derived_result_count": 0,
               "lifecycle_restricted_derived_count": 0,
@@ -2678,6 +2918,13 @@
               "derivative_omissions_by_reason": {},
               "derivative_retrieval_status": "ok",
               "derivative_source_checks_attempted": 1,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 1,
+                "unsupported_validation_state": 0
+              },
               "derived_degraded_count": 1,
               "derived_result_count": 1,
               "lifecycle_restricted_derived_count": 1,
@@ -2748,12 +2995,14 @@
             }
           ],
           "artifact_delta": 1,
+          "augmented_failed": false,
           "augmented_only_semantic_ids": [],
           "augmented_order": [
             "00000000-0000-0000-0000-000000000211"
           ],
           "contract_version": "raw-retrieval-debug.v1",
           "moved": [],
+          "normalization_applied": false,
           "rank_deltas": [],
           "raw_only_semantic_ids": [],
           "raw_order": [
@@ -2761,6 +3010,7 @@
           ],
           "removed": [],
           "same_semantic_order": true,
+          "shared_normalized_input": true,
           "token_delta": 7
         },
         "contract": {
@@ -2816,6 +3066,13 @@
             "derivative_omissions_by_reason": {},
             "derivative_retrieval_status": "ok",
             "derivative_source_checks_attempted": 1,
+            "derivative_state_counts": {
+              "contradicted": 0,
+              "retracted": 0,
+              "stale": 0,
+              "superseded": 1,
+              "unsupported_validation_state": 0
+            },
             "derived_degraded_count": 1,
             "derived_result_count": 1,
             "lifecycle_restricted_derived_count": 1,
@@ -2844,6 +3101,13 @@
               "derivative_omissions_by_reason": {},
               "derivative_retrieval_status": "not_requested",
               "derivative_source_checks_attempted": 0,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
               "derived_degraded_count": 0,
               "derived_result_count": 0,
               "lifecycle_restricted_derived_count": 0,
@@ -3016,6 +3280,13 @@
               },
               "derivative_retrieval_status": "degraded",
               "derivative_source_checks_attempted": 1,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
               "derived_degraded_count": 0,
               "derived_result_count": 0,
               "lifecycle_restricted_derived_count": 0,
@@ -3064,15 +3335,18 @@
         "comparison": {
           "added": [],
           "artifact_delta": 0,
+          "augmented_failed": false,
           "augmented_only_semantic_ids": [],
           "augmented_order": [],
           "contract_version": "raw-retrieval-debug.v1",
           "moved": [],
+          "normalization_applied": false,
           "rank_deltas": [],
           "raw_only_semantic_ids": [],
           "raw_order": [],
           "removed": [],
           "same_semantic_order": true,
+          "shared_normalized_input": true,
           "token_delta": 0
         },
         "contract": {
@@ -3124,6 +3398,13 @@
             },
             "derivative_retrieval_status": "degraded",
             "derivative_source_checks_attempted": 1,
+            "derivative_state_counts": {
+              "contradicted": 0,
+              "retracted": 0,
+              "stale": 0,
+              "superseded": 0,
+              "unsupported_validation_state": 0
+            },
             "derived_degraded_count": 0,
             "derived_result_count": 0,
             "lifecycle_restricted_derived_count": 0,
@@ -3152,6 +3433,13 @@
               "derivative_omissions_by_reason": {},
               "derivative_retrieval_status": "not_requested",
               "derivative_source_checks_attempted": 0,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
               "derived_degraded_count": 0,
               "derived_result_count": 0,
               "lifecycle_restricted_derived_count": 0,
@@ -3288,6 +3576,13 @@
               },
               "derivative_retrieval_status": "degraded",
               "derivative_source_checks_attempted": 1,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
               "derived_degraded_count": 0,
               "derived_result_count": 0,
               "lifecycle_restricted_derived_count": 0,
@@ -3336,15 +3631,18 @@
         "comparison": {
           "added": [],
           "artifact_delta": 0,
+          "augmented_failed": false,
           "augmented_only_semantic_ids": [],
           "augmented_order": [],
           "contract_version": "raw-retrieval-debug.v1",
           "moved": [],
+          "normalization_applied": false,
           "rank_deltas": [],
           "raw_only_semantic_ids": [],
           "raw_order": [],
           "removed": [],
           "same_semantic_order": true,
+          "shared_normalized_input": true,
           "token_delta": 0
         },
         "contract": {
@@ -3396,6 +3694,13 @@
             },
             "derivative_retrieval_status": "degraded",
             "derivative_source_checks_attempted": 1,
+            "derivative_state_counts": {
+              "contradicted": 0,
+              "retracted": 0,
+              "stale": 0,
+              "superseded": 0,
+              "unsupported_validation_state": 0
+            },
             "derived_degraded_count": 0,
             "derived_result_count": 0,
             "lifecycle_restricted_derived_count": 0,
@@ -3424,6 +3729,13 @@
               "derivative_omissions_by_reason": {},
               "derivative_retrieval_status": "not_requested",
               "derivative_source_checks_attempted": 0,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
               "derived_degraded_count": 0,
               "derived_result_count": 0,
               "lifecycle_restricted_derived_count": 0,
@@ -3534,6 +3846,1758 @@
           "scope": "conversation"
         },
         "query": "source unavailable fixture"
+      }
+    },
+    {
+      "categories": [
+        "positive",
+        "normalized-input",
+        "privacy"
+      ],
+      "consumer_context": {},
+      "expected": {
+        "augmented": {
+          "artifact_ids": [
+            "00000000-0000-0000-0000-000000000401"
+          ],
+          "artifacts": [
+            {
+              "evidence_role": "derived",
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000401",
+              "owner_id": "owner-fixture",
+              "qualification_reasons": [
+                "effective_unknown_freshness"
+              ],
+              "score": 0.7,
+              "score_details": {
+                "conversation_boost": 0.0,
+                "final_score": 0.7,
+                "missing_score": 0.0,
+                "pinned_bias": 0.0,
+                "recency_adjustment": 0.0,
+                "semantic_score": 0.7
+              },
+              "source_availability": "available",
+              "source_checks": [
+                {
+                  "availability": "available",
+                  "ref_id": "00000000-0000-0000-0000-000000000401",
+                  "ref_type": "artifact",
+                  "support_kind": "direct"
+                }
+              ],
+              "source_kind": "derived_text",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000301",
+                "ref_type": "derived_text"
+              }
+            }
+          ],
+          "diagnostics": {
+            "artifact_invalid_hit_ids": 0,
+            "artifact_missing_source_count": 0,
+            "artifact_omission_reasons": [],
+            "artifact_status": "ok",
+            "fallback_to_raw_reasons": [],
+            "semantic_invalid_hit_ids": 0,
+            "semantic_missing_source_count": 0,
+            "truth_qualification": {
+              "canonical_fallback_reasons": [],
+              "canonical_result_count": 2,
+              "derivative_omissions_by_reason": {},
+              "derivative_retrieval_status": "ok",
+              "derivative_source_checks_attempted": 1,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
+              "derived_degraded_count": 1,
+              "derived_result_count": 1,
+              "lifecycle_restricted_derived_count": 1,
+              "source_available_count": 1,
+              "source_malformed_count": 0,
+              "source_missing_count": 0,
+              "source_owner_mismatch_count": 0,
+              "source_unavailable_count": 0,
+              "vector_retrieval_status": "ok"
+            },
+            "vector_status": "ok"
+          },
+          "recent": [
+            {
+              "evidence_role": "canonical",
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000201",
+              "owner_id": "owner-fixture",
+              "qualification_reasons": [
+                "canonical_recent",
+                "effective_unknown_freshness"
+              ],
+              "score_details": {},
+              "source_availability": "not_applicable",
+              "source_checks": [],
+              "source_kind": "message",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000201",
+                "ref_type": "message"
+              }
+            }
+          ],
+          "recent_ids": [
+            "00000000-0000-0000-0000-000000000201"
+          ],
+          "semantic": [
+            {
+              "evidence_role": "canonical",
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000202",
+              "owner_id": "owner-fixture",
+              "qualification_reasons": [
+                "canonical_semantic",
+                "effective_unknown_freshness"
+              ],
+              "score": 0.88,
+              "score_details": {
+                "conversation_boost": 0.08,
+                "final_score": 0.88,
+                "missing_score": 0.0,
+                "pinned_bias": 0.0,
+                "recency_adjustment": 0.0,
+                "semantic_score": 0.8
+              },
+              "source_availability": "not_applicable",
+              "source_checks": [],
+              "source_kind": "message",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000202",
+                "ref_type": "message"
+              }
+            }
+          ],
+          "semantic_ids": [
+            "00000000-0000-0000-0000-000000000202"
+          ],
+          "source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000201",
+              "ref_type": "message"
+            },
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000202",
+              "ref_type": "message"
+            },
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000301",
+              "ref_type": "derived_text"
+            }
+          ],
+          "token_estimate_total": 17
+        },
+        "comparison": {
+          "added": [
+            {
+              "id": "00000000-0000-0000-0000-000000000401",
+              "reason_codes": [
+                "derivative_augmentation_used"
+              ],
+              "result_type": "artifact"
+            }
+          ],
+          "artifact_delta": 1,
+          "augmented_failed": false,
+          "augmented_only_semantic_ids": [],
+          "augmented_order": [
+            "00000000-0000-0000-0000-000000000202"
+          ],
+          "contract_version": "raw-retrieval-debug.v1",
+          "moved": [],
+          "normalization_applied": true,
+          "rank_deltas": [],
+          "raw_only_semantic_ids": [],
+          "raw_order": [
+            "00000000-0000-0000-0000-000000000202"
+          ],
+          "removed": [],
+          "same_semantic_order": true,
+          "shared_normalized_input": true,
+          "token_delta": 6
+        },
+        "contract": {
+          "client_id": "client-chat",
+          "consumer_context": {},
+          "conversation_id": "00000000-0000-0000-0000-000000000151",
+          "owner_id": "owner-fixture",
+          "profile": "default",
+          "request_id": "request-normalized-private-001",
+          "surface": "chat"
+        },
+        "outcome": {
+          "fallback": "none",
+          "reasons": [],
+          "status": "ok"
+        },
+        "provenance": {
+          "augmented_freshness": [
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000201"
+            },
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000202"
+            },
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000401"
+            }
+          ],
+          "augmented_source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000201",
+              "ref_type": "message"
+            },
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000202",
+              "ref_type": "message"
+            },
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000301",
+              "ref_type": "derived_text"
+            }
+          ],
+          "raw_freshness": [
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000201"
+            },
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000202"
+            }
+          ],
+          "raw_source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000201",
+              "ref_type": "message"
+            },
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000202",
+              "ref_type": "message"
+            }
+          ],
+          "truth_qualification": {
+            "canonical_fallback_reasons": [],
+            "canonical_result_count": 2,
+            "derivative_omissions_by_reason": {},
+            "derivative_retrieval_status": "ok",
+            "derivative_source_checks_attempted": 1,
+            "derivative_state_counts": {
+              "contradicted": 0,
+              "retracted": 0,
+              "stale": 0,
+              "superseded": 0,
+              "unsupported_validation_state": 0
+            },
+            "derived_degraded_count": 1,
+            "derived_result_count": 1,
+            "lifecycle_restricted_derived_count": 1,
+            "source_available_count": 1,
+            "source_malformed_count": 0,
+            "source_missing_count": 0,
+            "source_owner_mismatch_count": 0,
+            "source_unavailable_count": 0,
+            "vector_retrieval_status": "ok"
+          }
+        },
+        "raw": {
+          "artifact_ids": [],
+          "artifacts": [],
+          "diagnostics": {
+            "artifact_invalid_hit_ids": 0,
+            "artifact_missing_source_count": 0,
+            "artifact_omission_reasons": [],
+            "artifact_status": "not_requested",
+            "fallback_to_raw_reasons": [],
+            "semantic_invalid_hit_ids": 0,
+            "semantic_missing_source_count": 0,
+            "truth_qualification": {
+              "canonical_fallback_reasons": [],
+              "canonical_result_count": 2,
+              "derivative_omissions_by_reason": {},
+              "derivative_retrieval_status": "not_requested",
+              "derivative_source_checks_attempted": 0,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
+              "derived_degraded_count": 0,
+              "derived_result_count": 0,
+              "lifecycle_restricted_derived_count": 0,
+              "source_available_count": 0,
+              "source_malformed_count": 0,
+              "source_missing_count": 0,
+              "source_owner_mismatch_count": 0,
+              "source_unavailable_count": 0,
+              "vector_retrieval_status": "ok"
+            },
+            "vector_status": "ok"
+          },
+          "recent": [
+            {
+              "evidence_role": "canonical",
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000201",
+              "owner_id": "owner-fixture",
+              "qualification_reasons": [
+                "canonical_recent",
+                "effective_unknown_freshness"
+              ],
+              "score_details": {},
+              "source_availability": "not_applicable",
+              "source_checks": [],
+              "source_kind": "message",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000201",
+                "ref_type": "message"
+              }
+            }
+          ],
+          "recent_ids": [
+            "00000000-0000-0000-0000-000000000201"
+          ],
+          "semantic": [
+            {
+              "evidence_role": "canonical",
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000202",
+              "owner_id": "owner-fixture",
+              "qualification_reasons": [
+                "canonical_semantic",
+                "effective_unknown_freshness"
+              ],
+              "score": 0.88,
+              "score_details": {
+                "conversation_boost": 0.08,
+                "final_score": 0.88,
+                "missing_score": 0.0,
+                "pinned_bias": 0.0,
+                "recency_adjustment": 0.0,
+                "semantic_score": 0.8
+              },
+              "source_availability": "not_applicable",
+              "source_checks": [],
+              "source_kind": "message",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000202",
+                "ref_type": "message"
+              }
+            }
+          ],
+          "semantic_ids": [
+            "00000000-0000-0000-0000-000000000202"
+          ],
+          "source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000201",
+              "ref_type": "message"
+            },
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000202",
+              "ref_type": "message"
+            }
+          ],
+          "token_estimate_total": 11
+        }
+      },
+      "fixture": {
+        "artifact_hits": [
+          {
+            "derived_text_id": "00000000-0000-0000-0000-000000000301",
+            "score": 0.7
+          }
+        ],
+        "artifact_sources": [
+          {
+            "artifact_id": "00000000-0000-0000-0000-000000000401",
+            "created_at": "fixture-time",
+            "derivation_params": {},
+            "derived_text_id": "00000000-0000-0000-0000-000000000301",
+            "file_path": "fixture.txt",
+            "repo_name": "fixture-repository",
+            "text": "neutral artifact fixture"
+          }
+        ],
+        "memory_items": [],
+        "message_sources": [
+          {
+            "content": "neutral semantic fixture",
+            "conversation_id": "00000000-0000-0000-0000-000000000151",
+            "created_at": "fixture-time",
+            "message_id": "00000000-0000-0000-0000-000000000202",
+            "metadata": {},
+            "role": "assistant"
+          }
+        ],
+        "recent_messages": [
+          {
+            "content": "neutral recent fixture",
+            "conversation_id": "00000000-0000-0000-0000-000000000151",
+            "created_at": "fixture-time",
+            "message_id": "00000000-0000-0000-0000-000000000201",
+            "metadata": {},
+            "role": "user"
+          }
+        ],
+        "semantic_hits": [
+          {
+            "message_id": "00000000-0000-0000-0000-000000000202",
+            "score": 0.8
+          }
+        ]
+      },
+      "name": "normalized_shared_input_without_query_disclosure",
+      "request": {
+        "client_id": "client-chat",
+        "conversation_id": "00000000-0000-0000-0000-000000000151",
+        "owner_id": "owner-fixture",
+        "profile": "default",
+        "request_id": "request-normalized-private-001",
+        "surface": "chat"
+      },
+      "retrieval": {
+        "artifact_k": 3,
+        "options": {
+          "k": 4,
+          "min_score": 0.25,
+          "scope": "conversation"
+        },
+        "query": " PRIVATE-QUERY-SENTINEL-REPLAY "
+      }
+    },
+    {
+      "categories": [
+        "dependency",
+        "augmented-failure",
+        "fallback"
+      ],
+      "consumer_context": {},
+      "expected": {
+        "augmented": {
+          "artifact_ids": [],
+          "artifacts": [],
+          "diagnostics": {
+            "artifact_invalid_hit_ids": 0,
+            "artifact_missing_source_count": 0,
+            "artifact_omission_reasons": [
+              "augmented_retrieval_failed"
+            ],
+            "artifact_status": "failed",
+            "fallback_to_raw_reasons": [
+              "augmented_retrieval_failed"
+            ],
+            "semantic_invalid_hit_ids": 0,
+            "semantic_missing_source_count": 0,
+            "truth_qualification": {
+              "canonical_fallback_reasons": [
+                "augmented_retrieval_failed"
+              ],
+              "canonical_result_count": 0,
+              "derivative_retrieval_status": "failed",
+              "derived_result_count": 0,
+              "vector_retrieval_status": "not_run"
+            },
+            "vector_status": "not_run"
+          },
+          "recent": [],
+          "recent_ids": [],
+          "semantic": [],
+          "semantic_ids": [],
+          "source_refs": [],
+          "token_estimate_total": null
+        },
+        "comparison": {
+          "added": [],
+          "artifact_delta": 0,
+          "augmented_failed": true,
+          "augmented_only_semantic_ids": [],
+          "augmented_order": [],
+          "contract_version": "raw-retrieval-debug.v1",
+          "moved": [],
+          "normalization_applied": false,
+          "rank_deltas": [],
+          "raw_only_semantic_ids": [
+            "00000000-0000-0000-0000-000000000202"
+          ],
+          "raw_order": [
+            "00000000-0000-0000-0000-000000000202"
+          ],
+          "removed": [
+            {
+              "id": "00000000-0000-0000-0000-000000000202",
+              "reason_codes": [
+                "raw_only_inclusion"
+              ],
+              "result_type": "message"
+            }
+          ],
+          "same_semantic_order": false,
+          "shared_normalized_input": true,
+          "token_delta": -11
+        },
+        "contract": {
+          "client_id": "client-chat",
+          "consumer_context": {},
+          "conversation_id": "00000000-0000-0000-0000-000000000152",
+          "owner_id": "owner-fixture",
+          "profile": "default",
+          "request_id": "request-augmented-failure-001",
+          "surface": "chat"
+        },
+        "outcome": {
+          "fallback": "raw_canonical",
+          "reasons": [
+            "augmented_retrieval_failed"
+          ],
+          "status": "degraded"
+        },
+        "provenance": {
+          "augmented_freshness": [],
+          "augmented_source_refs": [],
+          "raw_freshness": [
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000201"
+            },
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000202"
+            }
+          ],
+          "raw_source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000201",
+              "ref_type": "message"
+            },
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000202",
+              "ref_type": "message"
+            }
+          ],
+          "truth_qualification": {
+            "canonical_fallback_reasons": [
+              "augmented_retrieval_failed"
+            ],
+            "canonical_result_count": 0,
+            "derivative_retrieval_status": "failed",
+            "derived_result_count": 0,
+            "vector_retrieval_status": "not_run"
+          }
+        },
+        "raw": {
+          "artifact_ids": [],
+          "artifacts": [],
+          "diagnostics": {
+            "artifact_invalid_hit_ids": 0,
+            "artifact_missing_source_count": 0,
+            "artifact_omission_reasons": [],
+            "artifact_status": "not_requested",
+            "fallback_to_raw_reasons": [],
+            "semantic_invalid_hit_ids": 0,
+            "semantic_missing_source_count": 0,
+            "truth_qualification": {
+              "canonical_fallback_reasons": [],
+              "canonical_result_count": 2,
+              "derivative_omissions_by_reason": {},
+              "derivative_retrieval_status": "not_requested",
+              "derivative_source_checks_attempted": 0,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
+              "derived_degraded_count": 0,
+              "derived_result_count": 0,
+              "lifecycle_restricted_derived_count": 0,
+              "source_available_count": 0,
+              "source_malformed_count": 0,
+              "source_missing_count": 0,
+              "source_owner_mismatch_count": 0,
+              "source_unavailable_count": 0,
+              "vector_retrieval_status": "ok"
+            },
+            "vector_status": "ok"
+          },
+          "recent": [
+            {
+              "evidence_role": "canonical",
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000201",
+              "owner_id": "owner-fixture",
+              "qualification_reasons": [
+                "canonical_recent",
+                "effective_unknown_freshness"
+              ],
+              "score_details": {},
+              "source_availability": "not_applicable",
+              "source_checks": [],
+              "source_kind": "message",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000201",
+                "ref_type": "message"
+              }
+            }
+          ],
+          "recent_ids": [
+            "00000000-0000-0000-0000-000000000201"
+          ],
+          "semantic": [
+            {
+              "evidence_role": "canonical",
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000202",
+              "owner_id": "owner-fixture",
+              "qualification_reasons": [
+                "canonical_semantic",
+                "effective_unknown_freshness"
+              ],
+              "score": 0.88,
+              "score_details": {
+                "conversation_boost": 0.08,
+                "final_score": 0.88,
+                "missing_score": 0.0,
+                "pinned_bias": 0.0,
+                "recency_adjustment": 0.0,
+                "semantic_score": 0.8
+              },
+              "source_availability": "not_applicable",
+              "source_checks": [],
+              "source_kind": "message",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000202",
+                "ref_type": "message"
+              }
+            }
+          ],
+          "semantic_ids": [
+            "00000000-0000-0000-0000-000000000202"
+          ],
+          "source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000201",
+              "ref_type": "message"
+            },
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000202",
+              "ref_type": "message"
+            }
+          ],
+          "token_estimate_total": 11
+        }
+      },
+      "fixture": {
+        "artifact_hits": [
+          {
+            "derived_text_id": "00000000-0000-0000-0000-000000000301",
+            "score": 0.7
+          }
+        ],
+        "artifact_sources": [
+          {
+            "artifact_id": "00000000-0000-0000-0000-000000000401",
+            "created_at": "fixture-time",
+            "derivation_params": {},
+            "derived_text_id": "00000000-0000-0000-0000-000000000301",
+            "file_path": "fixture.txt",
+            "repo_name": "fixture-repository",
+            "text": "neutral artifact fixture"
+          }
+        ],
+        "derived_text_status": "unavailable",
+        "memory_items": [],
+        "message_sources": [
+          {
+            "content": "neutral semantic fixture",
+            "conversation_id": "00000000-0000-0000-0000-000000000152",
+            "created_at": "fixture-time",
+            "message_id": "00000000-0000-0000-0000-000000000202",
+            "metadata": {},
+            "role": "assistant"
+          }
+        ],
+        "recent_messages": [
+          {
+            "content": "neutral recent fixture",
+            "conversation_id": "00000000-0000-0000-0000-000000000152",
+            "created_at": "fixture-time",
+            "message_id": "00000000-0000-0000-0000-000000000201",
+            "metadata": {},
+            "role": "user"
+          }
+        ],
+        "semantic_hits": [
+          {
+            "message_id": "00000000-0000-0000-0000-000000000202",
+            "score": 0.8
+          }
+        ]
+      },
+      "name": "raw_success_augmented_failure_falls_back_to_raw",
+      "request": {
+        "client_id": "client-chat",
+        "conversation_id": "00000000-0000-0000-0000-000000000152",
+        "owner_id": "owner-fixture",
+        "profile": "default",
+        "request_id": "request-augmented-failure-001",
+        "surface": "chat"
+      },
+      "retrieval": {
+        "artifact_k": 3,
+        "options": {
+          "k": 4,
+          "min_score": 0.25,
+          "scope": "conversation"
+        },
+        "query": "augmented failure fixture"
+      }
+    },
+    {
+      "categories": [
+        "dependency",
+        "canonical-failure"
+      ],
+      "consumer_context": {},
+      "expected": {
+        "augmented": {
+          "artifact_ids": [],
+          "artifacts": [],
+          "diagnostics": {
+            "status": "not_run"
+          },
+          "recent": [],
+          "recent_ids": [],
+          "semantic": [],
+          "semantic_ids": [],
+          "source_refs": [],
+          "token_estimate_total": null
+        },
+        "comparison": {
+          "contract_version": "raw-retrieval-debug.v1",
+          "normalization_applied": false,
+          "reason": "canonical_retrieval_failed",
+          "shared_normalized_input": true,
+          "status": "failed"
+        },
+        "contract": {
+          "client_id": "client-chat",
+          "consumer_context": {},
+          "conversation_id": "00000000-0000-0000-0000-000000000153",
+          "owner_id": "owner-fixture",
+          "profile": "default",
+          "request_id": "request-canonical-failure-001",
+          "surface": "chat"
+        },
+        "outcome": {
+          "fallback": "none",
+          "reasons": [
+            "canonical_retrieval_failed"
+          ],
+          "status": "failed"
+        },
+        "provenance": {
+          "augmented_freshness": [],
+          "augmented_source_refs": [],
+          "raw_freshness": [],
+          "raw_source_refs": [],
+          "truth_qualification": {}
+        },
+        "raw": {
+          "artifact_ids": [],
+          "artifacts": [],
+          "diagnostics": {
+            "reason": "canonical_retrieval_failed",
+            "status": "failed"
+          },
+          "recent": [],
+          "recent_ids": [],
+          "semantic": [],
+          "semantic_ids": [],
+          "source_refs": [],
+          "token_estimate_total": null
+        }
+      },
+      "fixture": {
+        "artifact_hits": [
+          {
+            "derived_text_id": "00000000-0000-0000-0000-000000000301",
+            "score": 0.7
+          }
+        ],
+        "artifact_sources": [
+          {
+            "artifact_id": "00000000-0000-0000-0000-000000000401",
+            "created_at": "fixture-time",
+            "derivation_params": {},
+            "derived_text_id": "00000000-0000-0000-0000-000000000301",
+            "file_path": "fixture.txt",
+            "repo_name": "fixture-repository",
+            "text": "neutral artifact fixture"
+          }
+        ],
+        "canonical_status": "unavailable",
+        "memory_items": [],
+        "message_sources": [
+          {
+            "content": "neutral semantic fixture",
+            "conversation_id": "00000000-0000-0000-0000-000000000153",
+            "created_at": "fixture-time",
+            "message_id": "00000000-0000-0000-0000-000000000202",
+            "metadata": {},
+            "role": "assistant"
+          }
+        ],
+        "recent_messages": [
+          {
+            "content": "neutral recent fixture",
+            "conversation_id": "00000000-0000-0000-0000-000000000153",
+            "created_at": "fixture-time",
+            "message_id": "00000000-0000-0000-0000-000000000201",
+            "metadata": {},
+            "role": "user"
+          }
+        ],
+        "semantic_hits": [
+          {
+            "message_id": "00000000-0000-0000-0000-000000000202",
+            "score": 0.8
+          }
+        ]
+      },
+      "name": "canonical_retrieval_unavailable_bounded_failure",
+      "request": {
+        "client_id": "client-chat",
+        "conversation_id": "00000000-0000-0000-0000-000000000153",
+        "owner_id": "owner-fixture",
+        "profile": "default",
+        "request_id": "request-canonical-failure-001",
+        "surface": "chat"
+      },
+      "retrieval": {
+        "artifact_k": 3,
+        "options": {
+          "k": 4,
+          "min_score": 0.25,
+          "scope": "conversation"
+        },
+        "query": "canonical failure fixture"
+      }
+    },
+    {
+      "categories": [
+        "negative",
+        "retracted",
+        "truth-qualified"
+      ],
+      "consumer_context": {},
+      "expected": {
+        "augmented": {
+          "artifact_ids": [
+            "00000000-0000-0000-0000-000000000401"
+          ],
+          "artifacts": [
+            {
+              "confidence": 0.42,
+              "durable_status": "retracted",
+              "evidence_role": "derived",
+              "freshness_state": "forgotten_or_demoted",
+              "id": "00000000-0000-0000-0000-000000000401",
+              "owner_id": "owner-fixture",
+              "qualification_reasons": [
+                "effective_forgotten_or_demoted",
+                "durable_retracted"
+              ],
+              "score": 0.7,
+              "score_details": {
+                "conversation_boost": 0.0,
+                "final_score": 0.7,
+                "missing_score": 0.0,
+                "pinned_bias": 0.0,
+                "recency_adjustment": 0.0,
+                "semantic_score": 0.7
+              },
+              "source_availability": "available",
+              "source_checks": [
+                {
+                  "availability": "available",
+                  "ref_id": "00000000-0000-0000-0000-000000000401",
+                  "ref_type": "artifact",
+                  "support_kind": "direct"
+                }
+              ],
+              "source_kind": "derived_text",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000301",
+                "ref_type": "derived_text"
+              }
+            }
+          ],
+          "diagnostics": {
+            "artifact_invalid_hit_ids": 0,
+            "artifact_missing_source_count": 0,
+            "artifact_omission_reasons": [],
+            "artifact_status": "ok",
+            "fallback_to_raw_reasons": [],
+            "semantic_invalid_hit_ids": 0,
+            "semantic_missing_source_count": 0,
+            "truth_qualification": {
+              "canonical_fallback_reasons": [],
+              "canonical_result_count": 2,
+              "derivative_omissions_by_reason": {},
+              "derivative_retrieval_status": "ok",
+              "derivative_source_checks_attempted": 1,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 1,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
+              "derived_degraded_count": 1,
+              "derived_result_count": 1,
+              "lifecycle_restricted_derived_count": 1,
+              "source_available_count": 1,
+              "source_malformed_count": 0,
+              "source_missing_count": 0,
+              "source_owner_mismatch_count": 0,
+              "source_unavailable_count": 0,
+              "vector_retrieval_status": "ok"
+            },
+            "vector_status": "ok"
+          },
+          "recent": [
+            {
+              "evidence_role": "canonical",
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000201",
+              "owner_id": "owner-fixture",
+              "qualification_reasons": [
+                "canonical_recent",
+                "effective_unknown_freshness"
+              ],
+              "score_details": {},
+              "source_availability": "not_applicable",
+              "source_checks": [],
+              "source_kind": "message",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000201",
+                "ref_type": "message"
+              }
+            }
+          ],
+          "recent_ids": [
+            "00000000-0000-0000-0000-000000000201"
+          ],
+          "semantic": [
+            {
+              "evidence_role": "canonical",
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000202",
+              "owner_id": "owner-fixture",
+              "qualification_reasons": [
+                "canonical_semantic",
+                "effective_unknown_freshness"
+              ],
+              "score": 0.88,
+              "score_details": {
+                "conversation_boost": 0.08,
+                "final_score": 0.88,
+                "missing_score": 0.0,
+                "pinned_bias": 0.0,
+                "recency_adjustment": 0.0,
+                "semantic_score": 0.8
+              },
+              "source_availability": "not_applicable",
+              "source_checks": [],
+              "source_kind": "message",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000202",
+                "ref_type": "message"
+              }
+            }
+          ],
+          "semantic_ids": [
+            "00000000-0000-0000-0000-000000000202"
+          ],
+          "source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000201",
+              "ref_type": "message"
+            },
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000202",
+              "ref_type": "message"
+            },
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000301",
+              "ref_type": "derived_text"
+            }
+          ],
+          "token_estimate_total": 17
+        },
+        "comparison": {
+          "added": [
+            {
+              "id": "00000000-0000-0000-0000-000000000401",
+              "reason_codes": [
+                "derivative_augmentation_used"
+              ],
+              "result_type": "artifact"
+            }
+          ],
+          "artifact_delta": 1,
+          "augmented_failed": false,
+          "augmented_only_semantic_ids": [],
+          "augmented_order": [
+            "00000000-0000-0000-0000-000000000202"
+          ],
+          "contract_version": "raw-retrieval-debug.v1",
+          "moved": [],
+          "normalization_applied": false,
+          "rank_deltas": [],
+          "raw_only_semantic_ids": [],
+          "raw_order": [
+            "00000000-0000-0000-0000-000000000202"
+          ],
+          "removed": [],
+          "same_semantic_order": true,
+          "shared_normalized_input": true,
+          "token_delta": 6
+        },
+        "contract": {
+          "client_id": "client-chat",
+          "consumer_context": {},
+          "conversation_id": "00000000-0000-0000-0000-000000000154",
+          "owner_id": "owner-fixture",
+          "profile": "default",
+          "request_id": "request-retracted-001",
+          "surface": "chat"
+        },
+        "outcome": {
+          "fallback": "none",
+          "reasons": [],
+          "status": "ok"
+        },
+        "provenance": {
+          "augmented_freshness": [
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000201"
+            },
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000202"
+            },
+            {
+              "freshness_state": "forgotten_or_demoted",
+              "id": "00000000-0000-0000-0000-000000000401"
+            }
+          ],
+          "augmented_source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000201",
+              "ref_type": "message"
+            },
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000202",
+              "ref_type": "message"
+            },
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000301",
+              "ref_type": "derived_text"
+            }
+          ],
+          "raw_freshness": [
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000201"
+            },
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000202"
+            }
+          ],
+          "raw_source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000201",
+              "ref_type": "message"
+            },
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000202",
+              "ref_type": "message"
+            }
+          ],
+          "truth_qualification": {
+            "canonical_fallback_reasons": [],
+            "canonical_result_count": 2,
+            "derivative_omissions_by_reason": {},
+            "derivative_retrieval_status": "ok",
+            "derivative_source_checks_attempted": 1,
+            "derivative_state_counts": {
+              "contradicted": 0,
+              "retracted": 1,
+              "stale": 0,
+              "superseded": 0,
+              "unsupported_validation_state": 0
+            },
+            "derived_degraded_count": 1,
+            "derived_result_count": 1,
+            "lifecycle_restricted_derived_count": 1,
+            "source_available_count": 1,
+            "source_malformed_count": 0,
+            "source_missing_count": 0,
+            "source_owner_mismatch_count": 0,
+            "source_unavailable_count": 0,
+            "vector_retrieval_status": "ok"
+          }
+        },
+        "raw": {
+          "artifact_ids": [],
+          "artifacts": [],
+          "diagnostics": {
+            "artifact_invalid_hit_ids": 0,
+            "artifact_missing_source_count": 0,
+            "artifact_omission_reasons": [],
+            "artifact_status": "not_requested",
+            "fallback_to_raw_reasons": [],
+            "semantic_invalid_hit_ids": 0,
+            "semantic_missing_source_count": 0,
+            "truth_qualification": {
+              "canonical_fallback_reasons": [],
+              "canonical_result_count": 2,
+              "derivative_omissions_by_reason": {},
+              "derivative_retrieval_status": "not_requested",
+              "derivative_source_checks_attempted": 0,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
+              "derived_degraded_count": 0,
+              "derived_result_count": 0,
+              "lifecycle_restricted_derived_count": 0,
+              "source_available_count": 0,
+              "source_malformed_count": 0,
+              "source_missing_count": 0,
+              "source_owner_mismatch_count": 0,
+              "source_unavailable_count": 0,
+              "vector_retrieval_status": "ok"
+            },
+            "vector_status": "ok"
+          },
+          "recent": [
+            {
+              "evidence_role": "canonical",
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000201",
+              "owner_id": "owner-fixture",
+              "qualification_reasons": [
+                "canonical_recent",
+                "effective_unknown_freshness"
+              ],
+              "score_details": {},
+              "source_availability": "not_applicable",
+              "source_checks": [],
+              "source_kind": "message",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000201",
+                "ref_type": "message"
+              }
+            }
+          ],
+          "recent_ids": [
+            "00000000-0000-0000-0000-000000000201"
+          ],
+          "semantic": [
+            {
+              "evidence_role": "canonical",
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000202",
+              "owner_id": "owner-fixture",
+              "qualification_reasons": [
+                "canonical_semantic",
+                "effective_unknown_freshness"
+              ],
+              "score": 0.88,
+              "score_details": {
+                "conversation_boost": 0.08,
+                "final_score": 0.88,
+                "missing_score": 0.0,
+                "pinned_bias": 0.0,
+                "recency_adjustment": 0.0,
+                "semantic_score": 0.8
+              },
+              "source_availability": "not_applicable",
+              "source_checks": [],
+              "source_kind": "message",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000202",
+                "ref_type": "message"
+              }
+            }
+          ],
+          "semantic_ids": [
+            "00000000-0000-0000-0000-000000000202"
+          ],
+          "source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000201",
+              "ref_type": "message"
+            },
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000202",
+              "ref_type": "message"
+            }
+          ],
+          "token_estimate_total": 11
+        }
+      },
+      "fixture": {
+        "artifact_hits": [
+          {
+            "derived_text_id": "00000000-0000-0000-0000-000000000301",
+            "score": 0.7
+          }
+        ],
+        "artifact_sources": [
+          {
+            "artifact_id": "00000000-0000-0000-0000-000000000401",
+            "created_at": "fixture-time",
+            "derivation_params": {},
+            "derived_text_id": "00000000-0000-0000-0000-000000000301",
+            "file_path": "fixture.txt",
+            "repo_name": "fixture-repository",
+            "text": "neutral artifact fixture"
+          }
+        ],
+        "memory_items": [
+          {
+            "memory": {
+              "confidence": 0.42,
+              "last_reinforced_at": null,
+              "memory_id": "00000000-0000-0000-0000-000000000910",
+              "status": "retracted",
+              "superseded_by_memory_id": null,
+              "supersedes_memory_id": null,
+              "updated_at": "fixture-time"
+            },
+            "ref_id": "00000000-0000-0000-0000-000000000301",
+            "ref_type": "derived_text"
+          }
+        ],
+        "message_sources": [
+          {
+            "content": "neutral semantic fixture",
+            "conversation_id": "00000000-0000-0000-0000-000000000154",
+            "created_at": "fixture-time",
+            "message_id": "00000000-0000-0000-0000-000000000202",
+            "metadata": {},
+            "role": "assistant"
+          }
+        ],
+        "recent_messages": [
+          {
+            "content": "neutral recent fixture",
+            "conversation_id": "00000000-0000-0000-0000-000000000154",
+            "created_at": "fixture-time",
+            "message_id": "00000000-0000-0000-0000-000000000201",
+            "metadata": {},
+            "role": "user"
+          }
+        ],
+        "semantic_hits": [
+          {
+            "message_id": "00000000-0000-0000-0000-000000000202",
+            "score": 0.8
+          }
+        ]
+      },
+      "name": "canonical_recent_plus_retracted_derivative",
+      "request": {
+        "client_id": "client-chat",
+        "conversation_id": "00000000-0000-0000-0000-000000000154",
+        "owner_id": "owner-fixture",
+        "profile": "default",
+        "request_id": "request-retracted-001",
+        "surface": "chat"
+      },
+      "retrieval": {
+        "artifact_k": 3,
+        "options": {
+          "k": 4,
+          "min_score": 0.25,
+          "scope": "conversation"
+        },
+        "query": "retracted fixture"
+      }
+    },
+    {
+      "categories": [
+        "negative",
+        "unsupported-validation-state",
+        "truth-qualified"
+      ],
+      "consumer_context": {},
+      "expected": {
+        "augmented": {
+          "artifact_ids": [
+            "00000000-0000-0000-0000-000000000401"
+          ],
+          "artifacts": [
+            {
+              "confidence": 0.42,
+              "durable_status": "rebuilding",
+              "evidence_role": "derived",
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000401",
+              "owner_id": "owner-fixture",
+              "qualification_reasons": [
+                "effective_unknown_freshness",
+                "durable_rebuilding"
+              ],
+              "score": 0.7,
+              "score_details": {
+                "conversation_boost": 0.0,
+                "final_score": 0.7,
+                "missing_score": 0.0,
+                "pinned_bias": 0.0,
+                "recency_adjustment": 0.0,
+                "semantic_score": 0.7
+              },
+              "source_availability": "available",
+              "source_checks": [
+                {
+                  "availability": "available",
+                  "ref_id": "00000000-0000-0000-0000-000000000401",
+                  "ref_type": "artifact",
+                  "support_kind": "direct"
+                }
+              ],
+              "source_kind": "derived_text",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000301",
+                "ref_type": "derived_text"
+              }
+            }
+          ],
+          "diagnostics": {
+            "artifact_invalid_hit_ids": 0,
+            "artifact_missing_source_count": 0,
+            "artifact_omission_reasons": [],
+            "artifact_status": "ok",
+            "fallback_to_raw_reasons": [],
+            "semantic_invalid_hit_ids": 0,
+            "semantic_missing_source_count": 0,
+            "truth_qualification": {
+              "canonical_fallback_reasons": [],
+              "canonical_result_count": 2,
+              "derivative_omissions_by_reason": {},
+              "derivative_retrieval_status": "ok",
+              "derivative_source_checks_attempted": 1,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 1
+              },
+              "derived_degraded_count": 1,
+              "derived_result_count": 1,
+              "lifecycle_restricted_derived_count": 1,
+              "source_available_count": 1,
+              "source_malformed_count": 0,
+              "source_missing_count": 0,
+              "source_owner_mismatch_count": 0,
+              "source_unavailable_count": 0,
+              "vector_retrieval_status": "ok"
+            },
+            "vector_status": "ok"
+          },
+          "recent": [
+            {
+              "evidence_role": "canonical",
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000201",
+              "owner_id": "owner-fixture",
+              "qualification_reasons": [
+                "canonical_recent",
+                "effective_unknown_freshness"
+              ],
+              "score_details": {},
+              "source_availability": "not_applicable",
+              "source_checks": [],
+              "source_kind": "message",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000201",
+                "ref_type": "message"
+              }
+            }
+          ],
+          "recent_ids": [
+            "00000000-0000-0000-0000-000000000201"
+          ],
+          "semantic": [
+            {
+              "evidence_role": "canonical",
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000202",
+              "owner_id": "owner-fixture",
+              "qualification_reasons": [
+                "canonical_semantic",
+                "effective_unknown_freshness"
+              ],
+              "score": 0.88,
+              "score_details": {
+                "conversation_boost": 0.08,
+                "final_score": 0.88,
+                "missing_score": 0.0,
+                "pinned_bias": 0.0,
+                "recency_adjustment": 0.0,
+                "semantic_score": 0.8
+              },
+              "source_availability": "not_applicable",
+              "source_checks": [],
+              "source_kind": "message",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000202",
+                "ref_type": "message"
+              }
+            }
+          ],
+          "semantic_ids": [
+            "00000000-0000-0000-0000-000000000202"
+          ],
+          "source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000201",
+              "ref_type": "message"
+            },
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000202",
+              "ref_type": "message"
+            },
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000301",
+              "ref_type": "derived_text"
+            }
+          ],
+          "token_estimate_total": 17
+        },
+        "comparison": {
+          "added": [
+            {
+              "id": "00000000-0000-0000-0000-000000000401",
+              "reason_codes": [
+                "derivative_augmentation_used"
+              ],
+              "result_type": "artifact"
+            }
+          ],
+          "artifact_delta": 1,
+          "augmented_failed": false,
+          "augmented_only_semantic_ids": [],
+          "augmented_order": [
+            "00000000-0000-0000-0000-000000000202"
+          ],
+          "contract_version": "raw-retrieval-debug.v1",
+          "moved": [],
+          "normalization_applied": false,
+          "rank_deltas": [],
+          "raw_only_semantic_ids": [],
+          "raw_order": [
+            "00000000-0000-0000-0000-000000000202"
+          ],
+          "removed": [],
+          "same_semantic_order": true,
+          "shared_normalized_input": true,
+          "token_delta": 6
+        },
+        "contract": {
+          "client_id": "client-chat",
+          "consumer_context": {},
+          "conversation_id": "00000000-0000-0000-0000-000000000155",
+          "owner_id": "owner-fixture",
+          "profile": "default",
+          "request_id": "request-rebuilding-001",
+          "surface": "chat"
+        },
+        "outcome": {
+          "fallback": "none",
+          "reasons": [],
+          "status": "ok"
+        },
+        "provenance": {
+          "augmented_freshness": [
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000201"
+            },
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000202"
+            },
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000401"
+            }
+          ],
+          "augmented_source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000201",
+              "ref_type": "message"
+            },
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000202",
+              "ref_type": "message"
+            },
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000301",
+              "ref_type": "derived_text"
+            }
+          ],
+          "raw_freshness": [
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000201"
+            },
+            {
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000202"
+            }
+          ],
+          "raw_source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000201",
+              "ref_type": "message"
+            },
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000202",
+              "ref_type": "message"
+            }
+          ],
+          "truth_qualification": {
+            "canonical_fallback_reasons": [],
+            "canonical_result_count": 2,
+            "derivative_omissions_by_reason": {},
+            "derivative_retrieval_status": "ok",
+            "derivative_source_checks_attempted": 1,
+            "derivative_state_counts": {
+              "contradicted": 0,
+              "retracted": 0,
+              "stale": 0,
+              "superseded": 0,
+              "unsupported_validation_state": 1
+            },
+            "derived_degraded_count": 1,
+            "derived_result_count": 1,
+            "lifecycle_restricted_derived_count": 1,
+            "source_available_count": 1,
+            "source_malformed_count": 0,
+            "source_missing_count": 0,
+            "source_owner_mismatch_count": 0,
+            "source_unavailable_count": 0,
+            "vector_retrieval_status": "ok"
+          }
+        },
+        "raw": {
+          "artifact_ids": [],
+          "artifacts": [],
+          "diagnostics": {
+            "artifact_invalid_hit_ids": 0,
+            "artifact_missing_source_count": 0,
+            "artifact_omission_reasons": [],
+            "artifact_status": "not_requested",
+            "fallback_to_raw_reasons": [],
+            "semantic_invalid_hit_ids": 0,
+            "semantic_missing_source_count": 0,
+            "truth_qualification": {
+              "canonical_fallback_reasons": [],
+              "canonical_result_count": 2,
+              "derivative_omissions_by_reason": {},
+              "derivative_retrieval_status": "not_requested",
+              "derivative_source_checks_attempted": 0,
+              "derivative_state_counts": {
+                "contradicted": 0,
+                "retracted": 0,
+                "stale": 0,
+                "superseded": 0,
+                "unsupported_validation_state": 0
+              },
+              "derived_degraded_count": 0,
+              "derived_result_count": 0,
+              "lifecycle_restricted_derived_count": 0,
+              "source_available_count": 0,
+              "source_malformed_count": 0,
+              "source_missing_count": 0,
+              "source_owner_mismatch_count": 0,
+              "source_unavailable_count": 0,
+              "vector_retrieval_status": "ok"
+            },
+            "vector_status": "ok"
+          },
+          "recent": [
+            {
+              "evidence_role": "canonical",
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000201",
+              "owner_id": "owner-fixture",
+              "qualification_reasons": [
+                "canonical_recent",
+                "effective_unknown_freshness"
+              ],
+              "score_details": {},
+              "source_availability": "not_applicable",
+              "source_checks": [],
+              "source_kind": "message",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000201",
+                "ref_type": "message"
+              }
+            }
+          ],
+          "recent_ids": [
+            "00000000-0000-0000-0000-000000000201"
+          ],
+          "semantic": [
+            {
+              "evidence_role": "canonical",
+              "freshness_state": "unknown_freshness",
+              "id": "00000000-0000-0000-0000-000000000202",
+              "owner_id": "owner-fixture",
+              "qualification_reasons": [
+                "canonical_semantic",
+                "effective_unknown_freshness"
+              ],
+              "score": 0.88,
+              "score_details": {
+                "conversation_boost": 0.08,
+                "final_score": 0.88,
+                "missing_score": 0.0,
+                "pinned_bias": 0.0,
+                "recency_adjustment": 0.0,
+                "semantic_score": 0.8
+              },
+              "source_availability": "not_applicable",
+              "source_checks": [],
+              "source_kind": "message",
+              "source_ref": {
+                "ref_id": "00000000-0000-0000-0000-000000000202",
+                "ref_type": "message"
+              }
+            }
+          ],
+          "semantic_ids": [
+            "00000000-0000-0000-0000-000000000202"
+          ],
+          "source_refs": [
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000201",
+              "ref_type": "message"
+            },
+            {
+              "ref_id": "00000000-0000-0000-0000-000000000202",
+              "ref_type": "message"
+            }
+          ],
+          "token_estimate_total": 11
+        }
+      },
+      "fixture": {
+        "artifact_hits": [
+          {
+            "derived_text_id": "00000000-0000-0000-0000-000000000301",
+            "score": 0.7
+          }
+        ],
+        "artifact_sources": [
+          {
+            "artifact_id": "00000000-0000-0000-0000-000000000401",
+            "created_at": "fixture-time",
+            "derivation_params": {},
+            "derived_text_id": "00000000-0000-0000-0000-000000000301",
+            "file_path": "fixture.txt",
+            "repo_name": "fixture-repository",
+            "text": "neutral artifact fixture"
+          }
+        ],
+        "memory_items": [
+          {
+            "memory": {
+              "confidence": 0.42,
+              "last_reinforced_at": null,
+              "memory_id": "00000000-0000-0000-0000-000000000911",
+              "status": "rebuilding",
+              "superseded_by_memory_id": null,
+              "supersedes_memory_id": null,
+              "updated_at": "fixture-time"
+            },
+            "ref_id": "00000000-0000-0000-0000-000000000301",
+            "ref_type": "derived_text"
+          }
+        ],
+        "message_sources": [
+          {
+            "content": "neutral semantic fixture",
+            "conversation_id": "00000000-0000-0000-0000-000000000155",
+            "created_at": "fixture-time",
+            "message_id": "00000000-0000-0000-0000-000000000202",
+            "metadata": {},
+            "role": "assistant"
+          }
+        ],
+        "recent_messages": [
+          {
+            "content": "neutral recent fixture",
+            "conversation_id": "00000000-0000-0000-0000-000000000155",
+            "created_at": "fixture-time",
+            "message_id": "00000000-0000-0000-0000-000000000201",
+            "metadata": {},
+            "role": "user"
+          }
+        ],
+        "semantic_hits": [
+          {
+            "message_id": "00000000-0000-0000-0000-000000000202",
+            "score": 0.8
+          }
+        ]
+      },
+      "name": "canonical_recent_plus_rebuilding_derivative_unsupported_validation_state",
+      "request": {
+        "client_id": "client-chat",
+        "conversation_id": "00000000-0000-0000-0000-000000000155",
+        "owner_id": "owner-fixture",
+        "profile": "default",
+        "request_id": "request-rebuilding-001",
+        "surface": "chat"
+      },
+      "retrieval": {
+        "artifact_k": 3,
+        "options": {
+          "k": 4,
+          "min_score": 0.25,
+          "scope": "conversation"
+        },
+        "query": "rebuilding fixture"
       }
     }
   ],

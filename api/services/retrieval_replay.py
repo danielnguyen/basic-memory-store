@@ -26,6 +26,7 @@ async def replay_raw_vs_augmented(
     opts: RetrievalOptions,
     runner: BundleRunner = build_retrieval_bundle,
 ) -> dict[str, Any]:
+    normalized_query = query.strip()
     raw_bundle = await runner(
         pg=pg,
         qdrant=qdrant,
@@ -33,29 +34,68 @@ async def replay_raw_vs_augmented(
         owner_id=owner_id,
         conversation_id=conversation_id,
         client_id=client_id,
-        query=query,
+        query=normalized_query,
         opts=opts,
         include_artifacts=False,
     )
-    augmented_bundle = await runner(
-        pg=pg,
-        qdrant=qdrant,
-        settings=settings,
-        owner_id=owner_id,
-        conversation_id=conversation_id,
-        client_id=client_id,
-        query=query,
-        opts=opts,
-    )
     raw_summary = summarize_bundle(raw_bundle)
-    augmented_summary = summarize_bundle(augmented_bundle)
+    try:
+        augmented_bundle = await runner(
+            pg=pg,
+            qdrant=qdrant,
+            settings=settings,
+            owner_id=owner_id,
+            conversation_id=conversation_id,
+            client_id=client_id,
+            query=normalized_query,
+            opts=opts,
+        )
+        augmented_summary = summarize_bundle(augmented_bundle)
+        comparison = compare_bundle_summaries(raw_summary, augmented_summary)
+        augmented_failed = False
+    except Exception:
+        augmented_summary = {
+            "recent_ids": [],
+            "semantic_ids": [],
+            "artifact_ids": [],
+            "recent": [],
+            "semantic": [],
+            "artifacts": [],
+            "semantic_count": 0,
+            "artifact_count": 0,
+            "source_refs": [],
+            "token_estimate_total": None,
+            "retrieval_debug": {
+                "vector_status": "not_run",
+                "semantic_invalid_hit_ids": 0,
+                "semantic_missing_source_count": 0,
+                "fallback_to_raw_reasons": ["augmented_retrieval_failed"],
+                "artifact_status": "failed",
+                "artifact_invalid_hit_ids": 0,
+                "artifact_missing_source_count": 0,
+                "artifact_omission_reasons": ["augmented_retrieval_failed"],
+                "truth_qualification": {
+                    "canonical_result_count": 0,
+                    "derived_result_count": 0,
+                    "canonical_fallback_reasons": ["augmented_retrieval_failed"],
+                    "derivative_retrieval_status": "failed",
+                    "vector_retrieval_status": "not_run",
+                },
+            },
+        }
+        comparison = compare_bundle_summaries(raw_summary, augmented_summary)
+        augmented_failed = True
     opts_payload = opts.model_dump() if hasattr(opts, "model_dump") else opts.dict()
     return {
-        "query": query,
         "retrieval_options": opts_payload,
         "raw": raw_summary,
         "augmented": augmented_summary,
-        "comparison": compare_bundle_summaries(raw_summary, augmented_summary),
+        "comparison": {
+            **comparison,
+            "shared_normalized_input": True,
+            "normalization_applied": normalized_query != query,
+            "augmented_failed": augmented_failed,
+        },
     }
 
 

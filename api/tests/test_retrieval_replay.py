@@ -80,6 +80,9 @@ async def test_replay_raw_vs_augmented_is_deterministic_and_fake_friendly():
         "rank_deltas": [],
         "artifact_delta": 1,
         "token_delta": 20,
+        "shared_normalized_input": True,
+        "normalization_applied": False,
+        "augmented_failed": False,
     }
 
 
@@ -93,7 +96,7 @@ async def test_persisted_replay_corpus_matches_twice_from_clean_fixture_state():
     assert first_failures == []
     assert second_failures == []
     assert first == second
-    assert len(first) == 13
+    assert len(first) == 18
 
 
 def test_persisted_replay_corpus_covers_required_retrieval_matrix():
@@ -123,6 +126,12 @@ def test_persisted_replay_corpus_covers_required_retrieval_matrix():
         "superseded",
         "cross-owner",
         "source-traversal",
+        "normalized-input",
+        "privacy",
+        "augmented-failure",
+        "canonical-failure",
+        "retracted",
+        "unsupported-validation-state",
     } <= categories
 
 
@@ -139,6 +148,7 @@ def test_replay_snapshots_are_privacy_safe_and_structural_diff_is_readable():
     assert "contradicted derivative fixture" not in serialized_expected
     assert "cross owner derivative fixture" not in serialized_expected
     assert "source traversal unavailable fixture" not in serialized_expected
+    assert "PRIVATE-QUERY-SENTINEL-REPLAY" not in serialized_expected
     diff = structural_diff({"ids": ["a"]}, {"ids": ["b"]})
     assert "--- expected" in diff
     assert "+++ actual" in diff
