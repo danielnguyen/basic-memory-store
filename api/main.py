@@ -20,7 +20,7 @@ from storage.qdrant import QdrantStore, RetrievalHit as QdrantHit
 from storage.object_store import ObjectStoreClient
 from prompts.context import assemble_messages, build_artifact_context_block, build_context_block
 from services.ingestion import ingest_files
-from services.retrieval import build_retrieval_bundle
+from services.retrieval import build_retrieval_response_payload, doctrine_diagnostics_for_bundle
 from services.proactive import evaluate_event as evaluate_initiative_event
 from services.memory_items import normalize_scores, normalize_source_refs, shape_memory_event, shape_memory_item, source_ref_hash
 from services.episodes import DEFAULT_DERIVATION_VERSION as EPISODE_DERIVATION_VERSION, episode_key, normalize_json_list, normalize_json_map, normalize_source_refs as normalize_episode_source_refs, shape_episode, shape_episode_event, shape_episode_link, source_ref_hash as episode_source_ref_hash
@@ -1037,24 +1037,99 @@ async def retrieve_tiered_v2(conversation_id: str, body: RetrieveBundleRequest, 
 
     opts = body.retrieval or RetrievalOptions(k=settings.retrieval_k, min_score=0.25, scope="conversation")
     include_artifacts = True if body.include_artifacts is None else body.include_artifacts
-    bundle = await build_retrieval_bundle(
-        pg=pg,
-        qdrant=qdrant,
-        settings=settings,
-        owner_id=body.owner_id,
-        conversation_id=cid,
-        client_id=convo.get("client_id"),
-        query=body.query,
-        opts=opts,
-        include_artifacts=include_artifacts,
-        allowed_memory_domains=body.allowed_memory_domains,
-        blocked_memory_domains=body.blocked_memory_domains,
-    )
+    try:
+        payload = await build_retrieval_response_payload(
+            pg=pg,
+            qdrant=qdrant,
+            settings=settings,
+            request_id=body.request_id,
+            owner_id=body.owner_id,
+            conversation_id=cid,
+            client_id=convo.get("client_id"),
+            query=body.query,
+            opts=opts,
+            mode=body.mode,
+            include_artifacts=include_artifacts,
+            allowed_memory_domains=body.allowed_memory_domains,
+            blocked_memory_domains=body.blocked_memory_domains,
+        )
+    except Exception:
+        diagnostics = doctrine_diagnostics_for_bundle(
+            request_id=body.request_id,
+            conversation_id=str(cid),
+            owner_id=body.owner_id,
+            mode=body.mode,
+            status="failed",
+            error="canonical_retrieval_failed",
+        )
+        if getattr(settings, "enable_trace_storage", False):
+            try:
+                await pg.create_trace(
+                    {
+                        "request_id": body.request_id,
+                        "conversation_id": cid,
+                        "owner_id": body.owner_id,
+                        "client_id": convo.get("client_id"),
+                        "surface": "bms-retrieval",
+                        "profile": {},
+                        "retrieval": diagnostics,
+                        "prompt": {},
+                        "router_decision": {},
+                        "manual_override": {},
+                        "model_call": {},
+                        "model_calls": [],
+                        "fallback": {"status": "failed", "reason": "canonical_retrieval_failed"},
+                        "artifacts": {},
+                        "references": [],
+                        "cost": {},
+                        "status": "failed",
+                        "error": "canonical_retrieval_failed",
+                    }
+                )
+            except Exception:
+                logging.exception("retrieval diagnostic trace write failed", extra={"request_id": body.request_id})
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "canonical_retrieval_failed",
+                "request_id": body.request_id,
+                "mode": body.mode,
+            },
+        )
+
+    if getattr(settings, "enable_trace_storage", False):
+        try:
+            await pg.create_trace(
+                {
+                    "request_id": body.request_id,
+                    "conversation_id": cid,
+                    "owner_id": body.owner_id,
+                    "client_id": convo.get("client_id"),
+                    "surface": "bms-retrieval",
+                    "profile": {},
+                    "retrieval": payload["diagnostics"],
+                    "prompt": {},
+                    "router_decision": {},
+                    "manual_override": {},
+                    "model_call": {},
+                    "model_calls": [],
+                    "fallback": {
+                        "fallback_to_raw": payload["diagnostics"].get("fallback_to_raw", False),
+                        "reasons": payload["diagnostics"].get("fallback_reasons", []),
+                    },
+                    "artifacts": {},
+                    "references": [],
+                    "cost": {},
+                    "status": payload["diagnostics"].get("status", "ok"),
+                }
+            )
+        except Exception:
+            logging.exception("retrieval diagnostic trace write failed", extra={"request_id": body.request_id})
 
     return RetrieveBundleResponse(
         request_id=body.request_id,
         conversation_id=str(cid),
-        bundle=bundle,
+        **payload,
     )
 
 

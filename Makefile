@@ -12,7 +12,7 @@ TEST_ENV := \
 	-e EMBED_MODEL=test-embed \
 	-e OBJECT_STORE_ENABLED=false
 
-.PHONY: test test-image test-postgres provenance-test replay-test derivation-replay-test derivation-version-test lifecycle-smoke dev-python-check dev-up dev-down dev-reset dev-bootstrap dev-seed-profiles dev-logs dev-setup dev-test dev-install dev-start dev-start-reload dev-migrate-status dev-migrate-check dev-migrate-adopt
+.PHONY: test test-image test-postgres provenance-test replay-test raw-retrieval-test raw-retrieval-smoke derivation-replay-test derivation-version-test lifecycle-smoke dev-python-check dev-up dev-down dev-reset dev-bootstrap dev-seed-profiles dev-logs dev-setup dev-test dev-install dev-start dev-start-reload dev-migrate-status dev-migrate-check dev-migrate-adopt
 
 test: test-image
 	@docker run --rm $(TEST_ENV) $(TEST_IMAGE) sh -lc \
@@ -29,6 +29,12 @@ provenance-test: test-image
 
 replay-test: test-image
 	@docker run --rm $(TEST_ENV) $(TEST_IMAGE) python -m tools.replay_scenarios
+
+raw-retrieval-test: test-image
+	@docker run --rm $(TEST_ENV) $(TEST_IMAGE) python -m pytest -q tests/test_retrieve_bundle_mvp.py tests/test_retrieval_replay.py
+
+raw-retrieval-smoke: test-image
+	@docker run --rm $(TEST_ENV) $(TEST_IMAGE) python -m tools.raw_retrieval_smoke
 
 derivation-replay-test: test-image
 	@docker run --rm $(TEST_ENV) $(TEST_IMAGE) python -m tools.derivation_replay_scenarios

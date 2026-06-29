@@ -141,9 +141,28 @@
           "token_estimate_total": 17
         },
         "comparison": {
+          "added": [
+            {
+              "id": "00000000-0000-0000-0000-000000000401",
+              "reason_codes": [
+                "derivative_augmentation_used"
+              ],
+              "result_type": "artifact"
+            }
+          ],
           "artifact_delta": 1,
           "augmented_only_semantic_ids": [],
+          "augmented_order": [
+            "00000000-0000-0000-0000-000000000202"
+          ],
+          "contract_version": "raw-retrieval-debug.v1",
+          "moved": [],
+          "rank_deltas": [],
           "raw_only_semantic_ids": [],
+          "raw_order": [
+            "00000000-0000-0000-0000-000000000202"
+          ],
+          "removed": [],
           "same_semantic_order": true,
           "token_delta": 6
         },
@@ -507,9 +526,28 @@
           "token_estimate_total": 10
         },
         "comparison": {
+          "added": [
+            {
+              "id": "00000000-0000-0000-0000-000000000402",
+              "reason_codes": [
+                "derivative_augmentation_used"
+              ],
+              "result_type": "artifact"
+            }
+          ],
           "artifact_delta": 1,
           "augmented_only_semantic_ids": [],
+          "augmented_order": [
+            "00000000-0000-0000-0000-000000000203"
+          ],
+          "contract_version": "raw-retrieval-debug.v1",
+          "moved": [],
+          "rank_deltas": [],
           "raw_only_semantic_ids": [],
+          "raw_order": [
+            "00000000-0000-0000-0000-000000000203"
+          ],
+          "removed": [],
           "same_semantic_order": true,
           "token_delta": 6
         },
@@ -761,9 +799,16 @@
           "token_estimate_total": null
         },
         "comparison": {
+          "added": [],
           "artifact_delta": 0,
           "augmented_only_semantic_ids": [],
+          "augmented_order": [],
+          "contract_version": "raw-retrieval-debug.v1",
+          "moved": [],
+          "rank_deltas": [],
           "raw_only_semantic_ids": [],
+          "raw_order": [],
+          "removed": [],
           "same_semantic_order": true,
           "token_delta": 0
         },
@@ -924,9 +969,16 @@
           "token_estimate_total": null
         },
         "comparison": {
+          "added": [],
           "artifact_delta": 0,
           "augmented_only_semantic_ids": [],
+          "augmented_order": [],
+          "contract_version": "raw-retrieval-debug.v1",
+          "moved": [],
+          "rank_deltas": [],
           "raw_only_semantic_ids": [],
+          "raw_order": [],
+          "removed": [],
           "same_semantic_order": true,
           "token_delta": 0
         },
@@ -1123,9 +1175,16 @@
           "token_estimate_total": 6
         },
         "comparison": {
+          "added": [],
           "artifact_delta": 0,
           "augmented_only_semantic_ids": [],
+          "augmented_order": [],
+          "contract_version": "raw-retrieval-debug.v1",
+          "moved": [],
+          "rank_deltas": [],
           "raw_only_semantic_ids": [],
+          "raw_order": [],
+          "removed": [],
           "same_semantic_order": true,
           "token_delta": 0
         },
@@ -1374,9 +1433,20 @@
           "token_estimate_total": 6
         },
         "comparison": {
+          "added": [],
           "artifact_delta": 0,
           "augmented_only_semantic_ids": [],
+          "augmented_order": [
+            "00000000-0000-0000-0000-000000000205"
+          ],
+          "contract_version": "raw-retrieval-debug.v1",
+          "moved": [],
+          "rank_deltas": [],
           "raw_only_semantic_ids": [],
+          "raw_order": [
+            "00000000-0000-0000-0000-000000000205"
+          ],
+          "removed": [],
           "same_semantic_order": true,
           "token_delta": 0
         },
@@ -1600,9 +1670,16 @@
           "token_estimate_total": null
         },
         "comparison": {
+          "added": [],
           "artifact_delta": 0,
           "augmented_only_semantic_ids": [],
+          "augmented_order": [],
+          "contract_version": "raw-retrieval-debug.v1",
+          "moved": [],
+          "rank_deltas": [],
           "raw_only_semantic_ids": [],
+          "raw_order": [],
+          "removed": [],
           "same_semantic_order": true,
           "token_delta": 0
         },
@@ -1758,9 +1835,16 @@
           "token_estimate_total": null
         },
         "comparison": {
+          "added": [],
           "artifact_delta": 0,
           "augmented_only_semantic_ids": [],
+          "augmented_order": [],
+          "contract_version": "raw-retrieval-debug.v1",
+          "moved": [],
+          "rank_deltas": [],
           "raw_only_semantic_ids": [],
+          "raw_order": [],
+          "removed": [],
           "same_semantic_order": true,
           "token_delta": 0
         },
@@ -1980,9 +2064,24 @@
           "token_estimate_total": 12
         },
         "comparison": {
+          "added": [
+            {
+              "id": "00000000-0000-0000-0000-000000000409",
+              "reason_codes": [
+                "derivative_augmentation_used"
+              ],
+              "result_type": "artifact"
+            }
+          ],
           "artifact_delta": 1,
           "augmented_only_semantic_ids": [],
+          "augmented_order": [],
+          "contract_version": "raw-retrieval-debug.v1",
+          "moved": [],
+          "rank_deltas": [],
           "raw_only_semantic_ids": [],
+          "raw_order": [],
+          "removed": [],
           "same_semantic_order": true,
           "token_delta": 6
         },
@@ -2297,9 +2396,24 @@
           "token_estimate_total": 14
         },
         "comparison": {
+          "added": [
+            {
+              "id": "00000000-0000-0000-0000-000000000410",
+              "reason_codes": [
+                "derivative_augmentation_used"
+              ],
+              "result_type": "artifact"
+            }
+          ],
           "artifact_delta": 1,
           "augmented_only_semantic_ids": [],
+          "augmented_order": [],
+          "contract_version": "raw-retrieval-debug.v1",
+          "moved": [],
+          "rank_deltas": [],
           "raw_only_semantic_ids": [],
+          "raw_order": [],
+          "removed": [],
           "same_semantic_order": true,
           "token_delta": 7
         },
@@ -2624,9 +2738,28 @@
           "token_estimate_total": 13
         },
         "comparison": {
+          "added": [
+            {
+              "id": "00000000-0000-0000-0000-000000000411",
+              "reason_codes": [
+                "derivative_augmentation_used"
+              ],
+              "result_type": "artifact"
+            }
+          ],
           "artifact_delta": 1,
           "augmented_only_semantic_ids": [],
+          "augmented_order": [
+            "00000000-0000-0000-0000-000000000211"
+          ],
+          "contract_version": "raw-retrieval-debug.v1",
+          "moved": [],
+          "rank_deltas": [],
           "raw_only_semantic_ids": [],
+          "raw_order": [
+            "00000000-0000-0000-0000-000000000211"
+          ],
+          "removed": [],
           "same_semantic_order": true,
           "token_delta": 7
         },
@@ -2929,9 +3062,16 @@
           "token_estimate_total": 6
         },
         "comparison": {
+          "added": [],
           "artifact_delta": 0,
           "augmented_only_semantic_ids": [],
+          "augmented_order": [],
+          "contract_version": "raw-retrieval-debug.v1",
+          "moved": [],
+          "rank_deltas": [],
           "raw_only_semantic_ids": [],
+          "raw_order": [],
+          "removed": [],
           "same_semantic_order": true,
           "token_delta": 0
         },
@@ -3194,9 +3334,16 @@
           "token_estimate_total": 6
         },
         "comparison": {
+          "added": [],
           "artifact_delta": 0,
           "augmented_only_semantic_ids": [],
+          "augmented_order": [],
+          "contract_version": "raw-retrieval-debug.v1",
+          "moved": [],
+          "rank_deltas": [],
           "raw_only_semantic_ids": [],
+          "raw_order": [],
+          "removed": [],
           "same_semantic_order": true,
           "token_delta": 0
         },
