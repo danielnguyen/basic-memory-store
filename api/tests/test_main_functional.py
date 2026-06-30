@@ -21,6 +21,8 @@ class FakePG:
         self.artifacts = {}
         self.traces = {}
         self.derived_text = {}
+        self.embedding_refs = []
+        self.fail_activate_attempt = False
 
     async def open(self): ...
     async def close(self): ...
@@ -177,7 +179,15 @@ class FakePG:
         return row
 
     async def create_embedding_ref(self, *, ref_type, ref_id, model, qdrant_point_id):
-        return {"embedding_id": str(uuid.uuid4())}
+        row = {
+            "embedding_id": str(uuid.uuid4()),
+            "ref_type": ref_type,
+            "ref_id": str(ref_id),
+            "model": model,
+            "qdrant_point_id": str(qdrant_point_id),
+        }
+        self.embedding_refs.append(row)
+        return row
 
     async def get_active_derived_text_for_artifact(self, *, artifact_id, derivation_version):
         return [
@@ -235,6 +245,8 @@ class FakePG:
         attempt_id,
         expected_chunk_count,
     ):
+        if self.fail_activate_attempt:
+            raise RuntimeError("injected activation failure")
         rows = [
             row
             for row in self.derived_text.values()
@@ -348,6 +360,8 @@ class FakeQdrant:
         self.derived_upserts = []
         self.derived_points = {}
         self.fail_after_derived_upserts: int | None = None
+        self.fail_on_active_publication_at: int | None = None
+        self.active_publication_attempts = 0
 
     def ping(self): return True
 
@@ -363,6 +377,13 @@ class FakeQdrant:
     async def upsert_derived_text_vector(self, **kwargs):
         if self.fail_after_derived_upserts is not None and len(self.derived_upserts) >= self.fail_after_derived_upserts:
             raise RuntimeError("injected qdrant failure")
+        if kwargs.get("derivation_status", "active") == "active":
+            if (
+                self.fail_on_active_publication_at is not None
+                and self.active_publication_attempts >= self.fail_on_active_publication_at
+            ):
+                raise RuntimeError("injected active qdrant failure")
+            self.active_publication_attempts += 1
         self.derived_upserts.append(kwargs)
         point_id = str(kwargs.get("qdrant_point_id") or kwargs["derived_text_id"])
         self.derived_points[point_id] = kwargs
@@ -378,7 +399,26 @@ class FakeQdrant:
         return True
 
     async def search_artifact_chunks(self, **kwargs):
-        return []
+        owner_id = kwargs["owner_id"]
+        conversation_id = kwargs.get("conversation_id")
+        hits = []
+        for point in self.derived_points.values():
+            if point.get("derivation_status") != "active":
+                continue
+            if point.get("owner_id") != owner_id:
+                continue
+            if conversation_id is not None and point.get("conversation_id") not in {None, str(conversation_id)}:
+                continue
+            hits.append(
+                types.SimpleNamespace(
+                    derived_text_id=str(point["derived_text_id"]),
+                    artifact_id=str(point["artifact_id"]),
+                    file_path=point.get("file_path") or "",
+                    repo_name=point.get("repo_name"),
+                    score=0.9,
+                )
+            )
+        return hits[: kwargs.get("k", len(hits))]
 
 
 class FakeLiteLLM:
@@ -492,6 +532,53 @@ def _init_text_artifact(client, *, content: bytes, owner_id: str = "daniel", fil
     )
     assert r.status_code == 200
     return r.json()["artifact_id"]
+
+
+def _active_rows_for_artifact(artifact_id: str) -> list[dict]:
+    return [
+        row for row in main_module.pg.derived_text.values()
+        if row["artifact_id"] == artifact_id and row["derivation_params"].get("status") == "active"
+    ]
+
+
+def _active_qdrant_points_for_artifact(artifact_id: str) -> list[dict]:
+    return [
+        point for point in main_module.qdrant.derived_points.values()
+        if str(point["artifact_id"]) == artifact_id and point.get("derivation_status") == "active"
+    ]
+
+
+def _assert_active_derivation_complete(artifact_id: str, expected_chunks: list[dict]) -> None:
+    active_rows = _active_rows_for_artifact(artifact_id)
+    assert len(active_rows) == len(expected_chunks)
+    assert sorted(row["derivation_params"]["chunk_index"] for row in active_rows) == list(range(len(expected_chunks)))
+    active_point_ids = {
+        str(point.get("qdrant_point_id") or point["derived_text_id"])
+        for point in _active_qdrant_points_for_artifact(artifact_id)
+    }
+    assert active_point_ids == {
+        row["derivation_params"]["qdrant_point_id"]
+        for row in active_rows
+    }
+    assert len(active_point_ids) == len(expected_chunks)
+
+
+def _retrieve_artifacts(client, *, conversation_id, request_id: str, query: str = "alpha"):
+    async def fake_recent(conversation_id, limit=10):
+        return []
+
+    main_module.pg.get_recent_message_items = fake_recent
+    return client.post(
+        f"/v2/conversations/{conversation_id}/retrieve",
+        headers={**auth_headers(), "X-Request-ID": request_id},
+        json={
+            "request_id": request_id,
+            "owner_id": "daniel",
+            "query": query,
+            "include_artifacts": True,
+            "retrieval": {"k": 3, "min_score": 0.0, "scope": "conversation"},
+        },
+    )
 
 
 # -------------------------
@@ -787,6 +874,227 @@ def test_text_artifact_retry_repairs_qdrant_failure_after_row_insert(client, mon
     active = [row for row in rows if row["derivation_params"]["status"] == "active"][0]
     assert active["derivation_params"]["indexing_status"] == "indexed"
     assert main_module.pg.artifacts[aid]["status"] == "completed"
+
+
+def test_text_artifact_active_publication_failure_first_write_retries_and_retrieves(client, monkeypatch):
+    content = b"active publish first failure alpha beta gamma"
+    expected_chunks = chunk_text(content.decode("utf-8"), chunk_size=1200, chunk_overlap=150)
+
+    class FakeObjectStore:
+        def create_presigned_put_url(self, key: str, content_type: str, expires_s: int) -> str:
+            return f"http://client-minio/upload/{key}"
+
+        def create_presigned_get_url(self, key: str, expires_s: int) -> str:
+            return f"http://client-minio/download/{key}"
+
+        def head_object(self, key: str):
+            return types.SimpleNamespace(size=len(content), content_type="text/plain")
+
+        def read_object_bytes(self, key: str, *, max_bytes: int) -> bytes:
+            return content
+
+    monkeypatch.setattr(main_module.settings, "object_store_enabled", True, raising=False)
+    monkeypatch.setattr(main_module, "object_store", FakeObjectStore(), raising=True)
+    convo = uuid.uuid4()
+    main_module.pg.conversations.add(convo)
+    aid = _init_text_artifact(client, content=content)
+
+    main_module.qdrant.fail_on_active_publication_at = 0
+    failed = client.post(
+        "/v1/artifacts/complete",
+        headers=auth_headers(),
+        json={"artifact_id": aid, "owner_id": "daniel", "status": "completed"},
+    )
+    assert failed.status_code == 503
+    assert failed.json()["detail"] == "artifact text derivation failed"
+    assert main_module.pg.artifacts[aid]["status"] == "pending"
+    assert len([item for item in main_module.qdrant.derived_upserts if item.get("derivation_status") == "building"]) == len(expected_chunks)
+    assert len(main_module.pg.embedding_refs) == len(expected_chunks)
+    assert _active_rows_for_artifact(aid) == []
+    assert _active_qdrant_points_for_artifact(aid) == []
+
+    before_retry = _retrieve_artifacts(client, conversation_id=convo, request_id="rid-active-first-failed")
+    assert before_retry.status_code == 200
+    assert before_retry.json()["bundle"]["artifact_refs"] == []
+
+    main_module.qdrant.fail_on_active_publication_at = None
+    repaired = client.post(
+        "/v1/artifacts/complete",
+        headers=auth_headers(),
+        json={"artifact_id": aid, "owner_id": "daniel", "status": "completed"},
+    )
+    assert repaired.status_code == 200
+    _assert_active_derivation_complete(aid, expected_chunks)
+
+    after_retry = _retrieve_artifacts(client, conversation_id=convo, request_id="rid-active-first-repaired")
+    assert after_retry.status_code == 200
+    refs = after_retry.json()["bundle"]["artifact_refs"]
+    assert refs and refs[0]["artifact_id"] == aid
+
+
+def test_text_artifact_active_publication_failure_mid_attempt_retries_without_duplicates(client, monkeypatch):
+    content = b"alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu"
+    expected_chunks = chunk_text(content.decode("utf-8"), chunk_size=20, chunk_overlap=0)
+
+    class FakeObjectStore:
+        def create_presigned_put_url(self, key: str, content_type: str, expires_s: int) -> str:
+            return f"http://client-minio/upload/{key}"
+
+        def create_presigned_get_url(self, key: str, expires_s: int) -> str:
+            return f"http://client-minio/download/{key}"
+
+        def head_object(self, key: str):
+            return types.SimpleNamespace(size=len(content), content_type="text/plain")
+
+        def read_object_bytes(self, key: str, *, max_bytes: int) -> bytes:
+            return content
+
+    monkeypatch.setattr(main_module.settings, "object_store_enabled", True, raising=False)
+    monkeypatch.setattr(main_module.settings, "ingest_chunk_size_chars", 20, raising=False)
+    monkeypatch.setattr(main_module.settings, "ingest_chunk_overlap_chars", 0, raising=False)
+    monkeypatch.setattr(main_module, "object_store", FakeObjectStore(), raising=True)
+    convo = uuid.uuid4()
+    main_module.pg.conversations.add(convo)
+    aid = _init_text_artifact(client, content=content, filename="multi-active.txt")
+
+    main_module.qdrant.fail_on_active_publication_at = 1
+    failed = client.post(
+        "/v1/artifacts/complete",
+        headers=auth_headers(),
+        json={"artifact_id": aid, "owner_id": "daniel", "status": "completed"},
+    )
+    assert failed.status_code == 503
+    assert failed.json()["detail"] == "artifact text derivation failed"
+    assert main_module.pg.artifacts[aid]["status"] == "pending"
+    assert len([item for item in main_module.qdrant.derived_upserts if item.get("derivation_status") == "building"]) == len(expected_chunks)
+    assert len(main_module.pg.embedding_refs) == len(expected_chunks)
+    assert _active_rows_for_artifact(aid) == []
+    partial_active_points = _active_qdrant_points_for_artifact(aid)
+    assert len(partial_active_points) == 1
+
+    before_retry = _retrieve_artifacts(client, conversation_id=convo, request_id="rid-active-mid-failed")
+    assert before_retry.status_code == 200
+    assert before_retry.json()["bundle"]["artifact_refs"] == []
+
+    main_module.qdrant.fail_on_active_publication_at = None
+    repaired = client.post(
+        "/v1/artifacts/complete",
+        headers=auth_headers(),
+        json={"artifact_id": aid, "owner_id": "daniel", "status": "completed"},
+    )
+    assert repaired.status_code == 200
+    _assert_active_derivation_complete(aid, expected_chunks)
+
+    after_retry = _retrieve_artifacts(client, conversation_id=convo, request_id="rid-active-mid-repaired")
+    assert after_retry.status_code == 200
+    refs = after_retry.json()["bundle"]["artifact_refs"]
+    assert refs and refs[0]["artifact_id"] == aid
+
+    repeated = client.post(
+        "/v1/artifacts/complete",
+        headers=auth_headers(),
+        json={"artifact_id": aid, "owner_id": "daniel", "status": "completed"},
+    )
+    assert repeated.status_code == 200
+    _assert_active_derivation_complete(aid, expected_chunks)
+
+
+def test_file_ingestion_active_publication_failure_does_not_expose_completed_artifact(client, tmp_path, monkeypatch):
+    src = tmp_path / "partial.txt"
+    src.write_text("alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu", encoding="utf-8")
+    expected_chunks = chunk_text(src.read_text(encoding="utf-8"), chunk_size=20, chunk_overlap=0)
+    monkeypatch.setattr(main_module.settings, "ingest_chunk_size_chars", 20, raising=False)
+    monkeypatch.setattr(main_module.settings, "ingest_chunk_overlap_chars", 0, raising=False)
+    main_module.qdrant.fail_on_active_publication_at = 1
+
+    with pytest.raises(RuntimeError, match="injected active qdrant failure"):
+        client.post(
+            "/v1/ingestion/files",
+            headers=auth_headers(),
+            json={
+                "owner_id": "daniel",
+                "client_id": "vscode",
+                "source_surface": "vscode",
+                "repo_name": "basic-memory-store",
+                "paths": [str(src)],
+            },
+        )
+
+    aid = next(iter(main_module.pg.artifacts))
+    assert main_module.pg.artifacts[aid]["status"] == "completed"
+    assert len([item for item in main_module.qdrant.derived_upserts if item.get("derivation_status") == "building"]) == len(expected_chunks)
+    assert _active_rows_for_artifact(aid) == []
+    assert len(_active_qdrant_points_for_artifact(aid)) == 1
+
+    convo = uuid.uuid4()
+    main_module.pg.conversations.add(convo)
+    retrieval = _retrieve_artifacts(client, conversation_id=convo, request_id="rid-file-active-failed")
+    assert retrieval.status_code == 200
+    assert retrieval.json()["bundle"]["artifact_refs"] == []
+
+
+def test_text_artifact_postgres_activation_failure_after_qdrant_publication_retries(client, monkeypatch):
+    content = b"alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu"
+    expected_chunks = chunk_text(content.decode("utf-8"), chunk_size=20, chunk_overlap=0)
+
+    class FakeObjectStore:
+        def create_presigned_put_url(self, key: str, content_type: str, expires_s: int) -> str:
+            return f"http://client-minio/upload/{key}"
+
+        def create_presigned_get_url(self, key: str, expires_s: int) -> str:
+            return f"http://client-minio/download/{key}"
+
+        def head_object(self, key: str):
+            return types.SimpleNamespace(size=len(content), content_type="text/plain")
+
+        def read_object_bytes(self, key: str, *, max_bytes: int) -> bytes:
+            return content
+
+    monkeypatch.setattr(main_module.settings, "object_store_enabled", True, raising=False)
+    monkeypatch.setattr(main_module.settings, "ingest_chunk_size_chars", 20, raising=False)
+    monkeypatch.setattr(main_module.settings, "ingest_chunk_overlap_chars", 0, raising=False)
+    monkeypatch.setattr(main_module, "object_store", FakeObjectStore(), raising=True)
+    convo = uuid.uuid4()
+    main_module.pg.conversations.add(convo)
+    aid = _init_text_artifact(client, content=content, filename="activation.txt")
+
+    main_module.pg.fail_activate_attempt = True
+    failed = client.post(
+        "/v1/artifacts/complete",
+        headers=auth_headers(),
+        json={"artifact_id": aid, "owner_id": "daniel", "status": "completed"},
+    )
+    assert failed.status_code == 503
+    assert failed.json()["detail"] == "artifact text derivation failed"
+    assert main_module.pg.artifacts[aid]["status"] == "pending"
+    assert _active_rows_for_artifact(aid) == []
+    published_point_ids = {
+        str(point.get("qdrant_point_id") or point["derived_text_id"])
+        for point in _active_qdrant_points_for_artifact(aid)
+    }
+    assert len(published_point_ids) == len(expected_chunks)
+
+    before_retry = _retrieve_artifacts(client, conversation_id=convo, request_id="rid-activation-failed")
+    assert before_retry.status_code == 200
+    assert before_retry.json()["bundle"]["artifact_refs"] == []
+
+    main_module.pg.fail_activate_attempt = False
+    repaired = client.post(
+        "/v1/artifacts/complete",
+        headers=auth_headers(),
+        json={"artifact_id": aid, "owner_id": "daniel", "status": "completed"},
+    )
+    assert repaired.status_code == 200
+    _assert_active_derivation_complete(aid, expected_chunks)
+    assert {
+        str(point.get("qdrant_point_id") or point["derived_text_id"])
+        for point in _active_qdrant_points_for_artifact(aid)
+    } == published_point_ids
+
+    after_retry = _retrieve_artifacts(client, conversation_id=convo, request_id="rid-activation-repaired")
+    assert after_retry.status_code == 200
+    refs = after_retry.json()["bundle"]["artifact_refs"]
+    assert refs and refs[0]["artifact_id"] == aid
 
 
 def test_text_artifact_retry_repairs_partial_multi_chunk_and_retrieves(client, monkeypatch):

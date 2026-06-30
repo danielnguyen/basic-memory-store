@@ -138,17 +138,7 @@ async def derive_text_chunks_for_artifact(
         pending.append(indexed)
         chunks_indexed += 1
 
-    activated = await pg.activate_derived_text_attempt(
-        artifact_id=artifact_id,
-        owner_id=artifact["owner_id"],
-        derivation_version=derivation_version,
-        attempt_id=attempt_id,
-        expected_chunk_count=len(chunks),
-    )
-    if len(activated) != len(chunks):
-        raise RuntimeError("derived text activation failed")
-
-    for row in activated:
+    for row in pending:
         params = row["derivation_params"]
         await qdrant.upsert_derived_text_vector(
             derived_text_id=UUID(row["derived_text_id"]),
@@ -165,6 +155,16 @@ async def derive_text_chunks_for_artifact(
             repo_name=repo_name or artifact.get("repo_name"),
             chunk_index=int(params["chunk_index"]),
         )
+
+    activated = await pg.activate_derived_text_attempt(
+        artifact_id=artifact_id,
+        owner_id=artifact["owner_id"],
+        derivation_version=derivation_version,
+        attempt_id=attempt_id,
+        expected_chunk_count=len(chunks),
+    )
+    if len(activated) != len(chunks):
+        raise RuntimeError("derived text activation failed")
 
     return {"chunks_created": chunks_created, "chunks_indexed": chunks_indexed, "chunks_existing": 0}
 

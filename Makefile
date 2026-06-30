@@ -32,6 +32,10 @@ artifact-storage-test: test-image
 		tests/test_main_functional.py::test_artifact_flow_with_object_store_enabled \
 		tests/test_main_functional.py::test_text_artifact_completion_derives_same_artifact_and_is_idempotent \
 		tests/test_main_functional.py::test_text_artifact_retry_repairs_qdrant_failure_after_row_insert \
+		tests/test_main_functional.py::test_text_artifact_active_publication_failure_first_write_retries_and_retrieves \
+		tests/test_main_functional.py::test_text_artifact_active_publication_failure_mid_attempt_retries_without_duplicates \
+		tests/test_main_functional.py::test_file_ingestion_active_publication_failure_does_not_expose_completed_artifact \
+		tests/test_main_functional.py::test_text_artifact_postgres_activation_failure_after_qdrant_publication_retries \
 		tests/test_main_functional.py::test_text_artifact_retry_repairs_partial_multi_chunk_and_retrieves \
 		tests/test_main_functional.py::test_text_artifact_invalid_utf8_does_not_complete \
 		tests/test_main_functional.py::test_oversized_text_artifact_completes_without_derivation \
