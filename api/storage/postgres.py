@@ -1599,7 +1599,8 @@ class PostgresStore:
         FROM derived_text dt
         JOIN artifacts a ON a.id = dt.artifact_id
         WHERE dt.id = ANY(%s)
-          AND COALESCE(dt.derivation_params->>'status', 'active') = 'active';
+          AND COALESCE(dt.derivation_params->>'status', 'active') = 'active'
+          AND a.status = 'completed';
         """
         async with self.pool.connection() as conn:
             async with conn.cursor() as cur:
@@ -1745,6 +1746,76 @@ class PostgresStore:
             "created_at": str(row[6]),
             "owner_id": row[7],
         }
+
+    async def activate_derived_text_attempt(
+        self,
+        *,
+        artifact_id: UUID,
+        owner_id: str,
+        derivation_version: str,
+        attempt_id: str,
+        expected_chunk_count: int,
+    ) -> list[dict[str, Any]]:
+        select_cols = """
+            dt.id, dt.artifact_id, dt.kind, dt.language, dt.text,
+            dt.derivation_params, dt.created_at, a.owner_id
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT count(*)
+                    FROM derived_text dt
+                    JOIN artifacts a ON a.id = dt.artifact_id
+                    WHERE dt.artifact_id = %s
+                      AND a.owner_id = %s
+                      AND dt.derivation_params->>'derivation_version' = %s
+                      AND dt.derivation_params->>'attempt_id' = %s
+                      AND dt.derivation_params->>'status' = 'building'
+                      AND dt.derivation_params->>'indexing_status' = 'indexed';
+                    """,
+                    (artifact_id, owner_id, derivation_version, attempt_id),
+                )
+                count_row = await cur.fetchone()
+                if int(count_row[0]) != expected_chunk_count:
+                    raise RuntimeError("derived text attempt is incomplete")
+                await cur.execute(
+                    f"""
+                    UPDATE derived_text dt
+                    SET derivation_params =
+                        jsonb_set(
+                            jsonb_set(dt.derivation_params, '{{status}}', '"active"'::jsonb, true),
+                            '{{activated_at}}',
+                            to_jsonb(now()::text),
+                            true
+                        )
+                    FROM artifacts a
+                    WHERE dt.artifact_id = %s
+                      AND dt.artifact_id = a.id
+                      AND a.owner_id = %s
+                      AND dt.derivation_params->>'derivation_version' = %s
+                      AND dt.derivation_params->>'attempt_id' = %s
+                      AND dt.derivation_params->>'status' = 'building'
+                    RETURNING {select_cols};
+                    """,
+                    (artifact_id, owner_id, derivation_version, attempt_id),
+                )
+                rows = await cur.fetchall()
+        if len(rows) != expected_chunk_count:
+            raise RuntimeError("derived text attempt activation count mismatch")
+        return [
+            {
+                "derived_text_id": str(row[0]),
+                "artifact_id": str(row[1]),
+                "kind": row[2],
+                "language": row[3],
+                "text": row[4],
+                "derivation_params": row[5] or {},
+                "created_at": str(row[6]),
+                "owner_id": row[7],
+            }
+            for row in rows
+        ]
 
     async def append_derived_text_lifecycle_event(
         self,

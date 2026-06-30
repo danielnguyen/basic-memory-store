@@ -12,6 +12,7 @@ from qdrant_client.models import (
     PointStruct,
     Filter,
     FieldCondition,
+    IsEmptyCondition,
     MatchValue,
 )
 
@@ -123,6 +124,10 @@ class QdrantStore:
         content: str,
         client_id: str | None = None,
         conversation_id: UUID | str | None = None,
+        qdrant_point_id: UUID | str | None = None,
+        derivation_status: str = "active",
+        derivation_attempt_id: UUID | str | None = None,
+        derivation_version: str | None = None,
         file_path: str,
         repo_name: str | None,
         chunk_index: int,
@@ -137,6 +142,7 @@ class QdrantStore:
             "owner_id": owner_id,
             "file_path": file_path,
             "chunk_index": chunk_index,
+            "derivation_status": derivation_status,
         }
         if client_id is not None:
             payload["client_id"] = client_id
@@ -144,9 +150,13 @@ class QdrantStore:
             payload["conversation_id"] = str(conversation_id)
         if repo_name is not None:
             payload["repo_name"] = repo_name
+        if derivation_attempt_id is not None:
+            payload["derivation_attempt_id"] = str(derivation_attempt_id)
+        if derivation_version is not None:
+            payload["derivation_version"] = derivation_version
 
         point = PointStruct(
-            id=str(derived_text_id),
+            id=str(qdrant_point_id or derived_text_id),
             vector=vec,
             payload=payload,
         )
@@ -155,6 +165,17 @@ class QdrantStore:
             points=[point],
         )
 
+    async def mark_derived_text_vector_inactive(
+        self,
+        *,
+        qdrant_point_id: UUID | str,
+        derivation_status: str = "inactive",
+    ) -> None:
+        self.client.set_payload(
+            collection_name=self.collection,
+            payload={"derivation_status": derivation_status},
+            points=[str(qdrant_point_id)],
+        )
 
     async def search(
         self,
@@ -222,13 +243,23 @@ class QdrantStore:
         must = [
             FieldCondition(key="owner_id", match=MatchValue(value=owner_id)),
             FieldCondition(key="ref_type", match=MatchValue(value="derived_text")),
+            FieldCondition(key="derivation_status", match=MatchValue(value="active")),
         ]
         if client_id is not None:
             must.append(FieldCondition(key="client_id", match=MatchValue(value=str(client_id))))
+        if conversation_id is not None:
+            must.append(
+                Filter(
+                    should=[
+                        FieldCondition(key="conversation_id", match=MatchValue(value=str(conversation_id))),
+                        IsEmptyCondition(is_empty={"key": "conversation_id"}),
+                    ]
+                )
+            )
         res = self.client.search(
             collection_name=self.collection,
             query_vector=qvec,
-            limit=max(k, min(100, k * 10)),
+            limit=k,
             query_filter=Filter(must=must),
         )
 
@@ -237,9 +268,6 @@ class QdrantStore:
             if p.score is None or p.score < min_score or not p.payload:
                 continue
             if p.payload.get("owner_id") != owner_id:
-                continue
-            payload_conversation_id = p.payload.get("conversation_id")
-            if conversation_id is not None and payload_conversation_id not in {None, str(conversation_id)}:
                 continue
             hits.append(
                 ArtifactChunkHit(

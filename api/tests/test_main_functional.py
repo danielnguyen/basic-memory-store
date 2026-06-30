@@ -213,6 +213,8 @@ class FakePG:
                 continue
             params = row.get("derivation_params", {})
             artifact = self.artifacts[row["artifact_id"]]
+            if artifact.get("status") != "completed":
+                continue
             out.append(
                 {
                     **row,
@@ -223,6 +225,35 @@ class FakePG:
                 }
             )
         return out
+
+    async def activate_derived_text_attempt(
+        self,
+        *,
+        artifact_id,
+        owner_id,
+        derivation_version,
+        attempt_id,
+        expected_chunk_count,
+    ):
+        rows = [
+            row
+            for row in self.derived_text.values()
+            if row["artifact_id"] == str(artifact_id)
+            and row["owner_id"] == owner_id
+            and row["derivation_params"].get("derivation_version") == derivation_version
+            and row["derivation_params"].get("attempt_id") == attempt_id
+            and row["derivation_params"].get("status") == "building"
+            and row["derivation_params"].get("indexing_status") == "indexed"
+        ]
+        if len(rows) != expected_chunk_count:
+            raise RuntimeError("derived text attempt is incomplete")
+        for row in rows:
+            row["derivation_params"] = {
+                **row["derivation_params"],
+                "status": "active",
+                "activated_at": "2026-01-01 00:00:11+00:00",
+            }
+        return rows
 
     async def get_memory_items_for_source_refs(self, owner_id, source_refs):
         return {}
@@ -315,6 +346,7 @@ class FakeQdrant:
     def __init__(self):
         self.upserts = []  # record calls
         self.derived_upserts = []
+        self.derived_points = {}
         self.fail_after_derived_upserts: int | None = None
 
     def ping(self): return True
@@ -332,6 +364,17 @@ class FakeQdrant:
         if self.fail_after_derived_upserts is not None and len(self.derived_upserts) >= self.fail_after_derived_upserts:
             raise RuntimeError("injected qdrant failure")
         self.derived_upserts.append(kwargs)
+        point_id = str(kwargs.get("qdrant_point_id") or kwargs["derived_text_id"])
+        self.derived_points[point_id] = kwargs
+        return True
+
+    async def mark_derived_text_vector_inactive(self, **kwargs):
+        point_id = str(kwargs["qdrant_point_id"])
+        if point_id in self.derived_points:
+            self.derived_points[point_id] = {
+                **self.derived_points[point_id],
+                "derivation_status": kwargs.get("derivation_status", "inactive"),
+            }
         return True
 
     async def search_artifact_chunks(self, **kwargs):
@@ -725,6 +768,11 @@ def test_text_artifact_retry_repairs_qdrant_failure_after_row_insert(client, mon
     assert failed.status_code == 503
     assert main_module.pg.artifacts[aid]["status"] == "pending"
     assert [row["derivation_params"]["status"] for row in main_module.pg.derived_text.values()] == ["building"]
+    assert not [
+        row for row in main_module.pg.derived_text.values()
+        if row["derivation_params"].get("status") == "active"
+    ]
+    assert all(point.get("derivation_status") != "active" for point in main_module.qdrant.derived_points.values())
 
     main_module.qdrant.fail_after_derived_upserts = None
     repaired = client.post(
@@ -764,6 +812,7 @@ def test_text_artifact_retry_repairs_partial_multi_chunk_and_retrieves(client, m
     monkeypatch.setattr(main_module, "object_store", FakeObjectStore(), raising=True)
     convo = uuid.uuid4()
     main_module.pg.conversations.add(convo)
+    real_artifact_search = main_module.qdrant.search_artifact_chunks
 
     r = client.post(
         "/v1/artifacts/init",
@@ -780,14 +829,55 @@ def test_text_artifact_retry_repairs_partial_multi_chunk_and_retrieves(client, m
     assert r.status_code == 200
     aid = r.json()["artifact_id"]
 
-    main_module.qdrant.fail_after_derived_upserts = 1
-    failed = client.post(
-        "/v1/artifacts/complete",
-        headers=auth_headers(),
-        json={"artifact_id": aid, "owner_id": "daniel", "status": "completed"},
-    )
-    assert failed.status_code == 503
-    assert main_module.pg.artifacts[aid]["status"] == "pending"
+    for _ in range(3):
+        main_module.qdrant.fail_after_derived_upserts = 1
+        failed = client.post(
+            "/v1/artifacts/complete",
+            headers=auth_headers(),
+            json={"artifact_id": aid, "owner_id": "daniel", "status": "completed"},
+        )
+        assert failed.status_code == 503
+        assert main_module.pg.artifacts[aid]["status"] == "pending"
+        assert not [
+            row for row in main_module.pg.derived_text.values()
+            if row["artifact_id"] == aid and row["derivation_params"].get("status") == "active"
+        ]
+        assert all(point.get("derivation_status") != "active" for point in main_module.qdrant.derived_points.values())
+        main_module.qdrant.fail_after_derived_upserts = None
+
+        class FailedArtifactHit:
+            def __init__(self, row):
+                self.derived_text_id = row["derived_text_id"]
+                self.artifact_id = aid
+                self.file_path = "multi.txt"
+                self.repo_name = None
+                self.score = 0.9
+
+        failed_rows = list(main_module.pg.derived_text.values())
+
+        async def failed_artifact_search(**kwargs):
+            return [FailedArtifactHit(row) for row in failed_rows]
+
+        async def fake_recent_before_retry(conversation_id, limit=10):
+            return []
+
+        monkeypatch.setattr(main_module.qdrant, "search_artifact_chunks", failed_artifact_search, raising=True)
+        monkeypatch.setattr(main_module.pg, "get_recent_message_items", fake_recent_before_retry, raising=True)
+        rid = f"rid-failed-artifact-{len(failed_rows)}"
+        before_retry = client.post(
+            f"/v2/conversations/{convo}/retrieve",
+            headers={**auth_headers(), "X-Request-ID": rid},
+            json={
+                "request_id": rid,
+                "owner_id": "daniel",
+                "query": "alpha",
+                "include_artifacts": True,
+                "retrieval": {"k": 3, "min_score": 0.0, "scope": "conversation"},
+            },
+        )
+        assert before_retry.status_code == 200
+        assert before_retry.json()["bundle"]["artifact_refs"] == []
+        monkeypatch.setattr(main_module.qdrant, "search_artifact_chunks", real_artifact_search, raising=True)
 
     main_module.qdrant.fail_after_derived_upserts = None
     repaired = client.post(
@@ -803,6 +893,11 @@ def test_text_artifact_retry_repairs_partial_multi_chunk_and_retrieves(client, m
     ]
     assert len(active_rows) == len(expected_chunks)
     assert sorted(row["derivation_params"]["chunk_index"] for row in active_rows) == list(range(len(expected_chunks)))
+    assert sorted(
+        point["chunk_index"]
+        for point in main_module.qdrant.derived_points.values()
+        if point.get("derivation_status") == "active"
+    ) == list(range(len(expected_chunks)))
 
     repeated = client.post(
         "/v1/artifacts/complete",

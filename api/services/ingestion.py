@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from services.chunking import chunk_text, iter_ingestable_paths
 
@@ -51,15 +51,23 @@ async def derive_text_chunks_for_artifact(
     if existing:
         await _retire_incomplete_derivation_rows(
             pg=pg,
+            qdrant=qdrant,
             owner_id=artifact["owner_id"],
             rows=existing,
             expected_indexes=expected_indexes,
         )
 
+    attempt_id = str(uuid4())
+    pending: list[dict[str, Any]] = []
     chunks_created = 0
     chunks_indexed = 0
     for chunk in chunks:
         chunk_index = int(chunk["chunk_index"])
+        qdrant_point_id = _qdrant_point_id(
+            artifact_id=artifact_id,
+            derivation_version=derivation_version,
+            chunk_index=chunk_index,
+        )
         derived = await pg.create_derived_text(
             artifact_id=artifact_id,
             kind="chunk",
@@ -75,6 +83,8 @@ async def derive_text_chunks_for_artifact(
                 "status": "building",
                 "indexing_status": "pending",
                 "expected_chunk_count": len(chunks),
+                "attempt_id": attempt_id,
+                "qdrant_point_id": str(qdrant_point_id),
                 "source_refs": [
                     {
                         "ref_type": "artifact",
@@ -98,6 +108,10 @@ async def derive_text_chunks_for_artifact(
             content=derived["text"],
             client_id=artifact.get("client_id"),
             conversation_id=artifact.get("conversation_id"),
+            qdrant_point_id=qdrant_point_id,
+            derivation_status="building",
+            derivation_attempt_id=attempt_id,
+            derivation_version=derivation_version,
             file_path=file_path or artifact.get("file_path") or artifact.get("filename") or "",
             repo_name=repo_name or artifact.get("repo_name"),
             chunk_index=chunk_index,
@@ -106,22 +120,51 @@ async def derive_text_chunks_for_artifact(
             ref_type="derived_text",
             ref_id=UUID(derived["derived_text_id"]),
             model=settings.embed_model,
-            qdrant_point_id=derived["derived_text_id"],
+            qdrant_point_id=str(qdrant_point_id),
         )
-        activated = await pg.update_derived_text_params(
+        indexed = await pg.update_derived_text_params(
             derived_text_id=UUID(derived["derived_text_id"]),
             owner_id=artifact["owner_id"],
             derivation_params={
                 **derived["derivation_params"],
-                "status": "active",
+                "status": "building",
                 "indexing_status": "indexed",
-                "qdrant_point_id": derived["derived_text_id"],
+                "qdrant_point_id": str(qdrant_point_id),
                 "embedding_model": settings.embed_model,
             },
         )
-        if activated is None:
-            raise RuntimeError("derived text activation failed")
+        if indexed is None:
+            raise RuntimeError("derived text indexing state update failed")
+        pending.append(indexed)
         chunks_indexed += 1
+
+    activated = await pg.activate_derived_text_attempt(
+        artifact_id=artifact_id,
+        owner_id=artifact["owner_id"],
+        derivation_version=derivation_version,
+        attempt_id=attempt_id,
+        expected_chunk_count=len(chunks),
+    )
+    if len(activated) != len(chunks):
+        raise RuntimeError("derived text activation failed")
+
+    for row in activated:
+        params = row["derivation_params"]
+        await qdrant.upsert_derived_text_vector(
+            derived_text_id=UUID(row["derived_text_id"]),
+            artifact_id=artifact_id,
+            owner_id=artifact["owner_id"],
+            content=row["text"],
+            client_id=artifact.get("client_id"),
+            conversation_id=artifact.get("conversation_id"),
+            qdrant_point_id=params["qdrant_point_id"],
+            derivation_status="active",
+            derivation_attempt_id=attempt_id,
+            derivation_version=derivation_version,
+            file_path=file_path or artifact.get("file_path") or artifact.get("filename") or "",
+            repo_name=repo_name or artifact.get("repo_name"),
+            chunk_index=int(params["chunk_index"]),
+        )
 
     return {"chunks_created": chunks_created, "chunks_indexed": chunks_indexed, "chunks_existing": 0}
 
@@ -143,9 +186,14 @@ def _is_completed_chunk(row: dict[str, Any], *, expected_indexes: set[int]) -> b
     return chunk_index in expected_indexes and bool(params.get("qdrant_point_id"))
 
 
+def _qdrant_point_id(*, artifact_id: UUID, derivation_version: str, chunk_index: int) -> UUID:
+    return uuid5(NAMESPACE_URL, f"basic-memory-store:{artifact_id}:{derivation_version}:{chunk_index}")
+
+
 async def _retire_incomplete_derivation_rows(
     *,
     pg: Any,
+    qdrant: Any,
     owner_id: str,
     rows: list[dict[str, Any]],
     expected_indexes: set[int],
@@ -159,6 +207,12 @@ async def _retire_incomplete_derivation_rows(
         else:
             status = "failed"
             indexing_status = "incomplete"
+        point_id = params.get("qdrant_point_id") or row.get("derived_text_id")
+        if point_id:
+            await qdrant.mark_derived_text_vector_inactive(
+                qdrant_point_id=point_id,
+                derivation_status=status,
+            )
         updated = await pg.update_derived_text_params(
             derived_text_id=UUID(row["derived_text_id"]),
             owner_id=owner_id,
