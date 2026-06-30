@@ -1434,7 +1434,8 @@ class PostgresStore:
           sha256 = COALESCE(%s, sha256),
           completed_at = CASE WHEN %s = 'completed' THEN now() ELSE completed_at END
         WHERE id = %s
-        RETURNING id, owner_id, client_id, conversation_id, filename, mime, size, object_uri, source_surface, status, sha256, created_at, completed_at;
+        RETURNING id, owner_id, client_id, conversation_id, filename, mime, size, object_uri, source_surface,
+                  status, sha256, created_at, completed_at, source_kind, repo_name, repo_ref, file_path, ingestion_id;
         """
         async with self.pool.connection() as conn:
             async with conn.cursor() as cur:
@@ -1444,7 +1445,26 @@ class PostgresStore:
         if row is None:
             return None
 
-        (aid, owner, c_id, convo_id, name, kind, byte_size, uri, surface, status_out, sha256_out, created_at, completed_at) = row
+        (
+            aid,
+            owner,
+            c_id,
+            convo_id,
+            name,
+            kind,
+            byte_size,
+            uri,
+            surface,
+            status_out,
+            sha256_out,
+            created_at,
+            completed_at,
+            source_kind,
+            repo_name,
+            repo_ref,
+            file_path,
+            ingestion_id,
+        ) = row
         return {
             "artifact_id": str(aid),
             "owner_id": owner,
@@ -1459,6 +1479,11 @@ class PostgresStore:
             "sha256": sha256_out,
             "created_at": str(created_at),
             "completed_at": str(completed_at) if completed_at else None,
+            "source_kind": source_kind,
+            "repo_name": repo_name,
+            "repo_ref": repo_ref,
+            "file_path": file_path,
+            "ingestion_id": str(ingestion_id) if ingestion_id else None,
         }
 
     async def get_artifact(self, artifact_id: UUID) -> dict[str, Any] | None:
@@ -1594,6 +1619,37 @@ class PostgresStore:
                 "mime": row[9],
             }
         return [by_id[item] for item in id_strs if item in by_id]
+
+    async def get_active_derived_text_for_artifact(
+        self,
+        *,
+        artifact_id: UUID,
+        derivation_version: str,
+    ) -> list[dict[str, Any]]:
+        q = """
+        SELECT id, artifact_id, kind, language, text, derivation_params, created_at
+        FROM derived_text
+        WHERE artifact_id = %s
+          AND derivation_params->>'derivation_version' = %s
+          AND COALESCE(derivation_params->>'status', 'active') = 'active'
+        ORDER BY (derivation_params->>'chunk_index')::int NULLS LAST, created_at ASC;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (artifact_id, derivation_version))
+                rows = await cur.fetchall()
+        return [
+            {
+                "derived_text_id": str(row[0]),
+                "artifact_id": str(row[1]),
+                "kind": row[2],
+                "language": row[3],
+                "text": row[4],
+                "derivation_params": row[5] or {},
+                "created_at": str(row[6]),
+            }
+            for row in rows
+        ]
 
     async def get_derived_text_for_owner(
         self,

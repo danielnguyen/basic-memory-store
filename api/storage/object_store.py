@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import logging
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 from prometheus_client import Counter
 
 
-logger = logging.getLogger(__name__)
 object_store_errors_total = Counter(
     "object_store_errors_total",
     "Count of object store operation failures",
@@ -39,43 +37,42 @@ class ObjectStoreClient:
         self.presign_base_url = presign_base_url
         self.include_content_type_in_put_signature = include_content_type_in_put_signature
         self._client = None
-        self._presign_base_is_valid: bool | None = None
+        self._presign_client = None
 
-    def _get_client(self):
-        if self._client is not None:
-            return self._client
-
+    def _build_client(self, endpoint_url: str):
         try:
             import boto3
             from botocore.config import Config
         except ImportError as e:
             raise RuntimeError("boto3 is required for object-store integration") from e
 
-        self._client = boto3.client(
+        parsed = urlparse(endpoint_url)
+        if not parsed.scheme or not parsed.netloc:
+            raise RuntimeError("Object store endpoint URL must include scheme and host")
+
+        return boto3.client(
             "s3",
-            endpoint_url=self.endpoint_url,
+            endpoint_url=endpoint_url,
             aws_access_key_id=self.access_key,
             aws_secret_access_key=self.secret_key,
             region_name=self.region,
             config=Config(signature_version="s3v4"),
         )
+
+    def _get_client(self):
+        if self._client is None:
+            self._client = self._build_client(self.endpoint_url)
         return self._client
 
-    def _rewrite_presigned_url(self, url: str) -> str:
-        if not self.presign_base_url:
-            return url
-        src = urlparse(url)
-        dst = urlparse(self.presign_base_url)
-        if not dst.scheme or not dst.netloc:
-            if self._presign_base_is_valid is not False:
-                logger.warning("Invalid OBJECT_STORE_PRESIGN_BASE_URL=%r; presigned URL rewrite disabled", self.presign_base_url)
-                self._presign_base_is_valid = False
-            return url
-
-        self._presign_base_is_valid = True
-        base_path = dst.path.rstrip("/")
-        rewritten_path = f"{base_path}{src.path}" if base_path else src.path
-        return urlunparse((dst.scheme, dst.netloc, rewritten_path, src.params, src.query, src.fragment))
+    def _get_presign_client(self):
+        endpoint = self.presign_base_url or self.endpoint_url
+        if self._presign_client is None:
+            try:
+                self._presign_client = self._build_client(endpoint)
+            except RuntimeError as e:
+                object_store_errors_total.labels(operation="presign_client", error_class="configuration").inc()
+                raise RuntimeError("Invalid object store presign endpoint configuration") from e
+        return self._presign_client
 
     @staticmethod
     def _is_missing_error(code: str | None, status_code: int | None) -> bool:
@@ -119,7 +116,7 @@ class ObjectStoreClient:
         If ContentType is included in signing, clients MUST send the exact same
         Content-Type header when uploading via the presigned URL.
         """
-        client = self._get_client()
+        client = self._get_presign_client()
         params = {"Bucket": self.bucket, "Key": key}
         if self.include_content_type_in_put_signature:
             params["ContentType"] = content_type
@@ -132,10 +129,10 @@ class ObjectStoreClient:
         except Exception as e:
             object_store_errors_total.labels(operation="presign_put", error_class="other").inc()
             raise RuntimeError(f"Failed to generate presigned PUT URL: {e}") from e
-        return self._rewrite_presigned_url(url)
+        return url
 
     def create_presigned_get_url(self, key: str, expires_s: int) -> str:
-        client = self._get_client()
+        client = self._get_presign_client()
         try:
             url = client.generate_presigned_url(
                 ClientMethod="get_object",
@@ -145,7 +142,7 @@ class ObjectStoreClient:
         except Exception as e:
             object_store_errors_total.labels(operation="presign_get", error_class="other").inc()
             raise RuntimeError(f"Failed to generate presigned GET URL: {e}") from e
-        return self._rewrite_presigned_url(url)
+        return url
 
     def head_object(self, key: str) -> ObjectMetadata | None:
         client = self._get_client()
@@ -168,3 +165,28 @@ class ObjectStoreClient:
             size=int(out.get("ContentLength", 0)),
             content_type=out.get("ContentType"),
         )
+
+    def read_object_bytes(self, key: str, *, max_bytes: int) -> bytes:
+        if max_bytes < 1:
+            raise RuntimeError("Object read limit must be positive")
+        client = self._get_client()
+        from botocore.exceptions import ClientError, EndpointConnectionError
+
+        try:
+            out = client.get_object(Bucket=self.bucket, Key=key, Range=f"bytes=0-{max_bytes}")
+            body = out.get("Body")
+            data = body.read(max_bytes + 1) if body is not None else b""
+        except ClientError as e:
+            err = e.response.get("Error", {}) if isinstance(getattr(e, "response", None), dict) else {}
+            code = err.get("Code")
+            status = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode") if isinstance(getattr(e, "response", None), dict) else None
+            if self._is_missing_error(code, status):
+                raise RuntimeError("Object store object is missing") from e
+            object_store_errors_total.labels(operation="read_object", error_class="client_error").inc()
+            raise RuntimeError(f"Object store read_object failed for key '{key}': {code or 'unknown'}") from e
+        except EndpointConnectionError as e:
+            object_store_errors_total.labels(operation="read_object", error_class="other").inc()
+            raise RuntimeError(f"Object store endpoint unreachable while reading key '{key}'") from e
+        if len(data) > max_bytes:
+            raise RuntimeError("Object exceeds configured derivation read limit")
+        return data

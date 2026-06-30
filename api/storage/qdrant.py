@@ -122,6 +122,7 @@ class QdrantStore:
         owner_id: str,
         content: str,
         client_id: str | None = None,
+        conversation_id: UUID | str | None = None,
         file_path: str,
         repo_name: str | None,
         chunk_index: int,
@@ -139,6 +140,8 @@ class QdrantStore:
         }
         if client_id is not None:
             payload["client_id"] = client_id
+        if conversation_id is not None:
+            payload["conversation_id"] = str(conversation_id)
         if repo_name is not None:
             payload["repo_name"] = repo_name
 
@@ -211,6 +214,7 @@ class QdrantStore:
         k: int,
         min_score: float,
         client_id: str | None = None,
+        conversation_id: UUID | str | None = None,
     ) -> list[ArtifactChunkHit]:
         qvec = (await self.embedder.embed_texts(self.embed_model, [query]))[0]
         self.ensure_collection(vector_size=len(qvec))
@@ -221,6 +225,8 @@ class QdrantStore:
         ]
         if client_id is not None:
             must.append(FieldCondition(key="client_id", match=MatchValue(value=str(client_id))))
+        if conversation_id is not None:
+            must.append(FieldCondition(key="conversation_id", match=MatchValue(value=str(conversation_id))))
 
         res = self.client.search(
             collection_name=self.collection,

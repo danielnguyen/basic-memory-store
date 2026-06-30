@@ -187,7 +187,7 @@ class Settings(BaseSettings):
     object_store_presign_base_url: str | None = Field(
         default=None,
         alias="OBJECT_STORE_PRESIGN_BASE_URL",
-        description="Optional public base URL used to rewrite presigned URL host/port.",
+        description="Optional client-visible S3 endpoint used when calculating presigned URL signatures.",
     )
     object_store_include_content_type_in_put_signature: bool = Field(
         default=True,
@@ -206,6 +206,12 @@ class Settings(BaseSettings):
         description="Comma-separated allowed artifact MIME types.",
     )
     ingest_max_file_bytes: int = Field(default=262144, alias="INGEST_MAX_FILE_BYTES", ge=1)
+    artifact_text_derivation_max_bytes: int = Field(
+        default=262144,
+        alias="ARTIFACT_TEXT_DERIVATION_MAX_BYTES",
+        ge=1,
+        description="Maximum object bytes read when deriving supported text artifact chunks.",
+    )
     ingest_max_files_per_request: int = Field(default=200, alias="INGEST_MAX_FILES_PER_REQUEST", ge=1, le=5000)
     ingest_allowed_extensions: str = Field(
         default=".py,.md,.txt,.json,.yaml,.yml,.toml,.js,.ts,.tsx,.jsx,.sql,.sh,.env,.ini,.cfg,.html,.css",

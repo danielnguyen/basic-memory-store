@@ -1,6 +1,7 @@
 SHELL := /usr/bin/env bash
 
 DEV_COMPOSE := docker-compose.dev.yml
+ARTIFACT_SMOKE_COMPOSE := docker-compose.artifact-smoke.yml
 TEST_IMAGE := basic-memory-store:test
 TEST_ENV := \
 	-e MEMORY_API_KEY=testkey \
@@ -12,7 +13,7 @@ TEST_ENV := \
 	-e EMBED_MODEL=test-embed \
 	-e OBJECT_STORE_ENABLED=false
 
-.PHONY: test test-image test-postgres provenance-test replay-test raw-retrieval-test raw-retrieval-smoke derivation-replay-test derivation-version-test lifecycle-smoke dev-python-check dev-up dev-down dev-reset dev-bootstrap dev-seed-profiles dev-logs dev-setup dev-test dev-install dev-start dev-start-reload dev-migrate-status dev-migrate-check dev-migrate-adopt
+.PHONY: test test-image test-postgres artifact-storage-smoke provenance-test replay-test raw-retrieval-test raw-retrieval-smoke derivation-replay-test derivation-version-test lifecycle-smoke dev-python-check dev-up dev-down dev-reset dev-bootstrap dev-seed-profiles dev-logs dev-setup dev-test dev-install dev-start dev-start-reload dev-migrate-status dev-migrate-check dev-migrate-adopt
 
 test: test-image
 	@docker run --rm $(TEST_ENV) $(TEST_IMAGE) sh -lc \
@@ -23,6 +24,11 @@ test-image:
 
 test-postgres: test-image
 	@TEST_IMAGE=$(TEST_IMAGE) ./scripts/test_postgres_docker.sh
+
+artifact-storage-smoke:
+	@set -e; \
+	trap 'docker compose -f $(ARTIFACT_SMOKE_COMPOSE) down -v --remove-orphans >/dev/null 2>&1 || true' EXIT; \
+	docker compose -f $(ARTIFACT_SMOKE_COMPOSE) up --build --abort-on-container-exit --exit-code-from smoke smoke
 
 provenance-test: test-image
 	@TEST_IMAGE=$(TEST_IMAGE) ./scripts/test_postgres_docker.sh tests/test_provenance_postgres_integration.py

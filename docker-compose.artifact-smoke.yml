@@ -1,0 +1,102 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: memory_user
+      POSTGRES_PASSWORD: pass
+      POSTGRES_DB: memory_db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memory_user -d memory_db"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    healthcheck:
+      test: ["CMD-SHELL", "grep -Eq ':18BD .* 0A' /proc/net/tcp"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    networks:
+      default:
+        aliases:
+          - minio-internal
+          - minio-client
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+
+  migrate:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PG_DSN: postgresql://memory_user:pass@postgres:5432/memory_db
+    command: ["python", "-m", "tools.schema_migrations", "upgrade"]
+
+  bms:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      qdrant:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      MEMORY_API_KEY: smoke-key
+      PG_DSN: postgresql://memory_user:pass@postgres:5432/memory_db
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: messages
+      LITELLM_BASE_URL: http://127.0.0.1:1
+      LITELLM_API_KEY: smoke
+      CHAT_MODEL: smoke-chat
+      EMBED_MODEL: local-deterministic
+      OBJECT_STORE_ENABLED: "true"
+      OBJECT_STORE_ENDPOINT: http://minio-internal:9000
+      OBJECT_STORE_PRESIGN_BASE_URL: http://minio-client:9000
+      OBJECT_STORE_BUCKET: memory-artifacts
+      OBJECT_STORE_ACCESS_KEY: minioadmin
+      OBJECT_STORE_SECRET_KEY: minioadmin
+      OBJECT_STORE_REGION: us-east-1
+      OBJECT_STORE_INCLUDE_CONTENT_TYPE_IN_PUT_SIGNATURE: "true"
+      ARTIFACT_TEXT_DERIVATION_MAX_BYTES: "262144"
+      RETRIEVAL_ARTIFACT_MAX_SNIPPET_CHARS: "120"
+    healthcheck:
+      test: ["CMD-SHELL", "grep -Eq ':1F40 .* 0A' /proc/net/tcp"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  smoke:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    depends_on:
+      bms:
+        condition: service_healthy
+    environment:
+      BASE: http://bms:8000
+      MEMORY_API_KEY: smoke-key
+      OWNER_ID: smoke-owner
+      CLIENT_ID: smoke-client
+      EXPECT_UPLOAD_HOST: minio-client:9000
+    command: ["python", "-m", "tools.artifact_storage_smoke"]

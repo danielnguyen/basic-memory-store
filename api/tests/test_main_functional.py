@@ -177,16 +177,36 @@ class FakePG:
     async def create_embedding_ref(self, *, ref_type, ref_id, model, qdrant_point_id):
         return {"embedding_id": str(uuid.uuid4())}
 
-    async def get_derived_text_snippets_by_ids(self, ids):
+    async def get_active_derived_text_for_artifact(self, *, artifact_id, derivation_version):
         return [
-            {
-                **self.derived_text[str(i)],
-                "created_at": self.derived_text[str(i)].get("created_at", "2026-01-01 00:00:00+00:00"),
-                "mime": "text/plain",
-            }
-            for i in ids
-            if str(i) in self.derived_text
+            row
+            for row in self.derived_text.values()
+            if row["artifact_id"] == str(artifact_id)
+            and row.get("derivation_params", {}).get("derivation_version") == derivation_version
+            and row.get("derivation_params", {}).get("status", "active") == "active"
         ]
+
+    async def get_derived_text_snippets_by_ids(self, ids):
+        out = []
+        for i in ids:
+            row = self.derived_text.get(str(i))
+            if not row:
+                continue
+            params = row.get("derivation_params", {})
+            artifact = self.artifacts[row["artifact_id"]]
+            out.append(
+                {
+                    **row,
+                    "created_at": row.get("created_at", "2026-01-01 00:00:00+00:00"),
+                    "file_path": params.get("file_path") or artifact.get("file_path") or artifact.get("filename") or "",
+                    "repo_name": params.get("repo_name") or artifact.get("repo_name"),
+                    "mime": artifact.get("mime", "text/plain"),
+                }
+            )
+        return out
+
+    async def get_memory_items_for_source_refs(self, owner_id, source_refs):
+        return {}
 
     async def get_pinned_memories(self, owner_id: str, conversation_id=None, limit=5):
         return []
@@ -332,6 +352,9 @@ def client(monkeypatch):
         embed_model="embed",
         chat_model="chat_local_fast",
         chat_temperature=None,
+        require_request_id=True,
+        enforce_request_id_header_body_match=True,
+        enable_trace_storage=True,
         retrieval_k=5,
         retrieval_artifact_k=3,
         retrieval_artifact_max_snippet_chars=500,
@@ -355,6 +378,7 @@ def client(monkeypatch):
         index_assistant_messages=True,
         min_index_chars=12,
         ingest_max_file_bytes=262144,
+        artifact_text_derivation_max_bytes=262144,
         ingest_max_files_per_request=200,
         ingest_allowed_extensions=".py,.md,.txt,.json",
         ingest_exclude_globs_default=".git/*,node_modules/*",
@@ -543,6 +567,9 @@ def test_artifact_flow_with_object_store_enabled(client, monkeypatch):
         def head_object(self, key: str):
             return types.SimpleNamespace(size=1234, content_type="application/pdf")
 
+        def read_object_bytes(self, key: str, *, max_bytes: int) -> bytes:
+            raise AssertionError("non-text artifacts should not be read for derivation")
+
     monkeypatch.setattr(main_module.settings, "object_store_enabled", True, raising=False)
     monkeypatch.setattr(main_module, "object_store", FakeObjectStore(), raising=True)
 
@@ -572,6 +599,86 @@ def test_artifact_flow_with_object_store_enabled(client, monkeypatch):
     assert r2.json()["download_url"].startswith("http://minio.local/download/")
 
 
+def test_text_artifact_completion_derives_same_artifact_and_is_idempotent(client, monkeypatch):
+    content = b"uploaded artifact alpha beta gamma\n" * 3
+
+    class FakeObjectStore:
+        def create_presigned_put_url(self, key: str, content_type: str, expires_s: int) -> str:
+            return f"http://client-minio/upload/{key}"
+
+        def create_presigned_get_url(self, key: str, expires_s: int) -> str:
+            return f"http://client-minio/download/{key}"
+
+        def head_object(self, key: str):
+            return types.SimpleNamespace(size=len(content), content_type="text/plain")
+
+        def read_object_bytes(self, key: str, *, max_bytes: int) -> bytes:
+            assert max_bytes == main_module.settings.artifact_text_derivation_max_bytes
+            return content
+
+    monkeypatch.setattr(main_module.settings, "object_store_enabled", True, raising=False)
+    monkeypatch.setattr(main_module, "object_store", FakeObjectStore(), raising=True)
+
+    r1 = client.post(
+        "/v1/artifacts/init",
+        headers=auth_headers(),
+        json={
+            "owner_id": "daniel",
+            "client_id": "vscode",
+            "filename": "notes.txt",
+            "mime": "text/plain",
+            "size": len(content),
+            "source_surface": "vscode",
+        },
+    )
+    assert r1.status_code == 200
+    aid = r1.json()["artifact_id"]
+
+    r2 = client.post(
+        "/v1/artifacts/complete",
+        headers=auth_headers(),
+        json={"artifact_id": aid, "owner_id": "daniel", "status": "completed"},
+    )
+    assert r2.status_code == 200
+    assert len(main_module.pg.derived_text) == 1
+    derived = next(iter(main_module.pg.derived_text.values()))
+    assert derived["artifact_id"] == aid
+    assert derived["derivation_params"]["source_refs"] == [
+        {"ref_type": "artifact", "ref_id": aid, "support_kind": "direct"}
+    ]
+    assert main_module.qdrant.derived_upserts[0]["artifact_id"] == uuid.UUID(aid)
+
+    r3 = client.post(
+        "/v1/artifacts/complete",
+        headers=auth_headers(),
+        json={"artifact_id": aid, "owner_id": "daniel", "status": "completed"},
+    )
+    assert r3.status_code == 200
+    assert len(main_module.pg.derived_text) == 1
+
+
+def test_artifact_complete_rejects_owner_mismatch(client):
+    r1 = client.post(
+        "/v1/artifacts/init",
+        headers=auth_headers(),
+        json={
+            "owner_id": "daniel",
+            "filename": "notes.txt",
+            "mime": "text/plain",
+            "size": 12,
+        },
+    )
+    assert r1.status_code == 200
+
+    r2 = client.post(
+        "/v1/artifacts/complete",
+        headers=auth_headers(),
+        json={"artifact_id": r1.json()["artifact_id"], "owner_id": "other", "status": "completed"},
+    )
+
+    assert r2.status_code == 404
+
+
 def test_artifact_key_sanitization_helper():
     assert main_module._sanitize_object_key_component("  weird /\\\\  name?.pdf  ") == "weird ___ name_.pdf"
     assert main_module._sanitize_object_key_component("   ") == "artifact"
@@ -598,6 +705,98 @@ def test_file_ingestion_creates_artifacts_and_chunks(client, tmp_path):
     assert body["chunks_created"] >= 1
     assert body["artifacts_created"] == 1
     assert main_module.qdrant.derived_upserts[0]["file_path"] == "module.py"
+
+
+def test_v2_retrieval_returns_same_uploaded_artifact_source_metadata(client, monkeypatch):
+    convo = uuid.uuid4()
+    main_module.pg.conversations.add(convo)
+    artifact_id = uuid.uuid4()
+    content = "uploaded artifact bounded snippet alpha beta gamma"
+
+    artifact = {
+        "artifact_id": str(artifact_id),
+        "owner_id": "daniel",
+        "client_id": "smoke",
+        "conversation_id": str(convo),
+        "filename": "notes.txt",
+        "mime": "text/plain",
+        "size": len(content),
+        "object_uri": "artifacts/daniel/notes.txt",
+        "source_surface": "vscode",
+        "status": "completed",
+        "sha256": None,
+        "created_at": "2026-01-01 00:00:00+00:00",
+        "completed_at": "2026-01-01 00:00:10+00:00",
+        "source_kind": None,
+        "repo_name": None,
+        "repo_ref": None,
+        "file_path": "notes.txt",
+        "ingestion_id": None,
+    }
+    main_module.pg.artifacts[str(artifact_id)] = artifact
+
+    async def fake_recent(conversation_id, limit=10):
+        return []
+
+    monkeypatch.setattr(main_module.pg, "get_recent_message_items", fake_recent, raising=True)
+    monkeypatch.setattr(main_module.settings, "retrieval_artifact_max_snippet_chars", 100, raising=False)
+    import anyio
+
+    async def derive():
+        await main_module.derive_text_chunks_for_artifact(
+            pg=main_module.pg,
+            qdrant=main_module.qdrant,
+            settings=main_module.settings,
+            artifact=artifact,
+            text=content,
+            derivation_version=main_module.TEXT_ARTIFACT_DERIVATION_VERSION,
+            file_path="notes.txt",
+        )
+
+    anyio.run(derive)
+    derived_id = next(iter(main_module.pg.derived_text))
+
+    class ArtifactHit:
+        def __init__(self):
+            self.derived_text_id = derived_id
+            self.artifact_id = str(artifact_id)
+            self.file_path = "notes.txt"
+            self.repo_name = None
+            self.score = 0.92
+
+    async def fake_artifact_search(**kwargs):
+        assert kwargs["owner_id"] == "daniel"
+        assert kwargs["conversation_id"] == convo
+        return [ArtifactHit()]
+
+    monkeypatch.setattr(main_module.qdrant, "search_artifact_chunks", fake_artifact_search, raising=True)
+
+    r = client.post(
+        f"/v2/conversations/{convo}/retrieve",
+        headers={**auth_headers(), "X-Request-ID": "rid-artifact-v2"},
+        json={
+            "request_id": "rid-artifact-v2",
+            "owner_id": "daniel",
+            "query": "alpha",
+            "include_artifacts": True,
+            "retrieval": {"k": 3, "min_score": 0.0, "scope": "conversation"},
+        },
+    )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["request_id"] == "rid-artifact-v2"
+    assert body["conversation_id"] == str(convo)
+    refs = body["bundle"]["artifact_refs"]
+    assert len(refs) == 1
+    ref = refs[0]
+    assert ref["artifact_id"] == str(artifact_id)
+    assert "uploaded artifact bounded snippet" in ref["snippet"]
+    assert ref["source_ref"] == {"ref_type": "derived_text", "ref_id": derived_id}
+    assert ref["provenance"]["source_refs"] == [
+        {"ref_type": "artifact", "ref_id": str(artifact_id), "support_kind": "direct"}
+    ]
+    assert ref["source_availability"] == "available"
 
 
 def test_tiered_retrieve_endpoint(client, monkeypatch):

@@ -19,7 +19,12 @@ from storage.postgres import PostgresStore
 from storage.qdrant import QdrantStore, RetrievalHit as QdrantHit
 from storage.object_store import ObjectStoreClient
 from prompts.context import assemble_messages, build_artifact_context_block, build_context_block
-from services.ingestion import ingest_files
+from services.ingestion import (
+    TEXT_ARTIFACT_DERIVATION_VERSION,
+    derive_text_chunks_for_artifact,
+    ingest_files,
+    is_supported_text_artifact_mime,
+)
 from services.retrieval import build_retrieval_response_payload, doctrine_diagnostics_for_bundle
 from services.proactive import evaluate_event as evaluate_initiative_event
 from services.memory_items import normalize_scores, normalize_source_refs, shape_memory_event, shape_memory_item, source_ref_hash
@@ -838,6 +843,8 @@ async def complete_artifact(body: ArtifactCompleteRequest):
     existing = await pg.get_artifact(artifact_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="artifact_id not found")
+    if body.owner_id is not None and existing.get("owner_id") != body.owner_id:
+        raise HTTPException(status_code=404, detail="artifact_id not found")
 
     if body.status == "completed" and settings.object_store_enabled:
         meta = object_store.head_object(existing["object_uri"])
@@ -853,6 +860,33 @@ async def complete_artifact(body: ArtifactCompleteRequest):
     )
     if row is None:
         raise HTTPException(status_code=404, detail="artifact_id not found")
+
+    if (
+        body.status == "completed"
+        and settings.object_store_enabled
+        and is_supported_text_artifact_mime(row.get("mime"))
+    ):
+        try:
+            raw = object_store.read_object_bytes(
+                row["object_uri"],
+                max_bytes=int(getattr(settings, "artifact_text_derivation_max_bytes", settings.ingest_max_file_bytes)),
+            )
+            text = raw.decode("utf-8")
+            await derive_text_chunks_for_artifact(
+                pg=pg,
+                qdrant=qdrant,
+                settings=settings,
+                artifact=row,
+                text=text,
+                derivation_version=TEXT_ARTIFACT_DERIVATION_VERSION,
+                file_path=row.get("file_path") or row.get("filename"),
+                repo_name=row.get("repo_name"),
+            )
+        except UnicodeDecodeError:
+            raise HTTPException(status_code=422, detail="artifact text derivation requires UTF-8 content")
+        except Exception:
+            logging.exception("artifact text derivation failed", extra={"artifact_id": row["artifact_id"]})
+            raise HTTPException(status_code=503, detail="artifact text derivation failed")
 
     download_url = build_artifact_transfer_url("download", row["artifact_id"])
     if settings.object_store_enabled:
@@ -1331,6 +1365,7 @@ async def _run_chat(
         k=artifact_k,
         min_score=min_score,
         client_id=client_id if opts.scope == "client" else None,
+        conversation_id=cid if opts.scope == "conversation" else None,
     ) if artifact_k > 0 else []
     artifact_ids_for_prompt = _safe_uuid_ids(
         [hit.derived_text_id for hit in artifact_hits],
