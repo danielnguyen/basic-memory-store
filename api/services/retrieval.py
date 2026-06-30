@@ -663,6 +663,7 @@ async def build_retrieval_bundle(
                 k=artifact_k,
                 min_score=opts.min_score,
                 client_id=(client_id if opts.scope == "client" else None),
+                conversation_id=(conversation_id if opts.scope == "conversation" else None),
             )
         except Exception:
             logging.warning("Artifact retrieval unavailable; continuing without artifact snippets")

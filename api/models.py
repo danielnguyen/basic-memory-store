@@ -139,6 +139,7 @@ class ArtifactInitResponse(BaseModel):
 
 class ArtifactCompleteRequest(BaseModel):
     artifact_id: str
+    owner_id: Optional[str] = None
     status: Literal["completed", "failed"] = "completed"
     sha256: Optional[str] = None
 

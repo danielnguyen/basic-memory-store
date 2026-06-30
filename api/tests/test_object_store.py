@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import logging
-
 import pytest
+from io import BytesIO
 
 botocore_exceptions = pytest.importorskip("botocore.exceptions")
 ClientError = botocore_exceptions.ClientError
@@ -21,10 +20,14 @@ def _client_error(code: str, status_code: int = 400) -> ClientError:
 
 
 class FakeS3:
-    def __init__(self):
+    def __init__(self, base_url: str = "http://minio:9000"):
+        self.base_url = base_url.rstrip("/")
         self.created = False
         self.raise_head_bucket = None
         self.raise_head_object = None
+        self.raise_get_object = None
+        self.object_bytes = b"hello"
+        self.presign_calls = []
 
     def head_bucket(self, Bucket: str):
         if self.raise_head_bucket:
@@ -40,8 +43,14 @@ class FakeS3:
             raise self.raise_head_object
         return {"ContentLength": 10, "ContentType": "text/plain"}
 
+    def get_object(self, Bucket: str, Key: str, Range: str):
+        if self.raise_get_object:
+            raise self.raise_get_object
+        return {"Body": BytesIO(self.object_bytes)}
+
     def generate_presigned_url(self, ClientMethod: str, Params: dict, ExpiresIn: int) -> str:
-        return "http://minio:9000/memory-artifacts/path/file.txt?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+        self.presign_calls.append({"method": ClientMethod, "params": Params, "expires": ExpiresIn})
+        return f"{self.base_url}/memory-artifacts/path/file.txt?X-Amz-Algorithm=AWS4-HMAC-SHA256"
 
 
 def test_ensure_bucket_creates_only_when_missing():
@@ -85,25 +94,74 @@ def test_head_object_raises_on_non_missing_error():
         client.head_object("denied.txt")
 
 
-def test_rewrite_presigned_url_preserves_query_and_base_path():
+def test_read_object_bytes_is_bounded():
+    fake = FakeS3()
+    fake.object_bytes = b"abcdef"
+    client = ObjectStoreClient("http://minio:9000", "memory-artifacts", "a", "b")
+    client._client = fake
+
+    with pytest.raises(RuntimeError, match="exceeds configured"):
+        client.read_object_bytes("large.txt", max_bytes=5)
+
+
+def test_read_object_bytes_missing_is_bounded():
+    fake = FakeS3()
+    fake.raise_get_object = _client_error("NoSuchKey", 404)
+    client = ObjectStoreClient("http://minio:9000", "memory-artifacts", "a", "b")
+    client._client = fake
+
+    with pytest.raises(RuntimeError, match="object is missing"):
+        client.read_object_bytes("missing.txt", max_bytes=5)
+
+
+def test_presign_uses_client_visible_endpoint_without_rewriting(monkeypatch):
+    ops = FakeS3()
+    presign = FakeS3("http://client-minio:9000")
+    client = ObjectStoreClient(
+        "http://minio:9000",
+        "memory-artifacts",
+        "a",
+        "b",
+        presign_base_url="http://client-minio:9000",
+    )
+    built = []
+
+    def fake_build(endpoint):
+        built.append(endpoint)
+        return presign if endpoint == "http://client-minio:9000" else ops
+
+    monkeypatch.setattr(client, "_build_client", fake_build)
+
+    url = client.create_presigned_get_url("path/file.txt", expires_s=900)
+
+    assert built == ["http://client-minio:9000"]
+    assert url.startswith("http://client-minio:9000/memory-artifacts/path/file.txt?")
+    assert "X-Amz-Algorithm=AWS4-HMAC-SHA256" in url
+
+
+def test_presign_uses_operations_endpoint_when_no_separate_endpoint(monkeypatch):
     fake = FakeS3()
     client = ObjectStoreClient(
         "http://minio:9000",
         "memory-artifacts",
         "a",
         "b",
-        presign_base_url="https://files.example.com/storage",
     )
-    client._client = fake
+    built = []
+
+    def fake_build(endpoint):
+        built.append(endpoint)
+        return fake
+
+    monkeypatch.setattr(client, "_build_client", fake_build)
 
     url = client.create_presigned_get_url("path/file.txt", expires_s=900)
 
-    assert url.startswith("https://files.example.com/storage/memory-artifacts/path/file.txt?")
-    assert "X-Amz-Algorithm=AWS4-HMAC-SHA256" in url
+    assert built == ["http://minio:9000"]
+    assert url.startswith("http://minio:9000/")
 
 
-def test_invalid_presign_base_url_logs_warning_and_disables_rewrite(caplog):
-    fake = FakeS3()
+def test_invalid_presign_endpoint_fails_boundedly():
     client = ObjectStoreClient(
         "http://minio:9000",
         "memory-artifacts",
@@ -111,10 +169,32 @@ def test_invalid_presign_base_url_logs_warning_and_disables_rewrite(caplog):
         "b",
         presign_base_url="not-a-url",
     )
-    client._client = fake
 
-    with caplog.at_level(logging.WARNING):
-        url = client.create_presigned_get_url("path/file.txt", expires_s=900)
+    with pytest.raises(RuntimeError, match="Invalid object store presign endpoint configuration"):
+        client.create_presigned_get_url("path/file.txt", expires_s=900)
 
-    assert url.startswith("http://minio:9000/")
-    assert "rewrite disabled" in caplog.text
+
+def test_presigned_put_includes_exact_content_type_when_enabled():
+    fake = FakeS3()
+    client = ObjectStoreClient("http://minio:9000", "memory-artifacts", "a", "b")
+    client._presign_client = fake
+
+    client.create_presigned_put_url("path/file.txt", content_type="text/plain", expires_s=900)
+
+    assert fake.presign_calls[0]["params"]["ContentType"] == "text/plain"
+
+
+def test_presigned_put_omits_content_type_when_disabled():
+    fake = FakeS3()
+    client = ObjectStoreClient(
+        "http://minio:9000",
+        "memory-artifacts",
+        "a",
+        "b",
+        include_content_type_in_put_signature=False,
+    )
+    client._presign_client = fake
+
+    client.create_presigned_put_url("path/file.txt", content_type="text/plain", expires_s=900)
+
+    assert "ContentType" not in fake.presign_calls[0]["params"]

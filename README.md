@@ -210,12 +210,15 @@ ARTIFACTS_OBJECT_PREFIX=artifacts
 ARTIFACTS_PRESIGN_TTL_S=900
 OBJECT_STORE_ENABLED=true
 OBJECT_STORE_ENDPOINT=http://127.0.0.1:16335
+OBJECT_STORE_PRESIGN_BASE_URL=http://127.0.0.1:16335
 OBJECT_STORE_BUCKET=memory-artifacts
 OBJECT_STORE_ACCESS_KEY=minioadmin
 OBJECT_STORE_SECRET_KEY=minioadmin
 OBJECT_STORE_REGION=us-east-1
+OBJECT_STORE_INCLUDE_CONTENT_TYPE_IN_PUT_SIGNATURE=true
 RETRIEVAL_ARTIFACT_K=3
 RETRIEVAL_ARTIFACT_MAX_SNIPPET_CHARS=500
+ARTIFACT_TEXT_DERIVATION_MAX_BYTES=262144
 INGEST_MAX_FILE_BYTES=262144
 INGEST_MAX_FILES_PER_REQUEST=200
 INGEST_ALLOWED_EXTENSIONS=.py,.md,.txt,.json,.yaml,.yml,.toml,.js,.ts,.tsx,.jsx,.sql,.sh,.env,.ini,.cfg,.html,.css
@@ -309,6 +312,10 @@ MEMORY_API_KEY=change_me BASE=http://127.0.0.1:4321 ./scripts/smoke-test.sh
 - `GET /metrics` exposes Prometheus-format counters.
 - `GET /v1/traces/{request_id}` exposes stored request traces.
 - When `OBJECT_STORE_ENABLED=true`, artifact upload and download URLs are real signed S3-compatible URLs.
+- `OBJECT_STORE_ENDPOINT` is the server-side/internal S3-compatible endpoint used by BMS for bucket, head, and object-read operations.
+- `OBJECT_STORE_PRESIGN_BASE_URL` is the client-visible S3-compatible endpoint used while calculating presigned upload and download signatures. If it is set, clients must send the request to that same scheme, host, port, path, query, method, and signed headers. Proxies in front of the object store must preserve those request fields; rewriting a signed URL after it is generated invalidates the signature.
+- When `OBJECT_STORE_INCLUDE_CONTENT_TYPE_IN_PUT_SIGNATURE=true`, clients must send the exact `Content-Type` used during artifact initialization on the presigned PUT request.
+- Completed supported UTF-8 text artifacts at or below `ARTIFACT_TEXT_DERIVATION_MAX_BYTES` are chunked and indexed before completion is reported. Larger text artifacts and non-text artifacts can still complete as stored objects without text derivation. If required text derivation fails, completion returns a bounded retryable error and the artifact is not marked completed.
 - When object store support is disabled, artifact URLs remain placeholder wiring values.
 
 ## Backups

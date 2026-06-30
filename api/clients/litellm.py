@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import math
 from typing import Any, Optional, Sequence
 
 import httpx
@@ -40,6 +42,18 @@ class LiteLLMClient:
         """
         if not texts:
             return []
+        if model == "local-deterministic":
+            vectors: list[list[float]] = []
+            for text in texts:
+                vec = [0.0] * 16
+                tokens = [tok for tok in text.lower().replace("\n", " ").split(" ") if tok]
+                for token in tokens or [text]:
+                    digest = hashlib.sha256(token.encode("utf-8")).digest()
+                    idx = digest[0] % len(vec)
+                    vec[idx] += 1.0
+                norm = math.sqrt(sum(v * v for v in vec)) or 1.0
+                vectors.append([v / norm for v in vec])
+            return vectors
 
         url = self._url("/v1/embeddings")
         payload: dict[str, Any] = {"model": model, "input": texts}

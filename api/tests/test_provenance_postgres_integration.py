@@ -15,6 +15,7 @@ from storage.postgres import PostgresStore
 class FakeQdrant:
     def __init__(self):
         self.derived_text_ids: list[str] = []
+        self.derived_points: dict[str, dict] = {}
         self.vector_unavailable = False
         self.artifact_unavailable = False
         self.search_calls: list[dict] = []
@@ -23,7 +24,14 @@ class FakeQdrant:
         return True
 
     async def upsert_derived_text_vector(self, *, derived_text_id, **kwargs):
-        self.derived_text_ids.append(str(derived_text_id))
+        point_id = str(kwargs.get("qdrant_point_id") or derived_text_id)
+        self.derived_points[point_id] = {"derived_text_id": str(derived_text_id), **kwargs}
+        if kwargs.get("derivation_status", "active") == "active":
+            self.derived_text_ids = [
+                point["derived_text_id"]
+                for point in self.derived_points.values()
+                if point.get("derivation_status", "active") == "active"
+            ]
 
     async def upsert_message_vector(self, **kwargs):
         return None
@@ -37,7 +45,26 @@ class FakeQdrant:
     async def search_artifact_chunks(self, **kwargs):
         if self.artifact_unavailable:
             raise RuntimeError("artifact unavailable")
+        active_points = [
+            point
+            for point in self.derived_points.values()
+            if point.get("derivation_status", "active") == "active"
+        ]
+        legacy_ids = [
+            derived_id
+            for derived_id in self.derived_text_ids
+            if derived_id not in {point["derived_text_id"] for point in active_points}
+        ]
         return [
+            types.SimpleNamespace(
+                derived_text_id=point["derived_text_id"],
+                artifact_id="unused",
+                file_path=point.get("file_path") or "proof.txt",
+                repo_name=point.get("repo_name"),
+                score=0.91,
+            )
+            for point in active_points
+        ] + [
             types.SimpleNamespace(
                 derived_text_id=derived_id,
                 artifact_id="unused",
@@ -45,7 +72,7 @@ class FakeQdrant:
                 repo_name="fixture",
                 score=0.91,
             )
-            for derived_id in self.derived_text_ids
+            for derived_id in legacy_ids
         ]
 
 
