@@ -1598,7 +1598,8 @@ class PostgresStore:
                a.owner_id, a.file_path, a.repo_name, a.mime
         FROM derived_text dt
         JOIN artifacts a ON a.id = dt.artifact_id
-        WHERE dt.id = ANY(%s);
+        WHERE dt.id = ANY(%s)
+          AND COALESCE(dt.derivation_params->>'status', 'active') = 'active';
         """
         async with self.pool.connection() as conn:
             async with conn.cursor() as cur:
@@ -1632,6 +1633,36 @@ class PostgresStore:
         WHERE artifact_id = %s
           AND derivation_params->>'derivation_version' = %s
           AND COALESCE(derivation_params->>'status', 'active') = 'active'
+        ORDER BY (derivation_params->>'chunk_index')::int NULLS LAST, created_at ASC;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (artifact_id, derivation_version))
+                rows = await cur.fetchall()
+        return [
+            {
+                "derived_text_id": str(row[0]),
+                "artifact_id": str(row[1]),
+                "kind": row[2],
+                "language": row[3],
+                "text": row[4],
+                "derivation_params": row[5] or {},
+                "created_at": str(row[6]),
+            }
+            for row in rows
+        ]
+
+    async def get_derived_text_for_artifact_version(
+        self,
+        *,
+        artifact_id: UUID,
+        derivation_version: str,
+    ) -> list[dict[str, Any]]:
+        q = """
+        SELECT id, artifact_id, kind, language, text, derivation_params, created_at
+        FROM derived_text
+        WHERE artifact_id = %s
+          AND derivation_params->>'derivation_version' = %s
         ORDER BY (derivation_params->>'chunk_index')::int NULLS LAST, created_at ASC;
         """
         async with self.pool.connection() as conn:

@@ -13,7 +13,7 @@ TEST_ENV := \
 	-e EMBED_MODEL=test-embed \
 	-e OBJECT_STORE_ENABLED=false
 
-.PHONY: test test-image test-postgres artifact-storage-smoke provenance-test replay-test raw-retrieval-test raw-retrieval-smoke derivation-replay-test derivation-version-test lifecycle-smoke dev-python-check dev-up dev-down dev-reset dev-bootstrap dev-seed-profiles dev-logs dev-setup dev-test dev-install dev-start dev-start-reload dev-migrate-status dev-migrate-check dev-migrate-adopt
+.PHONY: test test-image test-postgres artifact-storage-test artifact-storage-smoke provenance-test replay-test raw-retrieval-test raw-retrieval-smoke derivation-replay-test derivation-version-test lifecycle-smoke dev-python-check dev-up dev-down dev-reset dev-bootstrap dev-seed-profiles dev-logs dev-setup dev-test dev-install dev-start dev-start-reload dev-migrate-status dev-migrate-check dev-migrate-adopt
 
 test: test-image
 	@docker run --rm $(TEST_ENV) $(TEST_IMAGE) sh -lc \
@@ -24,6 +24,21 @@ test-image:
 
 test-postgres: test-image
 	@TEST_IMAGE=$(TEST_IMAGE) ./scripts/test_postgres_docker.sh
+
+artifact-storage-test: test-image
+	@docker run --rm $(TEST_ENV) $(TEST_IMAGE) python -m pytest -q \
+		tests/test_object_store.py \
+		tests/test_qdrant_artifact_scope.py \
+		tests/test_main_functional.py::test_artifact_flow_with_object_store_enabled \
+		tests/test_main_functional.py::test_text_artifact_completion_derives_same_artifact_and_is_idempotent \
+		tests/test_main_functional.py::test_text_artifact_retry_repairs_qdrant_failure_after_row_insert \
+		tests/test_main_functional.py::test_text_artifact_retry_repairs_partial_multi_chunk_and_retrieves \
+		tests/test_main_functional.py::test_text_artifact_invalid_utf8_does_not_complete \
+		tests/test_main_functional.py::test_oversized_text_artifact_completes_without_derivation \
+		tests/test_main_functional.py::test_artifact_object_store_public_errors_are_bounded \
+		tests/test_main_functional.py::test_artifact_complete_rejects_owner_mismatch \
+		tests/test_main_functional.py::test_file_ingestion_creates_artifacts_and_chunks \
+		tests/test_main_functional.py::test_v2_retrieval_returns_same_uploaded_artifact_source_metadata
 
 artifact-storage-smoke:
 	@set -e; \

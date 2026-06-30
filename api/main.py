@@ -815,8 +815,8 @@ async def init_artifact(body: ArtifactInitRequest):
                 expires_s=settings.artifacts_presign_ttl_s,
             )
         except Exception as e:
-            logging.exception("object store init failed", extra={"artifact_id": row["artifact_id"]})
-            raise HTTPException(status_code=503, detail=f"artifact upload unavailable: {e}")
+            logging.warning("object store init failed", extra={"artifact_id": row["artifact_id"], "error_class": type(e).__name__})
+            raise HTTPException(status_code=503, detail="artifact upload unavailable")
 
     return ArtifactInitResponse(
         artifact_id=row["artifact_id"],
@@ -846,12 +846,44 @@ async def complete_artifact(body: ArtifactCompleteRequest):
     if body.owner_id is not None and existing.get("owner_id") != body.owner_id:
         raise HTTPException(status_code=404, detail="artifact_id not found")
 
+    should_derive_text = False
     if body.status == "completed" and settings.object_store_enabled:
-        meta = object_store.head_object(existing["object_uri"])
+        try:
+            meta = object_store.head_object(existing["object_uri"])
+        except Exception as e:
+            logging.warning("object store artifact validation failed", extra={"artifact_id": existing["artifact_id"], "error_class": type(e).__name__})
+            raise HTTPException(status_code=503, detail="artifact object validation unavailable")
         if meta is None:
             raise HTTPException(status_code=409, detail="artifact object is missing in object store")
         if int(meta.size) != int(existing["size"]):
             raise HTTPException(status_code=409, detail="artifact size mismatch with object store")
+        should_derive_text = (
+            is_supported_text_artifact_mime(existing.get("mime"))
+            and int(existing["size"]) <= int(getattr(settings, "artifact_text_derivation_max_bytes", settings.ingest_max_file_bytes))
+        )
+
+    if should_derive_text:
+        try:
+            raw = object_store.read_object_bytes(
+                existing["object_uri"],
+                max_bytes=int(getattr(settings, "artifact_text_derivation_max_bytes", settings.ingest_max_file_bytes)),
+            )
+            text = raw.decode("utf-8")
+            await derive_text_chunks_for_artifact(
+                pg=pg,
+                qdrant=qdrant,
+                settings=settings,
+                artifact=existing,
+                text=text,
+                derivation_version=TEXT_ARTIFACT_DERIVATION_VERSION,
+                file_path=existing.get("file_path") or existing.get("filename"),
+                repo_name=existing.get("repo_name"),
+            )
+        except UnicodeDecodeError:
+            raise HTTPException(status_code=422, detail="artifact text derivation requires UTF-8 content")
+        except Exception as e:
+            logging.warning("artifact text derivation failed", extra={"artifact_id": existing["artifact_id"], "error_class": type(e).__name__})
+            raise HTTPException(status_code=503, detail="artifact text derivation failed")
 
     row = await pg.complete_artifact(
         artifact_id=artifact_id,
@@ -861,33 +893,6 @@ async def complete_artifact(body: ArtifactCompleteRequest):
     if row is None:
         raise HTTPException(status_code=404, detail="artifact_id not found")
 
-    if (
-        body.status == "completed"
-        and settings.object_store_enabled
-        and is_supported_text_artifact_mime(row.get("mime"))
-    ):
-        try:
-            raw = object_store.read_object_bytes(
-                row["object_uri"],
-                max_bytes=int(getattr(settings, "artifact_text_derivation_max_bytes", settings.ingest_max_file_bytes)),
-            )
-            text = raw.decode("utf-8")
-            await derive_text_chunks_for_artifact(
-                pg=pg,
-                qdrant=qdrant,
-                settings=settings,
-                artifact=row,
-                text=text,
-                derivation_version=TEXT_ARTIFACT_DERIVATION_VERSION,
-                file_path=row.get("file_path") or row.get("filename"),
-                repo_name=row.get("repo_name"),
-            )
-        except UnicodeDecodeError:
-            raise HTTPException(status_code=422, detail="artifact text derivation requires UTF-8 content")
-        except Exception:
-            logging.exception("artifact text derivation failed", extra={"artifact_id": row["artifact_id"]})
-            raise HTTPException(status_code=503, detail="artifact text derivation failed")
-
     download_url = build_artifact_transfer_url("download", row["artifact_id"])
     if settings.object_store_enabled:
         try:
@@ -896,8 +901,8 @@ async def complete_artifact(body: ArtifactCompleteRequest):
                 expires_s=settings.artifacts_presign_ttl_s,
             )
         except Exception as e:
-            logging.exception("object store download URL generation failed", extra={"artifact_id": row["artifact_id"]})
-            raise HTTPException(status_code=503, detail=f"artifact download unavailable: {e}")
+            logging.warning("object store download URL generation failed", extra={"artifact_id": row["artifact_id"], "error_class": type(e).__name__})
+            raise HTTPException(status_code=503, detail="artifact download unavailable")
 
     return ArtifactResponse(
         **row,
@@ -931,8 +936,8 @@ async def get_artifact(artifact_id: str):
                 expires_s=settings.artifacts_presign_ttl_s,
             )
         except Exception as e:
-            logging.exception("object store download URL generation failed", extra={"artifact_id": row["artifact_id"]})
-            raise HTTPException(status_code=503, detail=f"artifact download unavailable: {e}")
+            logging.warning("object store download URL generation failed", extra={"artifact_id": row["artifact_id"], "error_class": type(e).__name__})
+            raise HTTPException(status_code=503, detail="artifact download unavailable")
 
     return ArtifactResponse(
         **row,

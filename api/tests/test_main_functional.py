@@ -1,11 +1,13 @@
 import uuid
 import types
 from pathlib import Path
+import anyio
 import pytest
 from fastapi.testclient import TestClient
 
 import main as main_module
 from models import OrchestrateChatRequest
+from services.chunking import chunk_text
 
 
 # -------------------------
@@ -186,11 +188,28 @@ class FakePG:
             and row.get("derivation_params", {}).get("status", "active") == "active"
         ]
 
+    async def get_derived_text_for_artifact_version(self, *, artifact_id, derivation_version):
+        return [
+            row
+            for row in self.derived_text.values()
+            if row["artifact_id"] == str(artifact_id)
+            and row.get("derivation_params", {}).get("derivation_version") == derivation_version
+        ]
+
+    async def update_derived_text_params(self, *, derived_text_id, owner_id, derivation_params):
+        row = self.derived_text.get(str(derived_text_id))
+        if row is None or row.get("owner_id") != owner_id:
+            return None
+        row["derivation_params"] = derivation_params or {}
+        return row
+
     async def get_derived_text_snippets_by_ids(self, ids):
         out = []
         for i in ids:
             row = self.derived_text.get(str(i))
             if not row:
+                continue
+            if row.get("derivation_params", {}).get("status", "active") != "active":
                 continue
             params = row.get("derivation_params", {})
             artifact = self.artifacts[row["artifact_id"]]
@@ -296,6 +315,7 @@ class FakeQdrant:
     def __init__(self):
         self.upserts = []  # record calls
         self.derived_upserts = []
+        self.fail_after_derived_upserts: int | None = None
 
     def ping(self): return True
 
@@ -309,6 +329,8 @@ class FakeQdrant:
         return []
 
     async def upsert_derived_text_vector(self, **kwargs):
+        if self.fail_after_derived_upserts is not None and len(self.derived_upserts) >= self.fail_after_derived_upserts:
+            raise RuntimeError("injected qdrant failure")
         self.derived_upserts.append(kwargs)
         return True
 
@@ -410,6 +432,23 @@ def auth_headers():
 
 def _system_prompt_text() -> str:
     return "\n".join(item["content"] for item in main_module.litellm.calls[-1]["messages"] if item["role"] == "system")
+
+
+def _init_text_artifact(client, *, content: bytes, owner_id: str = "daniel", filename: str = "notes.txt") -> str:
+    r = client.post(
+        "/v1/artifacts/init",
+        headers=auth_headers(),
+        json={
+            "owner_id": owner_id,
+            "client_id": "vscode",
+            "filename": filename,
+            "mime": "text/plain",
+            "size": len(content),
+            "source_surface": "vscode",
+        },
+    )
+    assert r.status_code == 200
+    return r.json()["artifact_id"]
 
 
 # -------------------------
@@ -655,6 +694,294 @@ def test_text_artifact_completion_derives_same_artifact_and_is_idempotent(client
     )
     assert r3.status_code == 200
     assert len(main_module.pg.derived_text) == 1
+
+
+def test_text_artifact_retry_repairs_qdrant_failure_after_row_insert(client, monkeypatch):
+    content = b"retry repair alpha beta gamma"
+
+    class FakeObjectStore:
+        def create_presigned_put_url(self, key: str, content_type: str, expires_s: int) -> str:
+            return f"http://client-minio/upload/{key}"
+
+        def create_presigned_get_url(self, key: str, expires_s: int) -> str:
+            return f"http://client-minio/download/{key}"
+
+        def head_object(self, key: str):
+            return types.SimpleNamespace(size=len(content), content_type="text/plain")
+
+        def read_object_bytes(self, key: str, *, max_bytes: int) -> bytes:
+            return content
+
+    monkeypatch.setattr(main_module.settings, "object_store_enabled", True, raising=False)
+    monkeypatch.setattr(main_module, "object_store", FakeObjectStore(), raising=True)
+    aid = _init_text_artifact(client, content=content)
+
+    main_module.qdrant.fail_after_derived_upserts = 0
+    failed = client.post(
+        "/v1/artifacts/complete",
+        headers=auth_headers(),
+        json={"artifact_id": aid, "owner_id": "daniel", "status": "completed"},
+    )
+    assert failed.status_code == 503
+    assert main_module.pg.artifacts[aid]["status"] == "pending"
+    assert [row["derivation_params"]["status"] for row in main_module.pg.derived_text.values()] == ["building"]
+
+    main_module.qdrant.fail_after_derived_upserts = None
+    repaired = client.post(
+        "/v1/artifacts/complete",
+        headers=auth_headers(),
+        json={"artifact_id": aid, "owner_id": "daniel", "status": "completed"},
+    )
+    assert repaired.status_code == 200
+    rows = list(main_module.pg.derived_text.values())
+    assert [row["derivation_params"]["status"] for row in rows].count("active") == 1
+    assert [row["derivation_params"]["status"] for row in rows].count("failed") == 1
+    active = [row for row in rows if row["derivation_params"]["status"] == "active"][0]
+    assert active["derivation_params"]["indexing_status"] == "indexed"
+    assert main_module.pg.artifacts[aid]["status"] == "completed"
+
+
+def test_text_artifact_retry_repairs_partial_multi_chunk_and_retrieves(client, monkeypatch):
+    content = b"alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu"
+    expected_chunks = chunk_text(content.decode("utf-8"), chunk_size=20, chunk_overlap=0)
+
+    class FakeObjectStore:
+        def create_presigned_put_url(self, key: str, content_type: str, expires_s: int) -> str:
+            return f"http://client-minio/upload/{key}"
+
+        def create_presigned_get_url(self, key: str, expires_s: int) -> str:
+            return f"http://client-minio/download/{key}"
+
+        def head_object(self, key: str):
+            return types.SimpleNamespace(size=len(content), content_type="text/plain")
+
+        def read_object_bytes(self, key: str, *, max_bytes: int) -> bytes:
+            return content
+
+    monkeypatch.setattr(main_module.settings, "object_store_enabled", True, raising=False)
+    monkeypatch.setattr(main_module.settings, "ingest_chunk_size_chars", 20, raising=False)
+    monkeypatch.setattr(main_module.settings, "ingest_chunk_overlap_chars", 0, raising=False)
+    monkeypatch.setattr(main_module, "object_store", FakeObjectStore(), raising=True)
+    convo = uuid.uuid4()
+    main_module.pg.conversations.add(convo)
+
+    r = client.post(
+        "/v1/artifacts/init",
+        headers=auth_headers(),
+        json={
+            "owner_id": "daniel",
+            "client_id": "smoke",
+            "conversation_id": str(convo),
+            "filename": "multi.txt",
+            "mime": "text/plain",
+            "size": len(content),
+        },
+    )
+    assert r.status_code == 200
+    aid = r.json()["artifact_id"]
+
+    main_module.qdrant.fail_after_derived_upserts = 1
+    failed = client.post(
+        "/v1/artifacts/complete",
+        headers=auth_headers(),
+        json={"artifact_id": aid, "owner_id": "daniel", "status": "completed"},
+    )
+    assert failed.status_code == 503
+    assert main_module.pg.artifacts[aid]["status"] == "pending"
+
+    main_module.qdrant.fail_after_derived_upserts = None
+    repaired = client.post(
+        "/v1/artifacts/complete",
+        headers=auth_headers(),
+        json={"artifact_id": aid, "owner_id": "daniel", "status": "completed"},
+    )
+    assert repaired.status_code == 200
+
+    active_rows = [
+        row for row in main_module.pg.derived_text.values()
+        if row["artifact_id"] == aid and row["derivation_params"].get("status") == "active"
+    ]
+    assert len(active_rows) == len(expected_chunks)
+    assert sorted(row["derivation_params"]["chunk_index"] for row in active_rows) == list(range(len(expected_chunks)))
+
+    repeated = client.post(
+        "/v1/artifacts/complete",
+        headers=auth_headers(),
+        json={"artifact_id": aid, "owner_id": "daniel", "status": "completed"},
+    )
+    assert repeated.status_code == 200
+    assert len([
+        row for row in main_module.pg.derived_text.values()
+        if row["artifact_id"] == aid and row["derivation_params"].get("status") == "active"
+    ]) == len(expected_chunks)
+
+    class ArtifactHit:
+        def __init__(self, row):
+            self.derived_text_id = row["derived_text_id"]
+            self.artifact_id = aid
+            self.file_path = "multi.txt"
+            self.repo_name = None
+            self.score = 0.9
+
+    async def fake_artifact_search(**kwargs):
+        assert kwargs["conversation_id"] == convo
+        return [ArtifactHit(active_rows[0])]
+
+    async def fake_recent(conversation_id, limit=10):
+        return []
+
+    monkeypatch.setattr(main_module.qdrant, "search_artifact_chunks", fake_artifact_search, raising=True)
+    monkeypatch.setattr(main_module.pg, "get_recent_message_items", fake_recent, raising=True)
+    rid = "rid-repaired-artifact"
+    retrieval = client.post(
+        f"/v2/conversations/{convo}/retrieve",
+        headers={**auth_headers(), "X-Request-ID": rid},
+        json={
+            "request_id": rid,
+            "owner_id": "daniel",
+            "query": "alpha",
+            "include_artifacts": True,
+            "retrieval": {"k": 3, "min_score": 0.0, "scope": "conversation"},
+        },
+    )
+    assert retrieval.status_code == 200
+    refs = retrieval.json()["bundle"]["artifact_refs"]
+    assert refs and refs[0]["artifact_id"] == aid
+
+
+def test_text_artifact_invalid_utf8_does_not_complete(client, monkeypatch):
+    content = b"\xff\xfe\xfd"
+
+    class FakeObjectStore:
+        def create_presigned_put_url(self, key: str, content_type: str, expires_s: int) -> str:
+            return f"http://client-minio/upload/{key}"
+
+        def create_presigned_get_url(self, key: str, expires_s: int) -> str:
+            return f"http://client-minio/download/{key}"
+
+        def head_object(self, key: str):
+            return types.SimpleNamespace(size=len(content), content_type="text/plain")
+
+        def read_object_bytes(self, key: str, *, max_bytes: int) -> bytes:
+            return content
+
+    monkeypatch.setattr(main_module.settings, "object_store_enabled", True, raising=False)
+    monkeypatch.setattr(main_module, "object_store", FakeObjectStore(), raising=True)
+    aid = _init_text_artifact(client, content=content)
+
+    r = client.post(
+        "/v1/artifacts/complete",
+        headers=auth_headers(),
+        json={"artifact_id": aid, "owner_id": "daniel", "status": "completed"},
+    )
+
+    assert r.status_code == 422
+    assert main_module.pg.artifacts[aid]["status"] == "pending"
+    assert main_module.pg.derived_text == {}
+
+
+def test_oversized_text_artifact_completes_without_derivation(client, monkeypatch):
+    content = b"stored but not derivation eligible"
+
+    class FakeObjectStore:
+        def create_presigned_put_url(self, key: str, content_type: str, expires_s: int) -> str:
+            return f"http://client-minio/upload/{key}"
+
+        def create_presigned_get_url(self, key: str, expires_s: int) -> str:
+            return f"http://client-minio/download/{key}"
+
+        def head_object(self, key: str):
+            return types.SimpleNamespace(size=len(content), content_type="text/plain")
+
+        def read_object_bytes(self, key: str, *, max_bytes: int) -> bytes:
+            raise AssertionError("oversized text should not be read for derivation")
+
+    monkeypatch.setattr(main_module.settings, "object_store_enabled", True, raising=False)
+    monkeypatch.setattr(main_module.settings, "artifact_text_derivation_max_bytes", len(content) - 1, raising=False)
+    monkeypatch.setattr(main_module, "object_store", FakeObjectStore(), raising=True)
+    aid = _init_text_artifact(client, content=content)
+
+    r = client.post(
+        "/v1/artifacts/complete",
+        headers=auth_headers(),
+        json={"artifact_id": aid, "owner_id": "daniel", "status": "completed"},
+    )
+
+    assert r.status_code == 200
+    assert main_module.pg.artifacts[aid]["status"] == "completed"
+    assert main_module.pg.derived_text == {}
+
+
+def test_artifact_object_store_public_errors_are_bounded(client, monkeypatch):
+    sentinel = "X-Amz-Credential=leak minioadmin secret-content http://minio-internal:9000"
+
+    class InitFailureStore:
+        def create_presigned_put_url(self, key: str, content_type: str, expires_s: int) -> str:
+            raise RuntimeError(sentinel)
+
+    monkeypatch.setattr(main_module.settings, "object_store_enabled", True, raising=False)
+    monkeypatch.setattr(main_module, "object_store", InitFailureStore(), raising=True)
+    init = client.post(
+        "/v1/artifacts/init",
+        headers=auth_headers(),
+        json={"owner_id": "daniel", "filename": "secret.txt", "mime": "text/plain", "size": 14},
+    )
+    assert init.status_code == 503
+    assert sentinel not in init.text
+    assert "X-Amz-" not in init.text
+    assert "minioadmin" not in init.text
+    assert "secret-content" not in init.text
+    assert "minio-internal" not in init.text
+
+    class CompleteFailureStore:
+        def create_presigned_put_url(self, key: str, content_type: str, expires_s: int) -> str:
+            return f"http://client-minio/upload/{key}"
+
+        def head_object(self, key: str):
+            raise RuntimeError(sentinel)
+
+    monkeypatch.setattr(main_module, "object_store", CompleteFailureStore(), raising=True)
+    aid = _init_text_artifact(client, content=b"secret-content")
+    complete = client.post(
+        "/v1/artifacts/complete",
+        headers=auth_headers(),
+        json={"artifact_id": aid, "owner_id": "daniel", "status": "completed"},
+    )
+    assert complete.status_code == 503
+    assert sentinel not in complete.text
+    assert "X-Amz-" not in complete.text
+    assert "secret-content" not in complete.text
+    assert "minio-internal" not in complete.text
+
+    class DownloadFailureStore:
+        def create_presigned_put_url(self, key: str, content_type: str, expires_s: int) -> str:
+            return f"http://client-minio/upload/{key}"
+
+        def create_presigned_get_url(self, key: str, expires_s: int) -> str:
+            raise RuntimeError(sentinel)
+
+        def head_object(self, key: str):
+            return types.SimpleNamespace(size=3, content_type="application/pdf")
+
+        def read_object_bytes(self, key: str, *, max_bytes: int) -> bytes:
+            raise AssertionError("pdf should not be read")
+
+    monkeypatch.setattr(main_module, "object_store", DownloadFailureStore(), raising=True)
+    pdf = client.post(
+        "/v1/artifacts/init",
+        headers=auth_headers(),
+        json={"owner_id": "daniel", "filename": "secret.pdf", "mime": "application/pdf", "size": 3},
+    )
+    assert pdf.status_code == 200
+    pdf_id = pdf.json()["artifact_id"]
+    metadata = client.get(f"/v1/artifacts/{pdf_id}", headers=auth_headers())
+    assert metadata.status_code == 503
+    assert sentinel not in metadata.text
+    assert "X-Amz-" not in metadata.text
+    assert "minioadmin" not in metadata.text
+    assert "secret-content" not in metadata.text
+    assert "minio-internal" not in metadata.text
+    assert main_module.pg.traces == {}
 
 
 def test_artifact_complete_rejects_owner_mismatch(client):

@@ -225,19 +225,21 @@ class QdrantStore:
         ]
         if client_id is not None:
             must.append(FieldCondition(key="client_id", match=MatchValue(value=str(client_id))))
-        if conversation_id is not None:
-            must.append(FieldCondition(key="conversation_id", match=MatchValue(value=str(conversation_id))))
-
         res = self.client.search(
             collection_name=self.collection,
             query_vector=qvec,
-            limit=k,
+            limit=max(k, min(100, k * 10)),
             query_filter=Filter(must=must),
         )
 
         hits: list[ArtifactChunkHit] = []
         for p in res:
             if p.score is None or p.score < min_score or not p.payload:
+                continue
+            if p.payload.get("owner_id") != owner_id:
+                continue
+            payload_conversation_id = p.payload.get("conversation_id")
+            if conversation_id is not None and payload_conversation_id not in {None, str(conversation_id)}:
                 continue
             hits.append(
                 ArtifactChunkHit(
@@ -248,6 +250,8 @@ class QdrantStore:
                     score=float(p.score),
                 )
             )
+            if len(hits) >= k:
+                break
         return hits
 
     def ping(self) -> None:

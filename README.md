@@ -315,6 +315,7 @@ MEMORY_API_KEY=change_me BASE=http://127.0.0.1:4321 ./scripts/smoke-test.sh
 - `OBJECT_STORE_ENDPOINT` is the server-side/internal S3-compatible endpoint used by BMS for bucket, head, and object-read operations.
 - `OBJECT_STORE_PRESIGN_BASE_URL` is the client-visible S3-compatible endpoint used while calculating presigned upload and download signatures. If it is set, clients must send the request to that same scheme, host, port, path, query, method, and signed headers. Proxies in front of the object store must preserve those request fields; rewriting a signed URL after it is generated invalidates the signature.
 - When `OBJECT_STORE_INCLUDE_CONTENT_TYPE_IN_PUT_SIGNATURE=true`, clients must send the exact `Content-Type` used during artifact initialization on the presigned PUT request.
+- Completed supported UTF-8 text artifacts at or below `ARTIFACT_TEXT_DERIVATION_MAX_BYTES` are chunked and indexed before completion is reported. Larger text artifacts and non-text artifacts can still complete as stored objects without text derivation. If required text derivation fails, completion returns a bounded retryable error and the artifact is not marked completed.
 - When object store support is disabled, artifact URLs remain placeholder wiring values.
 
 ## Backups
