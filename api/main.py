@@ -25,7 +25,12 @@ from services.ingestion import (
     ingest_files,
     is_supported_text_artifact_mime,
 )
-from services.retrieval import build_retrieval_response_payload, doctrine_diagnostics_for_bundle
+from services.retrieval import (
+    build_retrieval_response_payload,
+    containment_policy_filter,
+    doctrine_diagnostics_for_bundle,
+    mandatory_policy_allows,
+)
 from services.proactive import evaluate_event as evaluate_initiative_event
 from services.memory_items import normalize_scores, normalize_source_refs, shape_memory_event, shape_memory_item, source_ref_hash
 from services.episodes import DEFAULT_DERIVATION_VERSION as EPISODE_DERIVATION_VERSION, episode_key, normalize_json_list, normalize_json_map, normalize_source_refs as normalize_episode_source_refs, shape_episode, shape_episode_event, shape_episode_link, source_ref_hash as episode_source_ref_hash
@@ -767,17 +772,20 @@ async def ingest_event(body: EventIngestRequest, request: Request):
 async def ingest_files_endpoint(body: FileIngestionRequest):
     if not body.paths:
         raise HTTPException(status_code=422, detail="paths must not be empty")
-    result = await ingest_files(
-        pg=pg,
-        qdrant=qdrant,
-        settings=settings,
-        owner_id=body.owner_id,
-        client_id=body.client_id,
-        source_surface=body.source_surface,
-        repo_name=body.repo_name,
-        paths=body.paths,
-        policy_metadata=body.policy_metadata.model_dump(mode="json") if body.policy_metadata else None,
-    )
+    try:
+        result = await ingest_files(
+            pg=pg,
+            qdrant=qdrant,
+            settings=settings,
+            owner_id=body.owner_id,
+            client_id=body.client_id,
+            source_surface=body.source_surface,
+            repo_name=body.repo_name,
+            paths=body.paths,
+            policy_metadata=body.policy_metadata.model_dump(mode="json") if body.policy_metadata else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     return FileIngestionResponse(**result)
 
 @app.post(
@@ -1012,25 +1020,79 @@ async def retrieve_tiered(conversation_id: str, body: TieredRetrieveRequest):
     if not await pg.conversation_exists(cid):
         raise HTTPException(status_code=404, detail="conversation_id not found")
 
-    semantic_hits = await qdrant.search(
-        owner_id=body.owner_id,
-        query=body.query,
-        k=body.k,
-        min_score=body.min_score,
-        conversation_id=cid,
-        client_id=body.client_id,
-    )
+    message_policy_filter = containment_policy_filter(body.containment_policy, artifact=False)
+    semantic_search_kwargs = {
+        "owner_id": body.owner_id,
+        "query": body.query,
+        "k": body.k,
+        "min_score": body.min_score,
+        "conversation_id": cid,
+        "client_id": body.client_id,
+    }
+    if message_policy_filter is not None:
+        semantic_search_kwargs["policy_filter"] = message_policy_filter
+    semantic_hits = await qdrant.search(**semantic_search_kwargs)
     semantic_ids = _safe_uuid_message_ids(
         semantic_hits,
         context="/v1/conversations/{id}/retrieve",
         kind="semantic",
     )
     semantic_snips = await pg.get_message_snippets_by_ids(semantic_ids)
+    if message_policy_filter is not None:
+        filtered_semantic_snips = []
+        for snippet in semantic_snips:
+            _, rejection_reason = mandatory_policy_allows(snippet.get("policy_metadata"), message_policy_filter)
+            if rejection_reason is None:
+                filtered_semantic_snips.append(snippet)
+        semantic_snips = filtered_semantic_snips
     semantic_score_by_id = {h.message_id: h.score for h in semantic_hits}
-    working_snips = await pg.get_recent_message_snippets(conversation_id=cid, limit=body.working_limit)
-    pinned_items = await pg.get_pinned_memories(owner_id=body.owner_id, conversation_id=cid, limit=body.pinned_limit)
-    policy_items = await pg.get_policy_overlays(owner_id=body.owner_id, surface=body.surface)
-    persona_items = await pg.get_persona_overlays(owner_id=body.owner_id, surface=body.surface)
+    if message_policy_filter is None:
+        working_snips = await pg.get_recent_message_snippets(conversation_id=cid, limit=body.working_limit)
+        pinned_items = await pg.get_pinned_memories(owner_id=body.owner_id, conversation_id=cid, limit=body.pinned_limit)
+        policy_items = await pg.get_policy_overlays(owner_id=body.owner_id, surface=body.surface)
+        persona_items = await pg.get_persona_overlays(owner_id=body.owner_id, surface=body.surface)
+    else:
+        working_snips = await pg.get_recent_message_items(
+            conversation_id=cid,
+            limit=body.working_limit,
+            policy_filter=message_policy_filter,
+        )
+        pinned_items = await pg.get_pinned_memories(
+            owner_id=body.owner_id,
+            conversation_id=cid,
+            limit=body.pinned_limit,
+            policy_filter=message_policy_filter,
+        )
+        policy_items = await pg.get_policy_overlays(
+            owner_id=body.owner_id,
+            surface=body.surface,
+            policy_filter=message_policy_filter,
+        )
+        persona_items = await pg.get_persona_overlays(
+            owner_id=body.owner_id,
+            surface=body.surface,
+            policy_filter=message_policy_filter,
+        )
+        working_snips = [
+            snippet
+            for snippet in working_snips
+            if mandatory_policy_allows(snippet.get("policy_metadata"), message_policy_filter)[1] is None
+        ]
+        pinned_items = [
+            item
+            for item in pinned_items
+            if mandatory_policy_allows(item.get("policy_metadata"), message_policy_filter)[1] is None
+        ]
+        policy_items = [
+            item
+            for item in policy_items
+            if mandatory_policy_allows(item.get("policy_metadata"), message_policy_filter)[1] is None
+        ]
+        persona_items = [
+            item
+            for item in persona_items
+            if mandatory_policy_allows(item.get("policy_metadata"), message_policy_filter)[1] is None
+        ]
 
     return TieredRetrieveResponse(
         conversation_id=str(cid),

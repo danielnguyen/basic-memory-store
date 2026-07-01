@@ -6,7 +6,7 @@ from uuid import uuid4
 import pytest
 from qdrant_client.models import FieldCondition, Filter, IsEmptyCondition, MatchAny
 
-from storage.qdrant import QdrantStore
+from storage.qdrant import QdrantStore, _policy_payload
 
 
 class FakeEmbedder:
@@ -31,6 +31,25 @@ class FakeQdrantClient:
             for point in sorted(self.points, key=lambda item: item.score, reverse=True)
             if _matches_filter(point.payload, query_filter)
         ][:limit]
+
+
+def test_policy_payload_exact_validation_rejects_legacy_spoof_and_malformed_shapes():
+    valid = {
+        "memory_domains": ["technical"],
+        "sensitivity": "low",
+        "entity_ids": [],
+        "relationship_ids": [],
+        "relationship_scopes": [],
+    }
+
+    assert _policy_payload(valid)["retrieval_policy_valid"] is True
+    assert _policy_payload({"retrieval_policy_metadata": valid}) == {"retrieval_policy_valid": False}
+    assert _policy_payload({"memory_domains": "technical", "sensitivity": "low"}) == {
+        "retrieval_policy_valid": False
+    }
+    assert _policy_payload({"memory_domains": ["technical", 7], "sensitivity": "low"}) == {
+        "retrieval_policy_valid": False
+    }
 
 
 def _point(*, owner_id: str, conversation_id: str | None, score: float = 0.9):

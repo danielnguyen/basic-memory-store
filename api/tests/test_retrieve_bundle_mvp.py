@@ -14,6 +14,7 @@ class FakePG:
         *,
         message_times=None,
         message_metadata=None,
+        message_policy_metadata=None,
         artifact_metadata=None,
         memory_items_by_ref=None,
         artifact_owner_by_id=None,
@@ -23,6 +24,7 @@ class FakePG:
     ):
         self.message_times = message_times or ["2026-01-01T00:00:00+00:00"]
         self.message_metadata = message_metadata or {}
+        self.message_policy_metadata = message_policy_metadata or {}
         self.artifact_metadata = artifact_metadata or {}
         self.memory_items_by_ref = memory_items_by_ref or {}
         self.artifact_owner_by_id = artifact_owner_by_id or {}
@@ -65,6 +67,7 @@ class FakePG:
                     "role": "assistant",
                     "content": f"semantic result {idx}",
                     "metadata": self.message_metadata.get(key, {}),
+                    "policy_metadata": self.message_policy_metadata.get(key),
                     "created_at": self.message_times[min(idx, len(self.message_times) - 1)],
                 }
             )
@@ -84,6 +87,7 @@ class FakePG:
                 "role": "user",
                 "content": "recent snippet",
                 "metadata": {},
+                "policy_metadata": None,
                 "created_at": "2026-01-01T00:00:00+00:00",
             }
         ]
@@ -91,6 +95,23 @@ class FakePG:
     async def get_derived_text_snippets_by_ids(self, ids):
         if self.derived_text_lookup_fails and ids:
             raise RuntimeError("derived text store unavailable")
+        def _trusted_policy(raw):
+            if not isinstance(raw, dict):
+                return None
+            policy = {
+                key: raw[key]
+                for key in (
+                    "memory_domains",
+                    "sensitivity",
+                    "content_class",
+                    "entity_ids",
+                    "relationship_ids",
+                    "relationship_scopes",
+                )
+                if key in raw
+            }
+            return policy or None
+
         def _text(idx):
             if self.unique_derived_snippets and idx > 0:
                 return f"def important_helper_{idx}(): pass"
@@ -110,7 +131,7 @@ class FakePG:
                     "kind": "chunk",
                     "text": _text(idx),
                     "derivation_params": self.artifact_metadata.get(str(item), {}),
-                    "policy_metadata": self.artifact_metadata.get(str(item)),
+                    "policy_metadata": _trusted_policy(self.artifact_metadata.get(str(item))),
                     "created_at": "2026-01-01T00:00:00+00:00",
                     "file_path": _file_path(idx),
                     "repo_name": "basic-memory-store",
@@ -984,6 +1005,95 @@ async def test_retrieve_bundle_omits_derivative_when_source_lookup_fails(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_artifact_source_validity_filter_does_not_let_invalid_hits_consume_final_slots(monkeypatch):
+    invalid_ids = [str(uuid.uuid4()) for _ in range(3)]
+    valid_id = str(uuid.uuid4())
+    missing_source_ids = [str(uuid.uuid4()) for _ in invalid_ids]
+    valid_source_id = str(uuid.uuid4())
+    artifact_metadata = {
+        derived_id: {
+            "source_refs": [
+                {"ref_type": "artifact", "ref_id": source_id, "support_kind": "direct"}
+            ]
+        }
+        for derived_id, source_id in zip(invalid_ids, missing_source_ids)
+    }
+    artifact_metadata[valid_id] = {
+        "source_refs": [
+            {"ref_type": "artifact", "ref_id": valid_source_id, "support_kind": "direct"}
+        ]
+    }
+    fake_pg = FakePG(
+        artifact_metadata=artifact_metadata,
+        artifact_owner_by_id={
+            **{source_id: None for source_id in missing_source_ids},
+            valid_source_id: "owner",
+        },
+        unique_derived_snippets=True,
+    )
+    fake_qdrant = FakeQdrant()
+
+    async def fake_search(**kwargs):
+        return []
+
+    async def fake_search_artifact_chunks(**kwargs):
+        scores = [0.99, 0.98, 0.97, 0.2]
+        return [
+            types.SimpleNamespace(
+                derived_text_id=derived_id,
+                artifact_id=str(uuid.uuid4()),
+                file_path=f"api/helpers_{idx}.py",
+                repo_name="basic-memory-store",
+                score=scores[idx],
+            )
+            for idx, derived_id in enumerate([*invalid_ids, valid_id])
+        ]
+
+    fake_qdrant.search = fake_search
+    fake_qdrant.search_artifact_chunks = fake_search_artifact_chunks
+    fake_settings = types.SimpleNamespace(
+        memory_api_key="testkey",
+        require_request_id=True,
+        enforce_request_id_header_body_match=True,
+        retrieval_k=8,
+        retrieval_artifact_k=1,
+        retrieval_artifact_max_snippet_chars=500,
+        retrieval_recent_half_life_days=14,
+        retrieval_balanced_half_life_days=45,
+        retrieval_historical_half_life_days=365,
+        retrieval_conversation_boost=0.08,
+        retrieval_pinned_bias=0.12,
+        retrieval_missing_penalty_cap=0.15,
+        recent_turns=10,
+    )
+    monkeypatch.setattr(main_module, "settings", fake_settings, raising=True)
+    monkeypatch.setattr(main_module, "pg", fake_pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", fake_qdrant, raising=True)
+
+    rid = "rid-artifact-source-final-slot"
+    r = await _post_retrieve_bundle(
+        conversation_id=str(uuid.uuid4()),
+        request_id=rid,
+        body={
+            "request_id": rid,
+            "owner_id": "owner",
+            "query": "helper",
+            "include_artifacts": True,
+            "retrieval": {"k": 3, "min_score": 0.0, "scope": "conversation"},
+        },
+    )
+
+    assert r.status_code == 200
+    body = r.json()
+    refs = body["bundle"]["artifact_refs"]
+    assert len(refs) == 1
+    assert refs[0]["source_ref"]["ref_id"] == valid_id
+    truth = body["bundle"]["retrieval_debug"]["truth_qualification"]
+    assert truth["source_missing_count"] == 3
+    assert truth["derivative_omissions_by_reason"] == {"missing_derivative_source_record": 3}
+
+
+@pytest.mark.asyncio
 async def test_retrieve_bundle_degrades_lifecycle_restricted_derivative_without_rewriting_canonical(monkeypatch):
     derived_text_source_id = "55555555-5555-4555-8555-555555555558"
     fake_pg = FakePG(
@@ -1434,8 +1544,8 @@ async def test_mandatory_containment_excludes_untagged_and_uses_qdrant_policy_fi
     ineligible_id = str(uuid.uuid4())
     eligible_id = str(uuid.uuid4())
     fake_pg = FakePG(
-        message_metadata={
-            eligible_id: {"retrieval_policy_metadata": _record_policy(domains=["technical"], sensitivity="low")},
+        message_policy_metadata={
+            eligible_id: _record_policy(domains=["technical"], sensitivity="low"),
         }
     )
     fake_qdrant = FakeQdrant(message_ids=[ineligible_id, eligible_id], message_scores=[0.99, 0.2])
@@ -1484,6 +1594,109 @@ async def test_mandatory_containment_excludes_untagged_and_uses_qdrant_policy_fi
 
 
 @pytest.mark.asyncio
+async def test_mandatory_containment_rejects_legacy_freeform_spoof(monkeypatch):
+    spoof_id = str(uuid.uuid4())
+    eligible_id = str(uuid.uuid4())
+    fake_pg = FakePG(
+        message_metadata={
+            spoof_id: {"retrieval_policy_metadata": _record_policy(domains=["technical"], sensitivity="low")},
+        },
+        message_policy_metadata={
+            eligible_id: _record_policy(domains=["technical"], sensitivity="low"),
+        },
+    )
+    fake_qdrant = FakeQdrant(message_ids=[spoof_id, eligible_id], message_scores=[0.99, 0.2])
+    fake_settings = types.SimpleNamespace(
+        memory_api_key="testkey",
+        require_request_id=True,
+        enforce_request_id_header_body_match=True,
+        retrieval_k=8,
+        retrieval_recent_half_life_days=14,
+        retrieval_balanced_half_life_days=45,
+        retrieval_historical_half_life_days=365,
+        retrieval_conversation_boost=0.08,
+        retrieval_pinned_bias=0.12,
+        retrieval_missing_penalty_cap=0.15,
+        recent_turns=10,
+    )
+    monkeypatch.setattr(main_module, "settings", fake_settings, raising=True)
+    monkeypatch.setattr(main_module, "pg", fake_pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", fake_qdrant, raising=True)
+
+    rid = "rid-legacy-spoof"
+    r = await _post_retrieve_bundle(
+        conversation_id=str(uuid.uuid4()),
+        request_id=rid,
+        body={
+            "request_id": rid,
+            "owner_id": "owner",
+            "query": "hello",
+            "include_artifacts": False,
+            "containment_policy": _mandatory_policy(domains=["technical"]),
+        },
+    )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert [item["message_id"] for item in body["bundle"]["semantic"]] == [eligible_id]
+    omitted = body["bundle"]["retrieval_debug"]["containment_policy"]["omitted_counts_by_reason"]
+    assert omitted["missing_policy_metadata"] == 1
+
+
+@pytest.mark.asyncio
+async def test_mandatory_containment_rejects_malformed_policy_shapes(monkeypatch):
+    string_domain_id = str(uuid.uuid4())
+    mixed_array_id = str(uuid.uuid4())
+    eligible_id = str(uuid.uuid4())
+    fake_pg = FakePG(
+        message_policy_metadata={
+            string_domain_id: {"memory_domains": "technical", "sensitivity": "low"},
+            mixed_array_id: {"memory_domains": ["technical", 7], "sensitivity": "low"},
+            eligible_id: _record_policy(domains=["technical"], sensitivity="low"),
+        }
+    )
+    fake_qdrant = FakeQdrant(
+        message_ids=[string_domain_id, mixed_array_id, eligible_id],
+        message_scores=[0.99, 0.98, 0.2],
+    )
+    fake_settings = types.SimpleNamespace(
+        memory_api_key="testkey",
+        require_request_id=True,
+        enforce_request_id_header_body_match=True,
+        retrieval_k=8,
+        retrieval_recent_half_life_days=14,
+        retrieval_balanced_half_life_days=45,
+        retrieval_historical_half_life_days=365,
+        retrieval_conversation_boost=0.08,
+        retrieval_pinned_bias=0.12,
+        retrieval_missing_penalty_cap=0.15,
+        recent_turns=10,
+    )
+    monkeypatch.setattr(main_module, "settings", fake_settings, raising=True)
+    monkeypatch.setattr(main_module, "pg", fake_pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", fake_qdrant, raising=True)
+
+    rid = "rid-malformed-policy"
+    r = await _post_retrieve_bundle(
+        conversation_id=str(uuid.uuid4()),
+        request_id=rid,
+        body={
+            "request_id": rid,
+            "owner_id": "owner",
+            "query": "hello",
+            "include_artifacts": False,
+            "containment_policy": _mandatory_policy(domains=["technical"]),
+        },
+    )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert [item["message_id"] for item in body["bundle"]["semantic"]] == [eligible_id]
+    omitted = body["bundle"]["retrieval_debug"]["containment_policy"]["omitted_counts_by_reason"]
+    assert omitted["malformed_policy_metadata"] == 2
+
+
+@pytest.mark.asyncio
 async def test_mandatory_domain_and_legacy_domain_mismatch_is_rejected(monkeypatch):
     fake_pg = FakePG()
     fake_settings = types.SimpleNamespace(memory_api_key="testkey", require_request_id=True, enforce_request_id_header_body_match=True)
@@ -1518,17 +1731,15 @@ async def test_relationship_scope_narrows_without_broadening_domain_or_sensitivi
     missing_id = str(uuid.uuid4())
     blocked_id = str(uuid.uuid4())
     fake_pg = FakePG(
-        message_metadata={
-            rel_id: {"retrieval_policy_metadata": _record_policy(relationship_ids=[selected_rel], scopes=["project"])},
-            entity_id: {"retrieval_policy_metadata": _record_policy(entity_ids=[selected_entity], scopes=["project"])},
-            scope_only_id: {"retrieval_policy_metadata": _record_policy(scopes=["project"])},
-            missing_id: {"retrieval_policy_metadata": _record_policy()},
-            blocked_id: {
-                "retrieval_policy_metadata": _record_policy(
-                    domains=["technical", "finance"],
-                    relationship_ids=[selected_rel],
-                )
-            },
+        message_policy_metadata={
+            rel_id: _record_policy(relationship_ids=[selected_rel], scopes=["project"]),
+            entity_id: _record_policy(entity_ids=[selected_entity], scopes=["project"]),
+            scope_only_id: _record_policy(scopes=["project"]),
+            missing_id: _record_policy(),
+            blocked_id: _record_policy(
+                domains=["technical", "finance"],
+                relationship_ids=[selected_rel],
+            ),
         }
     )
     fake_qdrant = FakeQdrant(
@@ -1691,8 +1902,8 @@ async def test_mandatory_raw_and_compare_do_not_bypass_policy(monkeypatch):
     ineligible_id = str(uuid.uuid4())
     eligible_id = str(uuid.uuid4())
     fake_pg = FakePG(
-        message_metadata={
-            eligible_id: {"retrieval_policy_metadata": _record_policy(domains=["technical"], sensitivity="low")},
+        message_policy_metadata={
+            eligible_id: _record_policy(domains=["technical"], sensitivity="low"),
         }
     )
     fake_qdrant = FakeQdrant(message_ids=[ineligible_id, eligible_id], message_scores=[0.99, 0.2])
@@ -1750,6 +1961,52 @@ def test_structured_policy_metadata_rejects_reserved_spoofing_and_mime_contradic
             size=10,
             policy_metadata=_record_policy(content_class="document"),
         )
+    with pytest.raises(ValueError):
+        ArtifactInitRequest(
+            owner_id="owner",
+            filename="photo.png",
+            mime="image/png",
+            size=10,
+        )
+    with pytest.raises(ValueError):
+        ArtifactInitRequest(
+            owner_id="owner",
+            filename="notes.txt",
+            mime="text/plain",
+            size=10,
+            policy_metadata=_record_policy(content_class="image"),
+        )
+    with pytest.raises(ValueError):
+        ArtifactInitRequest(
+            owner_id="owner",
+            filename="notes.md",
+            mime="text/markdown",
+            size=10,
+            policy_metadata=_record_policy(content_class="audio"),
+        )
+    with pytest.raises(ValueError):
+        ArtifactInitRequest(
+            owner_id="owner",
+            filename="script.py",
+            mime="text/plain",
+            size=10,
+            policy_metadata=_record_policy(content_class="video"),
+        )
+    with pytest.raises(ValueError):
+        ArtifactInitRequest(
+            owner_id="owner",
+            filename="blob.bin",
+            mime="application/octet-stream",
+            size=10,
+            policy_metadata=_record_policy(content_class="screenshot"),
+        )
+    ArtifactInitRequest(
+        owner_id="owner",
+        filename="blob.bin",
+        mime="application/octet-stream",
+        size=10,
+        policy_metadata=_record_policy(content_class="other"),
+    )
     request = MessageCreateRequest(
         owner_id="owner",
         role="user",

@@ -55,7 +55,7 @@ async def main() -> None:
                         role=row["role"],
                         content=row["content"],
                         client_id=row["client_id"],
-                        policy_metadata=(row.get("metadata") or {}).get("retrieval_policy_metadata"),
+                        policy_metadata=row.get("policy_metadata"),
                     )
                 except Exception:
                     logging.exception(

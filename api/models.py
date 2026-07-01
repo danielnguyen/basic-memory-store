@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 Role = Literal["user", "assistant", "system", "tool"]
@@ -62,13 +62,46 @@ def _normalize_labels(values: list[str]) -> list[str]:
     return normalized
 
 
+def _validate_bounded_string_list(value: Any, *, field_name: str, max_length: int) -> list[str]:
+    if not isinstance(value, list):
+        raise ValueError(f"{field_name} must be a list")
+    if len(value) > max_length:
+        raise ValueError(f"{field_name} exceeds maximum length")
+    out: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError(f"{field_name} entries must be strings")
+        cleaned = item.strip()
+        if not cleaned:
+            raise ValueError(f"{field_name} entries must be non-empty strings")
+        out.append(cleaned)
+    return out
+
+
 class RetrievalRecordPolicyMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     memory_domains: List[BoundedLabel] = Field(..., max_length=16)
     sensitivity: RetrievalSensitivity
     content_class: Optional[ArtifactContentClass] = None
     entity_ids: List[BoundedScopeId] = Field(default_factory=list, max_length=64)
     relationship_ids: List[BoundedScopeId] = Field(default_factory=list, max_length=64)
     relationship_scopes: List[BoundedLabel] = Field(default_factory=list, max_length=16)
+
+    @field_validator("memory_domains", mode="before")
+    @classmethod
+    def validate_memory_domains_shape(cls, value: Any) -> list[str]:
+        return _validate_bounded_string_list(value, field_name="memory_domains", max_length=16)
+
+    @field_validator("entity_ids", "relationship_ids", mode="before")
+    @classmethod
+    def validate_scope_ids_shape(cls, value: Any) -> list[str]:
+        return _validate_bounded_string_list(value or [], field_name="scope_ids", max_length=64)
+
+    @field_validator("relationship_scopes", mode="before")
+    @classmethod
+    def validate_relationship_scopes_shape(cls, value: Any) -> list[str]:
+        return _validate_bounded_string_list(value or [], field_name="relationship_scopes", max_length=16)
 
     @field_validator("memory_domains", "relationship_scopes", mode="after")
     @classmethod
@@ -87,6 +120,75 @@ class RetrievalRecordPolicyMetadata(BaseModel):
             seen.add(cleaned)
             out.append(cleaned)
         return out
+
+
+TEXTUAL_ARTIFACT_MIME_CLASSES = {
+    "text/plain": "document",
+    "text/markdown": "document",
+    "application/json": "document",
+}
+SOURCE_CODE_EXTENSIONS = {
+    ".py",
+    ".js",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".go",
+    ".rs",
+    ".java",
+    ".c",
+    ".cc",
+    ".cpp",
+    ".h",
+    ".hpp",
+    ".cs",
+    ".rb",
+    ".php",
+    ".sh",
+    ".sql",
+    ".yaml",
+    ".yml",
+    ".toml",
+}
+
+
+def expected_artifact_content_classes_for_mime(mime: str, filename: str | None = None) -> set[str]:
+    normalized = (mime or "").split(";")[0].strip().lower()
+    suffix = ""
+    if filename and "." in filename:
+        suffix = "." + filename.rsplit(".", 1)[-1].lower()
+    if normalized.startswith("image/"):
+        return {"image", "screenshot"}
+    if normalized.startswith("audio/"):
+        return {"audio"}
+    if normalized.startswith("video/"):
+        return {"video"}
+    if suffix in SOURCE_CODE_EXTENSIONS:
+        return {"code"}
+    if normalized in TEXTUAL_ARTIFACT_MIME_CLASSES:
+        return {"document", "code"} if normalized == "text/plain" else {TEXTUAL_ARTIFACT_MIME_CLASSES[normalized]}
+    return {"other"}
+
+
+def validate_artifact_policy_metadata_for_mime(
+    policy_metadata: RetrievalRecordPolicyMetadata | None,
+    *,
+    mime: str,
+    filename: str | None = None,
+) -> RetrievalRecordPolicyMetadata | None:
+    normalized = (mime or "").split(";")[0].strip().lower()
+    if policy_metadata is None:
+        if normalized.startswith(("image/", "audio/", "video/")):
+            raise ValueError("media artifact policy metadata requires content_class")
+        return None
+    if policy_metadata.sensitivity == "restricted":
+        raise ValueError("restricted artifact policy metadata is not retrievable")
+    if policy_metadata.content_class is None:
+        raise ValueError("artifact policy metadata requires content_class")
+    allowed = expected_artifact_content_classes_for_mime(mime, filename=filename)
+    if policy_metadata.content_class not in allowed:
+        raise ValueError("artifact content_class contradicts MIME type")
+    return policy_metadata
 
 
 class ArtifactAccessPolicyInput(BaseModel):
@@ -256,16 +358,7 @@ class ArtifactInitRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_content_class_matches_mime(self):
-        if self.policy_metadata is None or self.policy_metadata.content_class is None:
-            return self
-        content_class = self.policy_metadata.content_class
-        mime = self.mime.lower()
-        if mime.startswith("image/") and content_class not in {"image", "screenshot"}:
-            raise ValueError("image artifacts require image or screenshot policy content_class")
-        if mime.startswith("audio/") and content_class != "audio":
-            raise ValueError("audio artifacts require audio policy content_class")
-        if mime.startswith("video/") and content_class != "video":
-            raise ValueError("video artifacts require video policy content_class")
+        validate_artifact_policy_metadata_for_mime(self.policy_metadata, mime=self.mime, filename=self.filename)
         return self
 
 
@@ -362,6 +455,7 @@ class TieredRetrieveRequest(BaseModel):
     min_score: float = Field(default=0.25, ge=0.0, le=1.0)
     working_limit: int = Field(default=8, ge=1, le=100)
     pinned_limit: int = Field(default=5, ge=0, le=100)
+    containment_policy: Optional[RetrievalContainmentPolicy] = None
 
 
 class TieredRetrieveResponse(BaseModel):

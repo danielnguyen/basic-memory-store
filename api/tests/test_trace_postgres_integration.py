@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import types
 from uuid import uuid4
 
@@ -8,6 +9,7 @@ import psycopg
 
 import main as main_module
 from storage.postgres import PostgresStore
+from storage.qdrant import _policy_payload
 
 
 class FakeQdrant:
@@ -134,3 +136,51 @@ def test_request_id_mismatch_persists_no_trace_with_postgresql_16(
             ([body_request_id, header_request_id],),
         ).fetchone()[0]
     assert count == 0
+
+
+def test_message_policy_metadata_round_trips_dedicated_column_with_postgresql_16(postgres_database):
+    policy = {
+        "memory_domains": ["technical"],
+        "sensitivity": "low",
+        "entity_ids": [],
+        "relationship_ids": [],
+        "relationship_scopes": [],
+    }
+    legacy_metadata = {"domain": "personal"}
+
+    async def run():
+        store = PostgresStore(postgres_database)
+        await store.open()
+        try:
+            conversation_id = await store.create_conversation(
+                owner_id="owner-policy",
+                client_id="client-policy",
+                title="Policy metadata",
+            )
+            message_id = await store.add_message(
+                conversation_id=conversation_id,
+                owner_id="owner-policy",
+                role="assistant",
+                content="Structured policy belongs in the dedicated column.",
+                client_id="client-policy",
+                metadata=legacy_metadata,
+                policy_metadata=policy,
+            )
+
+            snippets = await store.get_message_snippets_by_ids([message_id])
+            reindex_rows = await store.get_messages_for_reindex(owner_id="owner-policy")
+        finally:
+            await store.close()
+        return str(message_id), snippets, reindex_rows
+
+    message_id, snippets, reindex_rows = asyncio.run(run())
+
+    assert len(snippets) == 1
+    assert snippets[0]["message_id"] == message_id
+    assert snippets[0]["metadata"] == legacy_metadata
+    assert snippets[0]["policy_metadata"] == policy
+    assert reindex_rows[0]["metadata"] == legacy_metadata
+    assert reindex_rows[0]["policy_metadata"] == policy
+    qdrant_payload = _policy_payload(reindex_rows[0]["policy_metadata"])
+    assert qdrant_payload["retrieval_policy_valid"] is True
+    assert qdrant_payload["memory_domains"] == ["technical"]

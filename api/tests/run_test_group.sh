@@ -21,7 +21,8 @@ case "${1:-}" in
       tests/test_episodes_service.py \
       tests/test_episodes_api.py \
       tests/test_traces_api.py \
-      tests/test_retrieval_replay.py
+      tests/test_retrieval_replay.py \
+      tests/test_reindex_policy_metadata.py
     ;;
   postgres)
     exec python -m pytest -q \

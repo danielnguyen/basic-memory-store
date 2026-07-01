@@ -16,6 +16,9 @@ from qdrant_client.models import (
     MatchAny,
     MatchValue,
 )
+from pydantic import ValidationError
+
+from models import RetrievalRecordPolicyMetadata
 
 class Embedder(Protocol):
     async def embed_texts(self, model: str, texts: list[str]) -> list[list[float]]:
@@ -40,16 +43,21 @@ class ArtifactChunkHit:
 def _policy_payload(policy_metadata: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(policy_metadata, dict):
         return {"retrieval_policy_valid": False}
+    try:
+        validated = RetrievalRecordPolicyMetadata.model_validate(policy_metadata)
+    except ValidationError:
+        return {"retrieval_policy_valid": False}
+    payload_data = validated.model_dump(mode="json")
     payload: dict[str, Any] = {
         "retrieval_policy_valid": True,
-        "memory_domains": list(policy_metadata.get("memory_domains") or []),
-        "sensitivity": policy_metadata.get("sensitivity"),
-        "entity_ids": list(policy_metadata.get("entity_ids") or []),
-        "relationship_ids": list(policy_metadata.get("relationship_ids") or []),
-        "relationship_scopes": list(policy_metadata.get("relationship_scopes") or []),
+        "memory_domains": list(payload_data.get("memory_domains") or []),
+        "sensitivity": payload_data.get("sensitivity"),
+        "entity_ids": list(payload_data.get("entity_ids") or []),
+        "relationship_ids": list(payload_data.get("relationship_ids") or []),
+        "relationship_scopes": list(payload_data.get("relationship_scopes") or []),
     }
-    if policy_metadata.get("content_class") is not None:
-        payload["content_class"] = policy_metadata.get("content_class")
+    if payload_data.get("content_class") is not None:
+        payload["content_class"] = payload_data.get("content_class")
     return payload
 
 

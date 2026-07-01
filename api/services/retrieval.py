@@ -6,6 +6,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
+from pydantic import ValidationError
+
 from models import (
     ArtifactRef,
     DerivedProvenance,
@@ -15,6 +17,7 @@ from models import (
     RetrievalMessageItem,
     RetrievalOptions,
     RetrievalPolicyMetadata,
+    RetrievalRecordPolicyMetadata,
     RetrievalSourceRef,
 )
 from services.memory_lifecycle import effective_freshness_state
@@ -35,7 +38,6 @@ LIFECYCLE_RESTRICTED_STATES = {
     "forgotten_or_demoted",
     "unknown_freshness",
 }
-RESERVED_POLICY_METADATA_KEY = "retrieval_policy_metadata"
 SENSITIVITY_ORDER = ("low", "medium", "high", "restricted")
 
 
@@ -201,9 +203,6 @@ def _normalize_domain_values(raw_value: Any) -> list[str]:
 
 def _policy_metadata(raw_metadata: Any) -> RetrievalPolicyMetadata:
     metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
-    structured = metadata.get(RESERVED_POLICY_METADATA_KEY)
-    if isinstance(structured, dict):
-        metadata = structured
     domains: list[str] = []
     for key in ("memory_domains", "memory_domain", "domains", "domain"):
         domains = _normalize_domain_values(metadata.get(key))
@@ -234,6 +233,17 @@ def _policy_metadata(raw_metadata: Any) -> RetrievalPolicyMetadata:
         if isinstance(metadata.get("relationship_ids"), list)
         else [],
         relationship_scopes=_normalize_domain_values(metadata.get("relationship_scopes")),
+    )
+
+
+def _policy_metadata_from_validated(metadata: RetrievalRecordPolicyMetadata) -> RetrievalPolicyMetadata:
+    return RetrievalPolicyMetadata(
+        memory_domains=list(metadata.memory_domains),
+        sensitivity=metadata.sensitivity,
+        content_class=metadata.content_class,
+        entity_ids=list(metadata.entity_ids),
+        relationship_ids=list(metadata.relationship_ids),
+        relationship_scopes=list(metadata.relationship_scopes),
     )
 
 
@@ -296,21 +306,16 @@ def _add_policy_omission(debug_state: dict[str, Any], reason: str) -> None:
     omitted[reason] = int(omitted.get(reason, 0)) + 1
 
 
-def _mandatory_policy_metadata(raw: Any, *, nested: bool) -> tuple[RetrievalPolicyMetadata | None, str | None]:
+def _mandatory_policy_metadata(raw: Any) -> tuple[RetrievalPolicyMetadata | None, str | None]:
     if not isinstance(raw, dict):
         return None, "missing_policy_metadata"
-    metadata = raw.get(RESERVED_POLICY_METADATA_KEY) if nested else raw
-    if not isinstance(metadata, dict):
-        return None, "missing_policy_metadata"
-    parsed = _policy_metadata(metadata)
+    try:
+        validated = RetrievalRecordPolicyMetadata.model_validate(raw)
+    except ValidationError:
+        return None, "malformed_policy_metadata"
+    parsed = _policy_metadata_from_validated(validated)
     if not parsed.memory_domains:
         return None, "missing_policy_metadata"
-    if parsed.sensitivity not in SENSITIVITY_ORDER:
-        return None, "malformed_policy_metadata"
-    if not isinstance(metadata.get("entity_ids", []), list) or not isinstance(metadata.get("relationship_ids", []), list):
-        return None, "malformed_policy_metadata"
-    if not isinstance(metadata.get("relationship_scopes", []), list):
-        return None, "malformed_policy_metadata"
     return parsed, None
 
 
@@ -350,16 +355,32 @@ def _mandatory_record_allowed(
     raw_metadata: Any,
     policy_filter: dict[str, Any],
     *,
-    nested: bool,
     artifact: bool = False,
 ) -> tuple[RetrievalPolicyMetadata | None, str | None]:
-    parsed, reason = _mandatory_policy_metadata(raw_metadata, nested=nested)
+    parsed, reason = _mandatory_policy_metadata(raw_metadata)
     if reason is not None or parsed is None:
         return None, reason
     allowed, reason = _record_allowed_by_filter(parsed, policy_filter, artifact=artifact)
     if not allowed:
         return parsed, reason
     return parsed, None
+
+
+def containment_policy_filter(
+    policy: RetrievalContainmentPolicy | None,
+    *,
+    artifact: bool = False,
+) -> dict[str, Any] | None:
+    return _containment_filter(policy, artifact=artifact)
+
+
+def mandatory_policy_allows(
+    raw_metadata: Any,
+    policy_filter: dict[str, Any],
+    *,
+    artifact: bool = False,
+) -> tuple[RetrievalPolicyMetadata | None, str | None]:
+    return _mandatory_record_allowed(raw_metadata, policy_filter, artifact=artifact)
 
 
 def _normalize_freshness_state(memory_item: dict[str, Any] | None) -> str:
@@ -749,9 +770,8 @@ async def retrieve_ranked_messages(
             if policy_debug is not None:
                 policy_debug["post_fetch_validation_count"] += 1
             _, rejection_reason = _mandatory_record_allowed(
-                snippet.get("metadata"),
+                snippet.get("policy_metadata"),
                 policy_filter,
-                nested=True,
             )
             if rejection_reason is not None:
                 if policy_debug is not None:
@@ -888,7 +908,6 @@ async def build_retrieval_bundle(
             _, rejection_reason = _mandatory_record_allowed(
                 snippet.get("policy_metadata"),
                 artifact_policy_filter,
-                nested=False,
                 artifact=True,
             )
             if rejection_reason is not None:
@@ -974,7 +993,7 @@ async def build_retrieval_bundle(
             source_ref=RetrievalSourceRef(ref_type="message", ref_id=s["message_id"]),
             source_availability="not_applicable",
             qualification_reasons=["canonical_recent"],
-            policy_metadata=_policy_metadata(s.get("metadata")),
+            policy_metadata=_policy_metadata(s.get("policy_metadata") or s.get("metadata")),
             **_freshness_metadata(memory_item=memory_items_by_ref.get(("message", s["message_id"])), source_kind="message"),
         )
         for s in recent_snips
@@ -993,7 +1012,7 @@ async def build_retrieval_bundle(
             source_ref=RetrievalSourceRef(ref_type="message", ref_id=s["message_id"]),
             source_availability="not_applicable",
             qualification_reasons=["canonical_semantic"],
-            policy_metadata=_policy_metadata(s.get("metadata")),
+            policy_metadata=_policy_metadata(s.get("policy_metadata") or s.get("metadata")),
             **_freshness_metadata(memory_item=memory_items_by_ref.get(("message", s["message_id"])), source_kind="message"),
         )
         for s, score_details in ranked_semantic

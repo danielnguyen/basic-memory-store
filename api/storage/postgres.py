@@ -11,8 +11,6 @@ from psycopg.types.json import Json
 from services.derivation_versions import EPISODE_DERIVATION_VERSION, MEMORY_ITEM_DERIVATION_VERSION
 from services.memory_lifecycle import bounded_transition_reason
 
-RESERVED_POLICY_METADATA_KEY = "retrieval_policy_metadata"
-
 
 def _bounded_scalar_map(value: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(value, dict):
@@ -163,8 +161,8 @@ class PostgresStore:
         policy_metadata: dict | None = None,
     ) -> UUID:
         q = """
-        INSERT INTO messages (conversation_id, owner_id, client_id, role, content, metadata)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        INSERT INTO messages (conversation_id, owner_id, client_id, role, content, metadata, policy_metadata)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         RETURNING id;
         """
         q_touch = """
@@ -172,13 +170,11 @@ class PostgresStore:
         SET updated_at = now()
         WHERE id = %s;
         """
-        stored_metadata = dict(metadata or {})
-        if policy_metadata is not None:
-            stored_metadata[RESERVED_POLICY_METADATA_KEY] = policy_metadata
-        meta_param = Json(stored_metadata) if stored_metadata else None
+        meta_param = Json(metadata) if metadata is not None else None
+        policy_param = Json(policy_metadata) if policy_metadata is not None else None
         async with self.pool.connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(q, (conversation_id, owner_id, client_id, role, content, meta_param))
+                await cur.execute(q, (conversation_id, owner_id, client_id, role, content, meta_param, policy_param))
                 row = await cur.fetchone()
                 # bump conversation activity timestamp
                 await cur.execute(q_touch, (conversation_id,))
@@ -220,7 +216,7 @@ class PostgresStore:
         id_strs = [str(i) for i in ids]
 
         q = """
-        SELECT id, conversation_id, role, content, metadata, created_at
+        SELECT id, conversation_id, role, content, metadata, policy_metadata, created_at
         FROM messages
         WHERE id = ANY(%s);
         """
@@ -230,13 +226,14 @@ class PostgresStore:
                 rows = await cur.fetchall()
 
         by_id: dict[str, dict[str, Any]] = {}
-        for (mid, cid, role, content, metadata, created_at) in rows:
+        for (mid, cid, role, content, metadata, policy_metadata, created_at) in rows:
             by_id[str(mid)] = {
                 "message_id": str(mid),
                 "conversation_id": str(cid),
                 "role": role,
                 "content": content,
                 "metadata": metadata or {},
+                "policy_metadata": policy_metadata,
                 "created_at": str(created_at),
             }
 
@@ -1305,7 +1302,7 @@ class PostgresStore:
         params.extend([limit, offset])
 
         q = f"""
-        SELECT id, conversation_id, owner_id, client_id, role, content, metadata, created_at
+        SELECT id, conversation_id, owner_id, client_id, role, content, metadata, policy_metadata, created_at
         FROM messages
         WHERE {' AND '.join(where)}
         ORDER BY created_at ASC, id ASC
@@ -1318,7 +1315,7 @@ class PostgresStore:
                 rows = await cur.fetchall()
 
         out: list[dict[str, Any]] = []
-        for (mid, cid, owner, client_id, role, content, metadata, created_at) in rows:
+        for (mid, cid, owner, client_id, role, content, metadata, policy_metadata, created_at) in rows:
             out.append(
                 {
                     "message_id": mid,
@@ -1328,6 +1325,7 @@ class PostgresStore:
                     "role": role,
                     "content": content,
                     "metadata": metadata or {},
+                    "policy_metadata": policy_metadata,
                     "created_at": str(created_at),
                 }
             )
@@ -2055,20 +2053,60 @@ class PostgresStore:
             for (mid, cid, role, content, created_at) in rows
         ]
 
+    def _append_json_policy_where(
+        self,
+        where: str,
+        params: list[Any],
+        policy_filter: dict[str, Any] | None,
+        *,
+        column: str,
+    ) -> tuple[str, list[Any]]:
+        if policy_filter is None:
+            return where, params
+        allowed_domains = list(policy_filter.get("allowed_domains") or [])
+        if not allowed_domains:
+            return where + " AND false", params
+        blocked_domains = list(policy_filter.get("blocked_domains") or [])
+        allowed_sensitivities = list(policy_filter.get("allowed_sensitivities") or ["low", "medium", "high"])
+        where += f" AND {column} IS NOT NULL"
+        where += f" AND ({column}->'memory_domains') ?| %s"
+        params.append(allowed_domains)
+        if blocked_domains:
+            where += f" AND NOT (({column}->'memory_domains') ?| %s)"
+            params.append(blocked_domains)
+        where += f" AND ({column}->>'sensitivity') = ANY(%s)"
+        params.append(allowed_sensitivities)
+        relationship = policy_filter.get("relationship_scope") or {}
+        if relationship.get("applied"):
+            relationship_ids = list(relationship.get("relationship_ids") or [])
+            entity_ids = list(relationship.get("entity_ids") or [])
+            where += f" AND (({column}->'relationship_ids') ?| %s OR ({column}->'entity_ids') ?| %s)"
+            params.extend([relationship_ids, entity_ids])
+            relationship_scopes = list(relationship.get("relationship_scopes") or [])
+            if relationship_scopes:
+                where += (
+                    f" AND (jsonb_array_length(COALESCE({column}->'relationship_scopes', '[]'::jsonb)) = 0 "
+                    f"OR ({column}->'relationship_scopes') ?| %s)"
+                )
+                params.append(relationship_scopes)
+        return where, params
+
     async def get_pinned_memories(
         self,
         owner_id: str,
         conversation_id: UUID | None = None,
         limit: int = 5,
+        policy_filter: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         params: list[Any] = [owner_id]
         where = "WHERE owner_id = %s"
         if conversation_id is not None:
             where += " AND (conversation_id = %s OR conversation_id IS NULL)"
             params.append(conversation_id)
+        where, params = self._append_json_policy_where(where, params, policy_filter, column="policy_metadata")
 
         q = f"""
-        SELECT id, content, metadata
+        SELECT id, content, metadata, policy_metadata
         FROM pinned_memories
         {where}
         ORDER BY created_at DESC
@@ -2086,8 +2124,9 @@ class PostgresStore:
                 "id": str(pid),
                 "content": content,
                 "metadata": metadata or {},
+                "policy_metadata": policy_metadata,
             }
-            for (pid, content, metadata) in rows
+            for (pid, content, metadata, policy_metadata) in rows
         ]
 
     async def get_pinned_memories_for_hygiene(self, owner_id: str, limit: int = 50) -> list[dict[str, Any]]:
@@ -2113,37 +2152,57 @@ class PostgresStore:
             for row in rows
         ]
 
-    async def get_policy_overlays(self, owner_id: str, surface: str | None = None) -> list[dict[str, Any]]:
-        q = """
-        SELECT id, policy_json
+    async def get_policy_overlays(
+        self,
+        owner_id: str,
+        surface: str | None = None,
+        policy_filter: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        where = "WHERE owner_id = %s AND (surface = %s OR surface IS NULL)"
+        params: list[Any] = [owner_id, surface]
+        where, params = self._append_json_policy_where(where, params, policy_filter, column="policy_metadata")
+        q = f"""
+        SELECT id, policy_json, policy_metadata
         FROM policy_overlays
-        WHERE owner_id = %s
-          AND (surface = %s OR surface IS NULL)
+        {where}
         ORDER BY created_at DESC
         LIMIT 5;
         """
         async with self.pool.connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(q, (owner_id, surface))
+                await cur.execute(q, tuple(params))
                 rows = await cur.fetchall()
 
-        return [{"id": str(pid), "content": "policy", "metadata": payload or {}} for (pid, payload) in rows]
+        return [
+            {"id": str(pid), "content": "policy", "metadata": payload or {}, "policy_metadata": policy_metadata}
+            for (pid, payload, policy_metadata) in rows
+        ]
 
-    async def get_persona_overlays(self, owner_id: str, surface: str | None = None) -> list[dict[str, Any]]:
-        q = """
-        SELECT id, persona_json
+    async def get_persona_overlays(
+        self,
+        owner_id: str,
+        surface: str | None = None,
+        policy_filter: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        where = "WHERE owner_id = %s AND (surface = %s OR surface IS NULL)"
+        params: list[Any] = [owner_id, surface]
+        where, params = self._append_json_policy_where(where, params, policy_filter, column="policy_metadata")
+        q = f"""
+        SELECT id, persona_json, policy_metadata
         FROM persona_overlays
-        WHERE owner_id = %s
-          AND (surface = %s OR surface IS NULL)
+        {where}
         ORDER BY created_at DESC
         LIMIT 5;
         """
         async with self.pool.connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(q, (owner_id, surface))
+                await cur.execute(q, tuple(params))
                 rows = await cur.fetchall()
 
-        return [{"id": str(pid), "content": "persona", "metadata": payload or {}} for (pid, payload) in rows]
+        return [
+            {"id": str(pid), "content": "persona", "metadata": payload or {}, "policy_metadata": policy_metadata}
+            for (pid, payload, policy_metadata) in rows
+        ]
 
     async def create_hygiene_flag(
         self,
@@ -2291,34 +2350,33 @@ class PostgresStore:
                 return []
             blocked_domains = list(policy_filter.get("blocked_domains") or [])
             allowed_sensitivities = list(policy_filter.get("allowed_sensitivities") or [])
-            where.append("metadata ? %s")
-            params.append(RESERVED_POLICY_METADATA_KEY)
-            where.append(f"(metadata->'{RESERVED_POLICY_METADATA_KEY}'->'memory_domains') ?| %s")
+            where.append("policy_metadata IS NOT NULL")
+            where.append("(policy_metadata->'memory_domains') ?| %s")
             params.append(allowed_domains)
             if blocked_domains:
-                where.append(f"NOT ((metadata->'{RESERVED_POLICY_METADATA_KEY}'->'memory_domains') ?| %s)")
+                where.append("NOT ((policy_metadata->'memory_domains') ?| %s)")
                 params.append(blocked_domains)
-            where.append(f"(metadata->'{RESERVED_POLICY_METADATA_KEY}'->>'sensitivity') = ANY(%s)")
+            where.append("(policy_metadata->>'sensitivity') = ANY(%s)")
             params.append(allowed_sensitivities or ["low", "medium", "high"])
             relationship = policy_filter.get("relationship_scope") or {}
             if relationship.get("applied"):
                 relationship_ids = list(relationship.get("relationship_ids") or [])
                 entity_ids = list(relationship.get("entity_ids") or [])
                 where.append(
-                    f"((metadata->'{RESERVED_POLICY_METADATA_KEY}'->'relationship_ids') ?| %s "
-                    f"OR (metadata->'{RESERVED_POLICY_METADATA_KEY}'->'entity_ids') ?| %s)"
+                    "((policy_metadata->'relationship_ids') ?| %s "
+                    "OR (policy_metadata->'entity_ids') ?| %s)"
                 )
                 params.extend([relationship_ids, entity_ids])
                 relationship_scopes = list(relationship.get("relationship_scopes") or [])
                 if relationship_scopes:
                     where.append(
-                        f"(jsonb_array_length(COALESCE(metadata->'{RESERVED_POLICY_METADATA_KEY}'->'relationship_scopes', '[]'::jsonb)) = 0 "
-                        f"OR (metadata->'{RESERVED_POLICY_METADATA_KEY}'->'relationship_scopes') ?| %s)"
+                        "(jsonb_array_length(COALESCE(policy_metadata->'relationship_scopes', '[]'::jsonb)) = 0 "
+                        "OR (policy_metadata->'relationship_scopes') ?| %s)"
                     )
                     params.append(relationship_scopes)
         params.append(limit)
         q = f"""
-        SELECT id, conversation_id, role, content, metadata, created_at
+        SELECT id, conversation_id, role, content, metadata, policy_metadata, created_at
         FROM messages
         WHERE {' AND '.join(where)}
         ORDER BY created_at DESC
@@ -2337,7 +2395,8 @@ class PostgresStore:
                 "role": r[2],
                 "content": r[3],
                 "metadata": r[4] or {},
-                "created_at": str(r[5]),
+                "policy_metadata": r[5],
+                "created_at": str(r[6]),
             }
             for r in rows
         ]
