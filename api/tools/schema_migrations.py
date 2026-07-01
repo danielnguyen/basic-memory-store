@@ -22,6 +22,7 @@ from psycopg.rows import dict_row
 BASELINE_VERSION = "schema_baseline_20260620"
 COMPATIBLE_BASELINE_CHECKSUMS = {
     "b68542ad271358abdc077a604b0ac90c295ef9e3a5fdb10f7548a40f835b27d8",
+    "205107414e8fba04dabaa7d4f95e731058f2f2f59e5819b8bd16577b3e880a5b",
 }
 LEDGER_TABLE = "schema_migrations"
 LOCK_KEY = 612361446343624483

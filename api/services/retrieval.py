@@ -11,6 +11,7 @@ from models import (
     DerivedProvenance,
     ObservedMetadata,
     RetrievalBundle,
+    RetrievalContainmentPolicy,
     RetrievalMessageItem,
     RetrievalOptions,
     RetrievalPolicyMetadata,
@@ -34,6 +35,8 @@ LIFECYCLE_RESTRICTED_STATES = {
     "forgotten_or_demoted",
     "unknown_freshness",
 }
+RESERVED_POLICY_METADATA_KEY = "retrieval_policy_metadata"
+SENSITIVITY_ORDER = ("low", "medium", "high", "restricted")
 
 
 def cap_snippet(text: str, max_chars: int) -> str:
@@ -198,6 +201,9 @@ def _normalize_domain_values(raw_value: Any) -> list[str]:
 
 def _policy_metadata(raw_metadata: Any) -> RetrievalPolicyMetadata:
     metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+    structured = metadata.get(RESERVED_POLICY_METADATA_KEY)
+    if isinstance(structured, dict):
+        metadata = structured
     domains: list[str] = []
     for key in ("memory_domains", "memory_domain", "domains", "domain"):
         domains = _normalize_domain_values(metadata.get(key))
@@ -210,7 +216,150 @@ def _policy_metadata(raw_metadata: Any) -> RetrievalPolicyMetadata:
     else:
         sensitivity = None
 
-    return RetrievalPolicyMetadata(memory_domains=domains, sensitivity=sensitivity)
+    content_class = metadata.get("content_class")
+    if isinstance(content_class, str):
+        content_class = content_class.strip().lower().replace("-", "_").replace(" ", "_") or None
+    else:
+        content_class = None
+    return RetrievalPolicyMetadata(
+        memory_domains=domains,
+        sensitivity=sensitivity,
+        content_class=content_class,
+        entity_ids=[item.strip() for item in metadata.get("entity_ids", []) if isinstance(item, str) and item.strip()]
+        if isinstance(metadata.get("entity_ids"), list)
+        else [],
+        relationship_ids=[
+            item.strip() for item in metadata.get("relationship_ids", []) if isinstance(item, str) and item.strip()
+        ]
+        if isinstance(metadata.get("relationship_ids"), list)
+        else [],
+        relationship_scopes=_normalize_domain_values(metadata.get("relationship_scopes")),
+    )
+
+
+def _sensitivity_values_through(maximum: str) -> list[str]:
+    if maximum not in SENSITIVITY_ORDER:
+        return []
+    return [value for value in SENSITIVITY_ORDER[: SENSITIVITY_ORDER.index(maximum) + 1] if value != "restricted"]
+
+
+def _containment_filter(policy: RetrievalContainmentPolicy | None, *, artifact: bool = False) -> dict[str, Any] | None:
+    if policy is None:
+        return None
+    allowed_domains = _normalize_domain_values(policy.allowed_memory_domains)
+    blocked_domains = _normalize_domain_values(policy.blocked_memory_domains)
+    content_classes: list[str] = []
+    allowed_sensitivities = ["low", "medium", "high"]
+    if artifact:
+        artifact_policy = policy.artifact_access_policy
+        allowed_domains = sorted(set(allowed_domains) & set(_normalize_domain_values(artifact_policy.allowed_domains)))
+        content_classes = sorted(
+            set(artifact_policy.allowed_content_classes)
+            & set(artifact_policy.surface_content_capabilities)
+        )
+        allowed_sensitivities = _sensitivity_values_through(artifact_policy.maximum_sensitivity)
+    projection = policy.relationship_scope_projection
+    relationship_scope = {
+        "applied": bool(projection and projection.applied),
+        "relationship_ids": list(projection.relationship_ids if projection else []),
+        "entity_ids": list(projection.entity_ids if projection else []),
+        "relationship_scopes": _normalize_domain_values(projection.relationship_scopes if projection else []),
+    }
+    return {
+        "mode": "mandatory",
+        "allowed_domains": allowed_domains,
+        "blocked_domains": blocked_domains,
+        "allowed_sensitivities": allowed_sensitivities,
+        "content_classes": content_classes,
+        "relationship_scope": relationship_scope,
+        "artifact_policy_empty": artifact and (not allowed_domains or not content_classes),
+    }
+
+
+def _mandatory_debug_state(policy: RetrievalContainmentPolicy | None) -> dict[str, Any]:
+    return {
+        "enforcement_mode": "mandatory" if policy is not None else "legacy",
+        "policy_supplied": policy is not None,
+        "pre_limit_policy_filter_applied": policy is not None,
+        "post_fetch_validation_count": 0,
+        "retained_count": 0,
+        "omitted_counts_by_reason": {},
+        "relationship_narrowing_applied": bool(
+            policy and policy.relationship_scope_projection and policy.relationship_scope_projection.applied
+        ),
+        "artifact_search_skipped_reason": None,
+    }
+
+
+def _add_policy_omission(debug_state: dict[str, Any], reason: str) -> None:
+    omitted = debug_state["omitted_counts_by_reason"]
+    omitted[reason] = int(omitted.get(reason, 0)) + 1
+
+
+def _mandatory_policy_metadata(raw: Any, *, nested: bool) -> tuple[RetrievalPolicyMetadata | None, str | None]:
+    if not isinstance(raw, dict):
+        return None, "missing_policy_metadata"
+    metadata = raw.get(RESERVED_POLICY_METADATA_KEY) if nested else raw
+    if not isinstance(metadata, dict):
+        return None, "missing_policy_metadata"
+    parsed = _policy_metadata(metadata)
+    if not parsed.memory_domains:
+        return None, "missing_policy_metadata"
+    if parsed.sensitivity not in SENSITIVITY_ORDER:
+        return None, "malformed_policy_metadata"
+    if not isinstance(metadata.get("entity_ids", []), list) or not isinstance(metadata.get("relationship_ids", []), list):
+        return None, "malformed_policy_metadata"
+    if not isinstance(metadata.get("relationship_scopes", []), list):
+        return None, "malformed_policy_metadata"
+    return parsed, None
+
+
+def _record_allowed_by_filter(
+    metadata: RetrievalPolicyMetadata,
+    policy_filter: dict[str, Any],
+    *,
+    artifact: bool,
+) -> tuple[bool, str | None]:
+    domains = set(metadata.memory_domains)
+    allowed_domains = set(policy_filter.get("allowed_domains") or [])
+    blocked_domains = set(policy_filter.get("blocked_domains") or [])
+    if not allowed_domains or not (domains & allowed_domains):
+        return False, "outside_allowed_domain"
+    if blocked_domains and domains & blocked_domains:
+        return False, "blocked_domain"
+    if metadata.sensitivity == "restricted":
+        return False, "restricted_sensitivity"
+    if metadata.sensitivity not in set(policy_filter.get("allowed_sensitivities") or []):
+        return False, "sensitivity_ceiling_exceeded"
+    if artifact:
+        if metadata.content_class not in set(policy_filter.get("content_classes") or []):
+            return False, "content_class_not_allowed"
+    relationship = policy_filter.get("relationship_scope") or {}
+    if relationship.get("applied"):
+        relationship_match = bool(set(metadata.relationship_ids) & set(relationship.get("relationship_ids") or []))
+        entity_match = bool(set(metadata.entity_ids) & set(relationship.get("entity_ids") or []))
+        if not relationship_match and not entity_match:
+            return False, "relationship_scope_mismatch"
+        selected_scopes = set(relationship.get("relationship_scopes") or [])
+        if selected_scopes and metadata.relationship_scopes and not (set(metadata.relationship_scopes) & selected_scopes):
+            return False, "relationship_scope_mismatch"
+    return True, None
+
+
+def _mandatory_record_allowed(
+    raw_metadata: Any,
+    policy_filter: dict[str, Any],
+    *,
+    nested: bool,
+    artifact: bool = False,
+) -> tuple[RetrievalPolicyMetadata | None, str | None]:
+    parsed, reason = _mandatory_policy_metadata(raw_metadata, nested=nested)
+    if reason is not None or parsed is None:
+        return None, reason
+    allowed, reason = _record_allowed_by_filter(parsed, policy_filter, artifact=artifact)
+    if not allowed:
+        return parsed, reason
+    return parsed, None
 
 
 def _normalize_freshness_state(memory_item: dict[str, Any] | None) -> str:
@@ -547,6 +696,8 @@ async def retrieve_ranked_messages(
     client_id: str | None,
     exclude_message_ids: list[str] | None = None,
     context: str = "retrieval",
+    policy_filter: dict[str, Any] | None = None,
+    policy_debug: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     conversation_filter: str | None = None
     client_filter: str | None = None
@@ -566,6 +717,7 @@ async def retrieve_ranked_messages(
             conversation_id=conversation_filter,
             client_id=client_filter,
             exclude_message_ids=exclude_message_ids,
+            policy_filter=policy_filter,
         )
     except Exception:
         logging.warning("Vector retrieval unavailable; continuing with canonical recent messages")
@@ -593,6 +745,18 @@ async def retrieve_ranked_messages(
     for snippet in semantic_snips:
         if not _in_time_window(snippet.get("created_at"), opts.time_window):
             continue
+        if policy_filter is not None:
+            if policy_debug is not None:
+                policy_debug["post_fetch_validation_count"] += 1
+            _, rejection_reason = _mandatory_record_allowed(
+                snippet.get("metadata"),
+                policy_filter,
+                nested=True,
+            )
+            if rejection_reason is not None:
+                if policy_debug is not None:
+                    _add_policy_omission(policy_debug, rejection_reason)
+                continue
         score_details = _score_item(
             settings=settings,
             semantic_score=semantic_score_by_id.get(snippet["message_id"]),
@@ -621,6 +785,7 @@ async def retrieve_ranked_messages(
             "semantic_invalid_hit_ids": invalid_hit_ids,
             "semantic_missing_source_count": missing_source_count,
             "fallback_to_raw_reasons": fallback_to_raw_reasons,
+            "mandatory_policy_filter_applied": policy_filter is not None,
         },
     }
 
@@ -638,7 +803,11 @@ async def build_retrieval_bundle(
     include_artifacts: bool = True,
     allowed_memory_domains: list[str] | None = None,
     blocked_memory_domains: list[str] | None = None,
+    containment_policy: RetrievalContainmentPolicy | None = None,
 ) -> RetrievalBundle:
+    policy_debug = _mandatory_debug_state(containment_policy)
+    message_policy_filter = _containment_filter(containment_policy, artifact=False)
+    artifact_policy_filter = _containment_filter(containment_policy, artifact=True)
     message_results = await retrieve_ranked_messages(
         pg=pg,
         qdrant=qdrant,
@@ -649,21 +818,30 @@ async def build_retrieval_bundle(
         conversation_id=conversation_id,
         client_id=client_id,
         context="retrieve_bundle",
+        policy_filter=message_policy_filter,
+        policy_debug=policy_debug,
     )
     ranked_semantic = message_results["ranked_semantic"]
 
     artifact_k = retrieval_artifact_k(settings) if include_artifacts else 0
     artifact_status = "not_requested" if artifact_k == 0 else "ok"
     artifact_omission_reasons: list[str] = []
-    if artifact_k > 0:
+    if artifact_k > 0 and artifact_policy_filter is not None and artifact_policy_filter.get("artifact_policy_empty"):
+        artifact_hits = []
+        artifact_status = "not_requested"
+        artifact_omission_reasons.append("artifact_policy_empty")
+        policy_debug["artifact_search_skipped_reason"] = "artifact_policy_empty"
+        _add_policy_omission(policy_debug, "artifact_policy_empty")
+    elif artifact_k > 0:
         try:
             artifact_hits = await qdrant.search_artifact_chunks(
                 owner_id=owner_id,
                 query=query,
-                k=artifact_k,
+                k=min(max(artifact_k * 20, artifact_k), 100) if artifact_policy_filter is not None else artifact_k,
                 min_score=opts.min_score,
                 client_id=(client_id if opts.scope == "client" else None),
                 conversation_id=(conversation_id if opts.scope == "conversation" else None),
+                policy_filter=artifact_policy_filter,
             )
         except Exception:
             logging.warning("Artifact retrieval unavailable; continuing without artifact snippets")
@@ -705,6 +883,19 @@ async def build_retrieval_bundle(
     for snippet in artifact_snips:
         if not _in_time_window(snippet.get("created_at"), opts.time_window):
             continue
+        if artifact_policy_filter is not None:
+            policy_debug["post_fetch_validation_count"] += 1
+            _, rejection_reason = _mandatory_record_allowed(
+                snippet.get("policy_metadata"),
+                artifact_policy_filter,
+                nested=False,
+                artifact=True,
+            )
+            if rejection_reason is not None:
+                _add_policy_omission(policy_debug, rejection_reason)
+                artifact_status = "degraded"
+                artifact_omission_reasons.append(rejection_reason)
+                continue
         if snippet.get("owner_id") != owner_id:
             cross_owner_artifact_provenance_count += 1
             artifact_status = "degraded"
@@ -744,10 +935,17 @@ async def build_retrieval_bundle(
     ranked_artifacts.sort(key=lambda item: item[1]["final_score"], reverse=True)
     ranked_artifacts = ranked_artifacts[:artifact_k]
 
-    recent_snips = await pg.get_recent_message_items(
-        conversation_id=conversation_id,
-        limit=getattr(settings, "recent_turns", 10),
-    )
+    if message_policy_filter is None:
+        recent_snips = await pg.get_recent_message_items(
+            conversation_id=conversation_id,
+            limit=getattr(settings, "recent_turns", 10),
+        )
+    else:
+        recent_snips = await pg.get_recent_message_items(
+            conversation_id=conversation_id,
+            limit=getattr(settings, "recent_turns", 10),
+            policy_filter=message_policy_filter,
+        )
     source_refs = [
         {"ref_type": "message", "ref_id": snippet["message_id"]}
         for snippet in recent_snips
@@ -835,7 +1033,7 @@ async def build_retrieval_bundle(
                 source_ref=RetrievalSourceRef(ref_type="derived_text", ref_id=s["derived_text_id"]),
                 source_availability=source_availability,
                 source_checks=source_checks,
-                policy_metadata=_policy_metadata(s.get("derivation_params")),
+                policy_metadata=_policy_metadata(s.get("policy_metadata")),
                 provenance=DerivedProvenance(
                     **provenance,
                     retrieval_reason="included_by_artifact_similarity",
@@ -865,24 +1063,26 @@ async def build_retrieval_bundle(
         "tagged_records_filtered": 0,
         "untagged_records_not_domain_enforced": 0,
     }
-    recent_items = _filter_message_items(
-        items=recent_items,
-        allowed_domains=allowed_domain_set,
-        blocked_domains=blocked_domain_set,
-        debug_state=domain_filter_debug,
-    )
-    semantic_items = _filter_message_items(
-        items=semantic_items,
-        allowed_domains=allowed_domain_set,
-        blocked_domains=blocked_domain_set,
-        debug_state=domain_filter_debug,
-    )
-    artifact_refs = _filter_artifact_refs(
-        items=artifact_refs,
-        allowed_domains=allowed_domain_set,
-        blocked_domains=blocked_domain_set,
-        debug_state=domain_filter_debug,
-    )
+    if containment_policy is None:
+        recent_items = _filter_message_items(
+            items=recent_items,
+            allowed_domains=allowed_domain_set,
+            blocked_domains=blocked_domain_set,
+            debug_state=domain_filter_debug,
+        )
+        semantic_items = _filter_message_items(
+            items=semantic_items,
+            allowed_domains=allowed_domain_set,
+            blocked_domains=blocked_domain_set,
+            debug_state=domain_filter_debug,
+        )
+        artifact_refs = _filter_artifact_refs(
+            items=artifact_refs,
+            allowed_domains=allowed_domain_set,
+            blocked_domains=blocked_domain_set,
+            debug_state=domain_filter_debug,
+        )
+    policy_debug["retained_count"] = len(recent_items) + len(semantic_items) + len(artifact_refs)
     truth_debug["canonical_result_count"] = len(recent_items) + len(semantic_items)
     truth_debug["derived_result_count"] = len(artifact_refs)
     all_content = "".join(
@@ -933,6 +1133,16 @@ async def build_retrieval_bundle(
                 and domain_filter_debug["tagged_records_evaluated"] > 0
             ),
             "domain_enforcement_mode": "tagged_records_only",
+            "containment_policy": {
+                "enforcement_mode": policy_debug["enforcement_mode"],
+                "policy_supplied": policy_debug["policy_supplied"],
+                "pre_limit_policy_filter_applied": policy_debug["pre_limit_policy_filter_applied"],
+                "post_fetch_validation_count": policy_debug["post_fetch_validation_count"],
+                "retained_count": policy_debug["retained_count"],
+                "omitted_counts_by_reason": policy_debug["omitted_counts_by_reason"],
+                "relationship_narrowing_applied": policy_debug["relationship_narrowing_applied"],
+                "artifact_search_skipped_reason": policy_debug["artifact_search_skipped_reason"],
+            },
             **domain_filter_debug,
         },
     )
@@ -940,6 +1150,14 @@ async def build_retrieval_bundle(
 
 def _diagnostic_reason_codes(debug: dict[str, Any]) -> list[str]:
     codes: list[str] = []
+    containment = debug.get("containment_policy") if isinstance(debug.get("containment_policy"), dict) else {}
+    if containment.get("enforcement_mode") == "mandatory":
+        codes.append("mandatory_containment_applied")
+    else:
+        codes.append("legacy_retrieval_policy")
+    for reason, count in (containment.get("omitted_counts_by_reason") or {}).items():
+        if int(count or 0) > 0:
+            codes.append(str(reason)[:80])
     truth = debug.get("truth_qualification") if isinstance(debug.get("truth_qualification"), dict) else {}
     if truth.get("canonical_result_count", 0) > 0:
         codes.append("canonical_evidence_used")
@@ -1070,6 +1288,7 @@ async def build_retrieval_response_payload(
     include_artifacts: bool,
     allowed_memory_domains: list[str] | None = None,
     blocked_memory_domains: list[str] | None = None,
+    containment_policy: RetrievalContainmentPolicy | None = None,
 ) -> dict[str, Any]:
     normalized_query = query.strip()
     normalization_applied = normalized_query != query
@@ -1086,6 +1305,7 @@ async def build_retrieval_response_payload(
             include_artifacts=False,
             allowed_memory_domains=allowed_memory_domains,
             blocked_memory_domains=blocked_memory_domains,
+            containment_policy=containment_policy,
         )
         diagnostics = doctrine_diagnostics_for_bundle(
             request_id=request_id,
@@ -1109,6 +1329,7 @@ async def build_retrieval_response_payload(
             include_artifacts=False,
             allowed_memory_domains=allowed_memory_domains,
             blocked_memory_domains=blocked_memory_domains,
+            containment_policy=containment_policy,
         )
         raw_summary = summarize_bundle(raw_bundle)
         augmented_bundle: RetrievalBundle | None = None
@@ -1126,6 +1347,7 @@ async def build_retrieval_response_payload(
                 include_artifacts=include_artifacts,
                 allowed_memory_domains=allowed_memory_domains,
                 blocked_memory_domains=blocked_memory_domains,
+                containment_policy=containment_policy,
             )
             augmented_summary = summarize_bundle(augmented_bundle)
             comparison = compare_bundle_summaries(raw_summary, augmented_summary)
@@ -1206,6 +1428,7 @@ async def build_retrieval_response_payload(
         include_artifacts=include_artifacts,
         allowed_memory_domains=allowed_memory_domains,
         blocked_memory_domains=blocked_memory_domains,
+        containment_policy=containment_policy,
     )
     diagnostics = doctrine_diagnostics_for_bundle(
         request_id=request_id,

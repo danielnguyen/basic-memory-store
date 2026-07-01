@@ -11,6 +11,8 @@ from psycopg.types.json import Json
 from services.derivation_versions import EPISODE_DERIVATION_VERSION, MEMORY_ITEM_DERIVATION_VERSION
 from services.memory_lifecycle import bounded_transition_reason
 
+RESERVED_POLICY_METADATA_KEY = "retrieval_policy_metadata"
+
 
 def _bounded_scalar_map(value: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(value, dict):
@@ -158,6 +160,7 @@ class PostgresStore:
         content: str,
         client_id: str | None = None,
         metadata: dict | None = None,
+        policy_metadata: dict | None = None,
     ) -> UUID:
         q = """
         INSERT INTO messages (conversation_id, owner_id, client_id, role, content, metadata)
@@ -169,7 +172,10 @@ class PostgresStore:
         SET updated_at = now()
         WHERE id = %s;
         """
-        meta_param = Json(metadata) if metadata is not None else None
+        stored_metadata = dict(metadata or {})
+        if policy_metadata is not None:
+            stored_metadata[RESERVED_POLICY_METADATA_KEY] = policy_metadata
+        meta_param = Json(stored_metadata) if stored_metadata else None
         async with self.pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(q, (conversation_id, owner_id, client_id, role, content, meta_param))
@@ -1299,7 +1305,7 @@ class PostgresStore:
         params.extend([limit, offset])
 
         q = f"""
-        SELECT id, conversation_id, owner_id, client_id, role, content, created_at
+        SELECT id, conversation_id, owner_id, client_id, role, content, metadata, created_at
         FROM messages
         WHERE {' AND '.join(where)}
         ORDER BY created_at ASC, id ASC
@@ -1312,7 +1318,7 @@ class PostgresStore:
                 rows = await cur.fetchall()
 
         out: list[dict[str, Any]] = []
-        for (mid, cid, owner, client_id, role, content, created_at) in rows:
+        for (mid, cid, owner, client_id, role, content, metadata, created_at) in rows:
             out.append(
                 {
                     "message_id": mid,
@@ -1321,6 +1327,7 @@ class PostgresStore:
                     "client_id": client_id,
                     "role": role,
                     "content": content,
+                    "metadata": metadata or {},
                     "created_at": str(created_at),
                 }
             )
@@ -1344,16 +1351,18 @@ class PostgresStore:
         ingestion_id: UUID | None = None,
         sha256: str | None = None,
         status: str = "pending",
+        policy_metadata: dict | None = None,
     ) -> dict[str, Any]:
         q = """
         INSERT INTO artifacts (
             id, owner_id, client_id, conversation_id, filename, mime, size, object_uri, source_surface,
-            status, sha256, source_kind, repo_name, repo_ref, file_path, ingestion_id, completed_at
+            status, sha256, source_kind, repo_name, repo_ref, file_path, ingestion_id, policy_metadata, completed_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                 CASE WHEN %s = 'completed' THEN now() ELSE NULL END)
         RETURNING id, owner_id, client_id, conversation_id, filename, mime, size, object_uri, source_surface,
-                  status, sha256, created_at, completed_at, source_kind, repo_name, repo_ref, file_path, ingestion_id;
+                  status, sha256, created_at, completed_at, source_kind, repo_name, repo_ref, file_path, ingestion_id,
+                  policy_metadata;
         """
         async with self.pool.connection() as conn:
             async with conn.cursor() as cur:
@@ -1376,6 +1385,7 @@ class PostgresStore:
                         repo_ref,
                         file_path,
                         ingestion_id,
+                        Json(policy_metadata) if policy_metadata is not None else None,
                         status,
                     ),
                 )
@@ -1398,6 +1408,7 @@ class PostgresStore:
                     repo_ref_out,
                     file_path_out,
                     ingestion_id_out,
+                    policy_metadata_out,
                 ) = await cur.fetchone()
 
         return {
@@ -1419,6 +1430,7 @@ class PostgresStore:
             "repo_ref": repo_ref_out,
             "file_path": file_path_out,
             "ingestion_id": str(ingestion_id_out) if ingestion_id_out else None,
+            "policy_metadata": policy_metadata_out,
         }
 
     async def complete_artifact(
@@ -1435,7 +1447,8 @@ class PostgresStore:
           completed_at = CASE WHEN %s = 'completed' THEN now() ELSE completed_at END
         WHERE id = %s
         RETURNING id, owner_id, client_id, conversation_id, filename, mime, size, object_uri, source_surface,
-                  status, sha256, created_at, completed_at, source_kind, repo_name, repo_ref, file_path, ingestion_id;
+                  status, sha256, created_at, completed_at, source_kind, repo_name, repo_ref, file_path, ingestion_id,
+                  policy_metadata;
         """
         async with self.pool.connection() as conn:
             async with conn.cursor() as cur:
@@ -1464,6 +1477,7 @@ class PostgresStore:
             repo_ref,
             file_path,
             ingestion_id,
+            policy_metadata,
         ) = row
         return {
             "artifact_id": str(aid),
@@ -1484,12 +1498,14 @@ class PostgresStore:
             "repo_ref": repo_ref,
             "file_path": file_path,
             "ingestion_id": str(ingestion_id) if ingestion_id else None,
+            "policy_metadata": policy_metadata,
         }
 
     async def get_artifact(self, artifact_id: UUID) -> dict[str, Any] | None:
         q = """
         SELECT id, owner_id, client_id, conversation_id, filename, mime, size, object_uri, source_surface,
-               status, sha256, created_at, completed_at, source_kind, repo_name, repo_ref, file_path, ingestion_id
+               status, sha256, created_at, completed_at, source_kind, repo_name, repo_ref, file_path, ingestion_id,
+               policy_metadata
         FROM artifacts
         WHERE id = %s;
         """
@@ -1520,6 +1536,7 @@ class PostgresStore:
             repo_ref,
             file_path,
             ingestion_id,
+            policy_metadata,
         ) = row
         return {
             "artifact_id": str(aid),
@@ -1540,6 +1557,7 @@ class PostgresStore:
             "repo_ref": repo_ref,
             "file_path": file_path,
             "ingestion_id": str(ingestion_id) if ingestion_id else None,
+            "policy_metadata": policy_metadata,
         }
 
     async def create_derived_text(
@@ -1595,7 +1613,7 @@ class PostgresStore:
         id_strs = [str(i) for i in ids]
         q = """
         SELECT dt.id, dt.artifact_id, dt.kind, dt.text, dt.derivation_params, dt.created_at,
-               a.owner_id, a.file_path, a.repo_name, a.mime
+               a.owner_id, a.file_path, a.repo_name, a.mime, a.policy_metadata
         FROM derived_text dt
         JOIN artifacts a ON a.id = dt.artifact_id
         WHERE dt.id = ANY(%s)
@@ -1619,6 +1637,7 @@ class PostgresStore:
                 "file_path": row[7] or "",
                 "repo_name": row[8],
                 "mime": row[9],
+                "policy_metadata": row[10],
             }
         return [by_id[item] for item in id_strs if item in by_id]
 
@@ -2258,17 +2277,56 @@ class PostgresStore:
                 await cur.execute("SELECT 1;")
                 await cur.fetchone()
 
-    async def get_recent_message_items(self, conversation_id: UUID, limit: int = 10) -> list[dict[str, Any]]:
-        q = """
+    async def get_recent_message_items(
+        self,
+        conversation_id: UUID,
+        limit: int = 10,
+        policy_filter: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        where = ["conversation_id = %s"]
+        params: list[Any] = [conversation_id]
+        if policy_filter is not None:
+            allowed_domains = list(policy_filter.get("allowed_domains") or [])
+            if not allowed_domains:
+                return []
+            blocked_domains = list(policy_filter.get("blocked_domains") or [])
+            allowed_sensitivities = list(policy_filter.get("allowed_sensitivities") or [])
+            where.append("metadata ? %s")
+            params.append(RESERVED_POLICY_METADATA_KEY)
+            where.append(f"(metadata->'{RESERVED_POLICY_METADATA_KEY}'->'memory_domains') ?| %s")
+            params.append(allowed_domains)
+            if blocked_domains:
+                where.append(f"NOT ((metadata->'{RESERVED_POLICY_METADATA_KEY}'->'memory_domains') ?| %s)")
+                params.append(blocked_domains)
+            where.append(f"(metadata->'{RESERVED_POLICY_METADATA_KEY}'->>'sensitivity') = ANY(%s)")
+            params.append(allowed_sensitivities or ["low", "medium", "high"])
+            relationship = policy_filter.get("relationship_scope") or {}
+            if relationship.get("applied"):
+                relationship_ids = list(relationship.get("relationship_ids") or [])
+                entity_ids = list(relationship.get("entity_ids") or [])
+                where.append(
+                    f"((metadata->'{RESERVED_POLICY_METADATA_KEY}'->'relationship_ids') ?| %s "
+                    f"OR (metadata->'{RESERVED_POLICY_METADATA_KEY}'->'entity_ids') ?| %s)"
+                )
+                params.extend([relationship_ids, entity_ids])
+                relationship_scopes = list(relationship.get("relationship_scopes") or [])
+                if relationship_scopes:
+                    where.append(
+                        f"(jsonb_array_length(COALESCE(metadata->'{RESERVED_POLICY_METADATA_KEY}'->'relationship_scopes', '[]'::jsonb)) = 0 "
+                        f"OR (metadata->'{RESERVED_POLICY_METADATA_KEY}'->'relationship_scopes') ?| %s)"
+                    )
+                    params.append(relationship_scopes)
+        params.append(limit)
+        q = f"""
         SELECT id, conversation_id, role, content, metadata, created_at
         FROM messages
-        WHERE conversation_id = %s
+        WHERE {' AND '.join(where)}
         ORDER BY created_at DESC
         LIMIT %s;
         """
         async with self.pool.connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(q, (conversation_id, limit))
+                await cur.execute(q, tuple(params))
                 rows = await cur.fetchall()
 
         rows.reverse()

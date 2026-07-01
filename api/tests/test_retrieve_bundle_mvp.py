@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 import main as main_module
+from models import ArtifactInitRequest, MessageCreateRequest
 
 
 class FakePG:
@@ -72,8 +73,10 @@ class FakePG:
     async def get_message_owner(self, message_id):
         return "owner"
 
-    async def get_recent_message_items(self, conversation_id, limit):
+    async def get_recent_message_items(self, conversation_id, limit, policy_filter=None):
         self.last_conversation_id = str(conversation_id)
+        if policy_filter is not None:
+            return []
         return [
             {
                 "message_id": str(uuid.uuid4()),
@@ -107,6 +110,7 @@ class FakePG:
                     "kind": "chunk",
                     "text": _text(idx),
                     "derivation_params": self.artifact_metadata.get(str(item), {}),
+                    "policy_metadata": self.artifact_metadata.get(str(item)),
                     "created_at": "2026-01-01T00:00:00+00:00",
                     "file_path": _file_path(idx),
                     "repo_name": "basic-memory-store",
@@ -158,8 +162,10 @@ class FakePG:
 
 
 class FakeQdrant:
-    def __init__(self, *, message_scores=None):
+    def __init__(self, *, message_scores=None, message_ids=None, artifact_ids=None):
         self.message_scores = message_scores or [0.77]
+        self.message_ids = message_ids
+        self.artifact_ids = artifact_ids
         self.artifact_search_calls = []
         self.search_calls = []
 
@@ -168,29 +174,62 @@ class FakeQdrant:
 
     async def search(self, **kwargs):
         self.search_calls.append(kwargs)
+        ids = self.message_ids or [str(uuid.uuid4()) for _ in self.message_scores]
         return [
-            types.SimpleNamespace(message_id=str(uuid.uuid4()), score=score)
-            for score in self.message_scores
+            types.SimpleNamespace(message_id=ids[idx], score=score)
+            for idx, score in enumerate(self.message_scores)
         ]
 
     async def search_artifact_chunks(self, **kwargs):
         self.artifact_search_calls.append(kwargs)
+        ids = self.artifact_ids or [str(uuid.uuid4()), str(uuid.uuid4())]
         return [
             types.SimpleNamespace(
-                derived_text_id=str(uuid.uuid4()),
+                derived_text_id=ids[0],
                 artifact_id=str(uuid.uuid4()),
                 file_path="api/helpers.py",
                 repo_name="basic-memory-store",
                 score=0.66,
             ),
             types.SimpleNamespace(
-                derived_text_id=str(uuid.uuid4()),
+                derived_text_id=ids[1],
                 artifact_id=str(uuid.uuid4()),
                 file_path="api/helpers.py",
                 repo_name="basic-memory-store",
                 score=0.61,
             ),
         ]
+
+
+def _mandatory_policy(*, domains=None, blocked=None, relationship=None, artifact_classes=None, surface_classes=None):
+    domains = domains if domains is not None else ["technical"]
+    return {
+        "enforcement_mode": "mandatory",
+        "allowed_memory_domains": domains,
+        "blocked_memory_domains": blocked or [],
+        "artifact_access_policy": {
+            "enforcement_mode": "mandatory",
+            "allowed_content_classes": artifact_classes or ["document", "code"],
+            "allowed_domains": domains,
+            "maximum_sensitivity": "medium",
+            "surface_content_capabilities": surface_classes or ["document", "code"],
+            "reason_codes": ["artifact_policy_applied"],
+        },
+        "relationship_scope_projection": relationship,
+    }
+
+
+def _record_policy(*, domains=None, sensitivity="low", content_class=None, entity_ids=None, relationship_ids=None, scopes=None):
+    payload = {
+        "memory_domains": domains if domains is not None else ["technical"],
+        "sensitivity": sensitivity,
+        "entity_ids": entity_ids or [],
+        "relationship_ids": relationship_ids or [],
+        "relationship_scopes": scopes or [],
+    }
+    if content_class is not None:
+        payload["content_class"] = content_class
+    return payload
 
 
 async def _post_retrieve_bundle(
@@ -1349,7 +1388,7 @@ async def test_retrieve_mode_rejects_unknown_and_identity_mismatch(monkeypatch):
 @pytest.mark.asyncio
 async def test_canonical_retrieval_failure_is_bounded_explicit_failure(monkeypatch):
     class FailingCanonicalPG(FakePG):
-        async def get_recent_message_items(self, conversation_id, limit):
+        async def get_recent_message_items(self, conversation_id, limit, policy_filter=None):
             raise RuntimeError("canonical store unavailable")
 
     fake_pg = FailingCanonicalPG()
@@ -1388,3 +1427,333 @@ async def test_canonical_retrieval_failure_is_bounded_explicit_failure(monkeypat
     assert trace["status"] == "failed"
     assert trace["retrieval"]["status"] == "failed"
     assert "fallback_to_raw" not in trace["retrieval"]["reason_codes"]
+
+
+@pytest.mark.asyncio
+async def test_mandatory_containment_excludes_untagged_and_uses_qdrant_policy_filter(monkeypatch):
+    ineligible_id = str(uuid.uuid4())
+    eligible_id = str(uuid.uuid4())
+    fake_pg = FakePG(
+        message_metadata={
+            eligible_id: {"retrieval_policy_metadata": _record_policy(domains=["technical"], sensitivity="low")},
+        }
+    )
+    fake_qdrant = FakeQdrant(message_ids=[ineligible_id, eligible_id], message_scores=[0.99, 0.2])
+    fake_settings = types.SimpleNamespace(
+        memory_api_key="testkey",
+        require_request_id=True,
+        enforce_request_id_header_body_match=True,
+        retrieval_k=8,
+        retrieval_recent_half_life_days=14,
+        retrieval_balanced_half_life_days=45,
+        retrieval_historical_half_life_days=365,
+        retrieval_conversation_boost=0.08,
+        retrieval_pinned_bias=0.12,
+        retrieval_missing_penalty_cap=0.15,
+        recent_turns=10,
+    )
+    monkeypatch.setattr(main_module, "settings", fake_settings, raising=True)
+    monkeypatch.setattr(main_module, "pg", fake_pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", fake_qdrant, raising=True)
+
+    rid = "rid-mandatory-filter"
+    conversation_id = str(uuid.uuid4())
+    r = await _post_retrieve_bundle(
+        conversation_id=conversation_id,
+        request_id=rid,
+        body={
+            "request_id": rid,
+            "owner_id": "owner",
+            "query": "hello",
+            "include_artifacts": False,
+            "containment_policy": _mandatory_policy(domains=["technical"]),
+        },
+    )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert [item["message_id"] for item in body["bundle"]["semantic"]] == [eligible_id]
+    qdrant_filter = fake_qdrant.search_calls[0]["policy_filter"]
+    assert qdrant_filter["allowed_domains"] == ["technical"]
+    assert qdrant_filter["allowed_sensitivities"] == ["low", "medium", "high"]
+    containment = body["bundle"]["retrieval_debug"]["containment_policy"]
+    assert containment["enforcement_mode"] == "mandatory"
+    assert containment["pre_limit_policy_filter_applied"] is True
+    assert containment["omitted_counts_by_reason"]["missing_policy_metadata"] == 1
+    assert "mandatory_containment_applied" in body["diagnostics"]["reason_codes"]
+
+
+@pytest.mark.asyncio
+async def test_mandatory_domain_and_legacy_domain_mismatch_is_rejected(monkeypatch):
+    fake_pg = FakePG()
+    fake_settings = types.SimpleNamespace(memory_api_key="testkey", require_request_id=True, enforce_request_id_header_body_match=True)
+    monkeypatch.setattr(main_module, "settings", fake_settings, raising=True)
+    monkeypatch.setattr(main_module, "pg", fake_pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", FakeQdrant(), raising=True)
+
+    rid = "rid-domain-conflict"
+    r = await _post_retrieve_bundle(
+        conversation_id=str(uuid.uuid4()),
+        request_id=rid,
+        body={
+            "request_id": rid,
+            "owner_id": "owner",
+            "query": "hello",
+            "allowed_memory_domains": ["personal"],
+            "containment_policy": _mandatory_policy(domains=["technical"]),
+        },
+    )
+
+    assert r.status_code == 422
+    assert "legacy allowed_memory_domains" in str(r.json()["detail"])
+
+
+@pytest.mark.asyncio
+async def test_relationship_scope_narrows_without_broadening_domain_or_sensitivity(monkeypatch):
+    selected_rel = str(uuid.uuid4())
+    selected_entity = "entity-project"
+    rel_id = str(uuid.uuid4())
+    entity_id = str(uuid.uuid4())
+    scope_only_id = str(uuid.uuid4())
+    missing_id = str(uuid.uuid4())
+    blocked_id = str(uuid.uuid4())
+    fake_pg = FakePG(
+        message_metadata={
+            rel_id: {"retrieval_policy_metadata": _record_policy(relationship_ids=[selected_rel], scopes=["project"])},
+            entity_id: {"retrieval_policy_metadata": _record_policy(entity_ids=[selected_entity], scopes=["project"])},
+            scope_only_id: {"retrieval_policy_metadata": _record_policy(scopes=["project"])},
+            missing_id: {"retrieval_policy_metadata": _record_policy()},
+            blocked_id: {
+                "retrieval_policy_metadata": _record_policy(
+                    domains=["technical", "finance"],
+                    relationship_ids=[selected_rel],
+                )
+            },
+        }
+    )
+    fake_qdrant = FakeQdrant(
+        message_ids=[rel_id, entity_id, scope_only_id, missing_id, blocked_id],
+        message_scores=[0.9, 0.8, 0.7, 0.6, 0.5],
+    )
+    fake_settings = types.SimpleNamespace(
+        memory_api_key="testkey",
+        require_request_id=True,
+        enforce_request_id_header_body_match=True,
+        retrieval_k=8,
+        retrieval_recent_half_life_days=14,
+        retrieval_balanced_half_life_days=45,
+        retrieval_historical_half_life_days=365,
+        retrieval_conversation_boost=0.08,
+        retrieval_pinned_bias=0.12,
+        retrieval_missing_penalty_cap=0.15,
+        recent_turns=10,
+    )
+    monkeypatch.setattr(main_module, "settings", fake_settings, raising=True)
+    monkeypatch.setattr(main_module, "pg", fake_pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", fake_qdrant, raising=True)
+
+    rid = "rid-relationship-scope"
+    relationship = {
+        "applied": True,
+        "relationship_ids": [selected_rel],
+        "entity_ids": [selected_entity],
+        "relationship_scopes": ["project"],
+        "reason_codes": ["eligible_relationship_scope_selected"],
+    }
+    r = await _post_retrieve_bundle(
+        conversation_id=str(uuid.uuid4()),
+        request_id=rid,
+        body={
+            "request_id": rid,
+            "owner_id": "owner",
+            "query": "hello",
+            "containment_policy": _mandatory_policy(domains=["technical"], blocked=["finance"], relationship=relationship),
+        },
+    )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert [item["message_id"] for item in body["bundle"]["semantic"]] == [rel_id, entity_id]
+    omitted = body["bundle"]["retrieval_debug"]["containment_policy"]["omitted_counts_by_reason"]
+    assert omitted["relationship_scope_mismatch"] == 2
+    assert omitted["blocked_domain"] == 1
+    assert fake_qdrant.search_calls[0]["policy_filter"]["relationship_scope"]["applied"] is True
+
+
+@pytest.mark.asyncio
+async def test_artifact_policy_uses_intersections_and_post_fetch_validation(monkeypatch):
+    allowed_id = str(uuid.uuid4())
+    image_id = str(uuid.uuid4())
+    policy_base = {
+        "source_refs": [{"ref_type": "artifact", "ref_id": str(uuid.uuid4()), "support_kind": "direct"}],
+        "derivation_type": "chunk",
+        "derivation_version": "file-chunk-v1",
+        "status": "active",
+    }
+    fake_pg = FakePG(
+        artifact_metadata={
+            allowed_id: {**policy_base, **_record_policy(content_class="document", sensitivity="low")},
+            image_id: {**policy_base, **_record_policy(content_class="image", sensitivity="low")},
+        },
+        unique_derived_snippets=True,
+    )
+    fake_qdrant = FakeQdrant(artifact_ids=[allowed_id, image_id])
+    fake_settings = types.SimpleNamespace(
+        memory_api_key="testkey",
+        require_request_id=True,
+        enforce_request_id_header_body_match=True,
+        retrieval_k=8,
+        retrieval_artifact_k=1,
+        retrieval_artifact_max_snippet_chars=500,
+        retrieval_recent_half_life_days=14,
+        retrieval_balanced_half_life_days=45,
+        retrieval_historical_half_life_days=365,
+        retrieval_conversation_boost=0.08,
+        retrieval_pinned_bias=0.12,
+        retrieval_missing_penalty_cap=0.15,
+        recent_turns=10,
+    )
+    monkeypatch.setattr(main_module, "settings", fake_settings, raising=True)
+    monkeypatch.setattr(main_module, "pg", fake_pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", fake_qdrant, raising=True)
+
+    rid = "rid-artifact-policy"
+    r = await _post_retrieve_bundle(
+        conversation_id=str(uuid.uuid4()),
+        request_id=rid,
+        body={
+            "request_id": rid,
+            "owner_id": "owner",
+            "query": "hello",
+            "containment_policy": _mandatory_policy(
+                domains=["technical"],
+                artifact_classes=["document", "image"],
+                surface_classes=["document"],
+            ),
+        },
+    )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert [item["source_ref"]["ref_id"] for item in body["bundle"]["artifact_refs"]] == [allowed_id]
+    assert fake_qdrant.artifact_search_calls[0]["k"] == 20
+    assert fake_qdrant.artifact_search_calls[0]["policy_filter"]["content_classes"] == ["document"]
+    omitted = body["bundle"]["retrieval_debug"]["containment_policy"]["omitted_counts_by_reason"]
+    assert omitted["content_class_not_allowed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_empty_effective_artifact_policy_skips_artifact_search(monkeypatch):
+    fake_pg = FakePG()
+    fake_qdrant = FakeQdrant()
+    fake_settings = types.SimpleNamespace(
+        memory_api_key="testkey",
+        require_request_id=True,
+        enforce_request_id_header_body_match=True,
+        retrieval_k=8,
+        retrieval_artifact_k=3,
+        retrieval_recent_half_life_days=14,
+        retrieval_balanced_half_life_days=45,
+        retrieval_historical_half_life_days=365,
+        retrieval_conversation_boost=0.08,
+        retrieval_pinned_bias=0.12,
+        retrieval_missing_penalty_cap=0.15,
+        recent_turns=10,
+    )
+    monkeypatch.setattr(main_module, "settings", fake_settings, raising=True)
+    monkeypatch.setattr(main_module, "pg", fake_pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", fake_qdrant, raising=True)
+
+    rid = "rid-empty-artifact-policy"
+    r = await _post_retrieve_bundle(
+        conversation_id=str(uuid.uuid4()),
+        request_id=rid,
+        body={
+            "request_id": rid,
+            "owner_id": "owner",
+            "query": "hello",
+            "containment_policy": _mandatory_policy(
+                domains=["technical"],
+                artifact_classes=["image"],
+                surface_classes=["document"],
+            ),
+        },
+    )
+
+    assert r.status_code == 200
+    assert fake_qdrant.artifact_search_calls == []
+    containment = r.json()["bundle"]["retrieval_debug"]["containment_policy"]
+    assert containment["artifact_search_skipped_reason"] == "artifact_policy_empty"
+
+
+@pytest.mark.asyncio
+async def test_mandatory_raw_and_compare_do_not_bypass_policy(monkeypatch):
+    ineligible_id = str(uuid.uuid4())
+    eligible_id = str(uuid.uuid4())
+    fake_pg = FakePG(
+        message_metadata={
+            eligible_id: {"retrieval_policy_metadata": _record_policy(domains=["technical"], sensitivity="low")},
+        }
+    )
+    fake_qdrant = FakeQdrant(message_ids=[ineligible_id, eligible_id], message_scores=[0.99, 0.2])
+    fake_settings = types.SimpleNamespace(
+        memory_api_key="testkey",
+        require_request_id=True,
+        enforce_request_id_header_body_match=True,
+        retrieval_k=8,
+        retrieval_recent_half_life_days=14,
+        retrieval_balanced_half_life_days=45,
+        retrieval_historical_half_life_days=365,
+        retrieval_conversation_boost=0.08,
+        retrieval_pinned_bias=0.12,
+        retrieval_missing_penalty_cap=0.15,
+        recent_turns=10,
+    )
+    monkeypatch.setattr(main_module, "settings", fake_settings, raising=True)
+    monkeypatch.setattr(main_module, "pg", fake_pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", fake_qdrant, raising=True)
+
+    for mode in ("raw", "compare"):
+        rid = f"rid-{mode}-mandatory"
+        r = await _post_retrieve_bundle(
+            conversation_id=str(uuid.uuid4()),
+            request_id=rid,
+            body={
+                "request_id": rid,
+                "owner_id": "owner",
+                "query": "hello",
+                "mode": mode,
+                "containment_policy": _mandatory_policy(domains=["technical"]),
+            },
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert [item["message_id"] for item in body["bundle"]["semantic"]] == [eligible_id]
+        if mode == "compare":
+            assert [item["message_id"] for item in body["raw_bundle"]["semantic"]] == [eligible_id]
+            assert [item["message_id"] for item in body["augmented_bundle"]["semantic"]] == [eligible_id]
+
+
+def test_structured_policy_metadata_rejects_reserved_spoofing_and_mime_contradiction():
+    with pytest.raises(ValueError):
+        MessageCreateRequest(
+            owner_id="owner",
+            role="user",
+            content="hello",
+            metadata={"retrieval_policy_metadata": {"memory_domains": ["technical"], "sensitivity": "low"}},
+        )
+    with pytest.raises(ValueError):
+        ArtifactInitRequest(
+            owner_id="owner",
+            filename="photo.png",
+            mime="image/png",
+            size=10,
+            policy_metadata=_record_policy(content_class="document"),
+        )
+    request = MessageCreateRequest(
+        owner_id="owner",
+        role="user",
+        content="hello",
+        metadata={"domain": "personal"},
+    )
+    assert request.policy_metadata is None

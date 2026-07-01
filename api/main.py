@@ -612,6 +612,7 @@ async def resolve_conversation(body: ConversationResolveRequest):
 )
 async def add_message(conversation_id: str, body: MessageCreateRequest):
     cid = UUID(conversation_id)
+    policy_metadata = body.policy_metadata.model_dump(mode="json") if body.policy_metadata else None
 
     mid = await pg.add_message(
         conversation_id=cid,
@@ -620,6 +621,7 @@ async def add_message(conversation_id: str, body: MessageCreateRequest):
         content=body.content,
         client_id=body.client_id,
         metadata=body.metadata,
+        policy_metadata=policy_metadata,
     )
 
     if body.role in ("user", "assistant") and should_index_message(body.role, body.content):
@@ -631,6 +633,7 @@ async def add_message(conversation_id: str, body: MessageCreateRequest):
                 role=body.role,
                 content=body.content,
                 client_id=body.client_id,
+                policy_metadata=policy_metadata,
             )
         except Exception:
             logging.exception(
@@ -690,6 +693,7 @@ async def ingest_event(body: EventIngestRequest, request: Request):
         metadata["event_time"] = body.event_time.isoformat()
     if source_type_original is not None:
         metadata["source_type_original"] = source_type_original
+    policy_metadata = body.policy_metadata.model_dump(mode="json") if body.policy_metadata else None
 
     content = _render_event_message_content(
         source_type=source_type,
@@ -705,6 +709,7 @@ async def ingest_event(body: EventIngestRequest, request: Request):
         content=content,
         client_id=stream_key,
         metadata=metadata,
+        policy_metadata=policy_metadata,
     )
     await pg.finalize_event_ingest(
         event_log_id=UUID(event_log["event_log_id"]),
@@ -720,6 +725,7 @@ async def ingest_event(body: EventIngestRequest, request: Request):
             role="tool",
             content=content,
             client_id=stream_key,
+            policy_metadata=policy_metadata,
         )
     except Exception:
         logging.exception(
@@ -770,6 +776,7 @@ async def ingest_files_endpoint(body: FileIngestionRequest):
         source_surface=body.source_surface,
         repo_name=body.repo_name,
         paths=body.paths,
+        policy_metadata=body.policy_metadata.model_dump(mode="json") if body.policy_metadata else None,
     )
     return FileIngestionResponse(**result)
 
@@ -804,6 +811,7 @@ async def init_artifact(body: ArtifactInitRequest):
         size=body.size,
         object_uri=object_uri,
         source_surface=body.source_surface,
+        policy_metadata=body.policy_metadata.model_dump(mode="json") if body.policy_metadata else None,
     )
 
     upload_url = build_artifact_transfer_url("upload", row["artifact_id"])
@@ -1091,6 +1099,7 @@ async def retrieve_tiered_v2(conversation_id: str, body: RetrieveBundleRequest, 
             include_artifacts=include_artifacts,
             allowed_memory_domains=body.allowed_memory_domains,
             blocked_memory_domains=body.blocked_memory_domains,
+            containment_policy=body.containment_policy,
         )
     except Exception:
         diagnostics = doctrine_diagnostics_for_bundle(

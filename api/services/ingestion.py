@@ -11,6 +11,7 @@ from services.chunking import chunk_text, iter_ingestable_paths
 TEXT_ARTIFACT_DERIVATION_VERSION = "text-artifact-chunk-v1"
 LOCAL_FILE_DERIVATION_VERSION = "file-chunk-v1"
 SUPPORTED_TEXT_ARTIFACT_MIME = {"text/plain", "text/markdown", "application/json"}
+RESERVED_POLICY_METADATA_KEY = "retrieval_policy_metadata"
 
 
 async def derive_text_chunks_for_artifact(
@@ -58,6 +59,7 @@ async def derive_text_chunks_for_artifact(
         )
 
     attempt_id = str(uuid4())
+    artifact_policy_metadata = artifact.get("policy_metadata")
     pending: list[dict[str, Any]] = []
     chunks_created = 0
     chunks_indexed = 0
@@ -92,6 +94,7 @@ async def derive_text_chunks_for_artifact(
                         "support_kind": "direct",
                     }
                 ],
+                RESERVED_POLICY_METADATA_KEY: artifact_policy_metadata,
                 "chunk_index": chunk_index,
                 "char_start": chunk["char_start"],
                 "char_end": chunk["char_end"],
@@ -115,6 +118,7 @@ async def derive_text_chunks_for_artifact(
             file_path=file_path or artifact.get("file_path") or artifact.get("filename") or "",
             repo_name=repo_name or artifact.get("repo_name"),
             chunk_index=chunk_index,
+            policy_metadata=artifact_policy_metadata,
         )
         await pg.create_embedding_ref(
             ref_type="derived_text",
@@ -154,6 +158,7 @@ async def derive_text_chunks_for_artifact(
             file_path=file_path or artifact.get("file_path") or artifact.get("filename") or "",
             repo_name=repo_name or artifact.get("repo_name"),
             chunk_index=int(params["chunk_index"]),
+            policy_metadata=params.get(RESERVED_POLICY_METADATA_KEY) or artifact_policy_metadata,
         )
 
     activated = await pg.activate_derived_text_attempt(
@@ -237,6 +242,7 @@ async def ingest_files(
     source_surface: str | None,
     repo_name: str | None,
     paths: list[str],
+    policy_metadata: dict | None = None,
 ) -> dict[str, str | int | None]:
     allowed_extensions = {item.strip().lower() for item in settings.ingest_allowed_extensions.split(",") if item.strip()}
     exclude_globs = [item.strip() for item in settings.ingest_exclude_globs_default.split(",") if item.strip()]
@@ -280,6 +286,7 @@ async def ingest_files(
             ingestion_id=ingestion_id,
             sha256=hashlib.sha256(data.encode("utf-8")).hexdigest(),
             status="completed",
+            policy_metadata=policy_metadata,
         )
         artifacts_created += 1
 

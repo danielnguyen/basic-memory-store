@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 Role = Literal["user", "assistant", "system", "tool"]
@@ -12,6 +12,16 @@ TimeWindow = Literal["7d", "30d", "90d", "all"]
 RetrievalMode = Literal["recent", "balanced", "historical"]
 RetrievalContractMode = Literal["augmented", "raw", "compare"]
 RetrievalSourceType = Literal["message", "derived_text"]
+ArtifactContentClass = Literal[
+    "document",
+    "code",
+    "image",
+    "screenshot",
+    "audio",
+    "video",
+    "other",
+]
+RetrievalSensitivity = Literal["low", "medium", "high", "restricted"]
 RetrievalEvidenceRole = Literal["canonical", "derived"]
 RetrievalSourceAvailability = Literal[
     "available",
@@ -30,6 +40,112 @@ RetrievalFreshnessState = Literal[
     "forgotten_or_demoted",
     "unknown_freshness",
 ]
+BoundedLabel = Annotated[str, Field(min_length=1, max_length=64)]
+BoundedScopeId = Annotated[str, Field(min_length=1, max_length=160)]
+RESERVED_POLICY_METADATA_KEY = "retrieval_policy_metadata"
+
+
+def _normalize_label(value: str) -> str:
+    cleaned = value.strip().lower().replace("-", "_").replace(" ", "_")
+    return cleaned
+
+
+def _normalize_labels(values: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        cleaned = _normalize_label(value)
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        normalized.append(cleaned)
+    return normalized
+
+
+class RetrievalRecordPolicyMetadata(BaseModel):
+    memory_domains: List[BoundedLabel] = Field(..., max_length=16)
+    sensitivity: RetrievalSensitivity
+    content_class: Optional[ArtifactContentClass] = None
+    entity_ids: List[BoundedScopeId] = Field(default_factory=list, max_length=64)
+    relationship_ids: List[BoundedScopeId] = Field(default_factory=list, max_length=64)
+    relationship_scopes: List[BoundedLabel] = Field(default_factory=list, max_length=16)
+
+    @field_validator("memory_domains", "relationship_scopes", mode="after")
+    @classmethod
+    def normalize_label_lists(cls, values: list[str]) -> list[str]:
+        return _normalize_labels(values)
+
+    @field_validator("entity_ids", "relationship_ids", mode="after")
+    @classmethod
+    def dedupe_scope_ids(cls, values: list[str]) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            cleaned = value.strip()
+            if not cleaned or cleaned in seen:
+                continue
+            seen.add(cleaned)
+            out.append(cleaned)
+        return out
+
+
+class ArtifactAccessPolicyInput(BaseModel):
+    enforcement_mode: Literal["mandatory"] = "mandatory"
+    allowed_content_classes: List[ArtifactContentClass] = Field(..., max_length=8)
+    allowed_domains: List[BoundedLabel] = Field(..., max_length=16)
+    maximum_sensitivity: RetrievalSensitivity
+    surface_content_capabilities: List[ArtifactContentClass] = Field(..., max_length=8)
+    reason_codes: List[BoundedLabel] = Field(..., max_length=8)
+
+    @field_validator("allowed_domains", "reason_codes", mode="after")
+    @classmethod
+    def normalize_labels(cls, values: list[str]) -> list[str]:
+        return _normalize_labels(values)
+
+
+class RelationshipRetrievalScopeProjectionInput(BaseModel):
+    applied: bool = False
+    relationship_ids: List[BoundedScopeId] = Field(default_factory=list, max_length=64)
+    entity_ids: List[BoundedScopeId] = Field(default_factory=list, max_length=64)
+    relationship_scopes: List[BoundedLabel] = Field(default_factory=list, max_length=16)
+    reason_codes: List[BoundedLabel] = Field(default_factory=list, max_length=8)
+
+    @field_validator("relationship_scopes", "reason_codes", mode="after")
+    @classmethod
+    def normalize_labels(cls, values: list[str]) -> list[str]:
+        return _normalize_labels(values)
+
+    @field_validator("relationship_ids", "entity_ids", mode="after")
+    @classmethod
+    def dedupe_scope_ids(cls, values: list[str]) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            cleaned = value.strip()
+            if not cleaned or cleaned in seen:
+                continue
+            seen.add(cleaned)
+            out.append(cleaned)
+        return out
+
+    @model_validator(mode="after")
+    def validate_applied_scope(self):
+        if self.applied and not self.relationship_ids and not self.entity_ids:
+            raise ValueError("applied relationship scope requires a relationship_id or entity_id")
+        return self
+
+
+class RetrievalContainmentPolicy(BaseModel):
+    enforcement_mode: Literal["mandatory"]
+    allowed_memory_domains: List[BoundedLabel] = Field(..., max_length=16)
+    blocked_memory_domains: List[BoundedLabel] = Field(default_factory=list, max_length=16)
+    artifact_access_policy: ArtifactAccessPolicyInput
+    relationship_scope_projection: Optional[RelationshipRetrievalScopeProjectionInput] = None
+
+    @field_validator("allowed_memory_domains", "blocked_memory_domains", mode="after")
+    @classmethod
+    def normalize_domains(cls, values: list[str]) -> list[str]:
+        return _normalize_labels(values)
 
 
 class MessageIn(BaseModel):
@@ -106,11 +222,20 @@ class ConversationResolveResponse(BaseModel):
 # ---- Messages ----
 
 class MessageCreateRequest(BaseModel):
+    RESERVED_POLICY_METADATA_KEY: ClassVar[str] = RESERVED_POLICY_METADATA_KEY
+
     owner_id: str = Field(..., examples=["owner_123"])
     role: Role = Field(..., examples=["user"])
     content: str = Field(..., examples=["Hello world"])
     client_id: Optional[str] = Field(default=None, examples=["phone"])
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="Arbitrary JSON metadata.")
+    policy_metadata: Optional[RetrievalRecordPolicyMetadata] = None
+
+    @model_validator(mode="after")
+    def reject_reserved_metadata_key(self):
+        if isinstance(self.metadata, dict) and self.RESERVED_POLICY_METADATA_KEY in self.metadata:
+            raise ValueError("metadata cannot contain reserved retrieval policy metadata")
+        return self
 
 
 class MessageCreateResponse(BaseModel):
@@ -127,6 +252,21 @@ class ArtifactInitRequest(BaseModel):
     mime: str
     size: int = Field(..., ge=1)
     source_surface: Optional[str] = None
+    policy_metadata: Optional[RetrievalRecordPolicyMetadata] = None
+
+    @model_validator(mode="after")
+    def validate_content_class_matches_mime(self):
+        if self.policy_metadata is None or self.policy_metadata.content_class is None:
+            return self
+        content_class = self.policy_metadata.content_class
+        mime = self.mime.lower()
+        if mime.startswith("image/") and content_class not in {"image", "screenshot"}:
+            raise ValueError("image artifacts require image or screenshot policy content_class")
+        if mime.startswith("audio/") and content_class != "audio":
+            raise ValueError("audio artifacts require audio policy content_class")
+        if mime.startswith("video/") and content_class != "video":
+            raise ValueError("video artifacts require video policy content_class")
+        return self
 
 
 class ArtifactInitResponse(BaseModel):
@@ -156,6 +296,7 @@ class ArtifactResponse(BaseModel):
     source_surface: Optional[str] = None
     status: str
     sha256: Optional[str] = None
+    policy_metadata: Optional[RetrievalRecordPolicyMetadata] = None
     created_at: str
     completed_at: Optional[str] = None
     download_url: str
@@ -247,6 +388,23 @@ class RetrieveBundleRequest(BaseModel):
     include_artifacts: Optional[bool] = None
     allowed_memory_domains: Optional[List[str]] = Field(default=None, max_length=16)
     blocked_memory_domains: Optional[List[str]] = Field(default=None, max_length=16)
+    containment_policy: Optional[RetrievalContainmentPolicy] = None
+
+    @model_validator(mode="after")
+    def validate_legacy_domain_compatibility(self):
+        if self.containment_policy is None:
+            return self
+        if self.allowed_memory_domains is not None:
+            legacy_allowed = set(_normalize_labels(self.allowed_memory_domains))
+            mandatory_allowed = set(self.containment_policy.allowed_memory_domains)
+            if legacy_allowed != mandatory_allowed:
+                raise ValueError("legacy allowed_memory_domains must match containment policy")
+        if self.blocked_memory_domains is not None:
+            legacy_blocked = set(_normalize_labels(self.blocked_memory_domains))
+            mandatory_blocked = set(self.containment_policy.blocked_memory_domains)
+            if legacy_blocked != mandatory_blocked:
+                raise ValueError("legacy blocked_memory_domains must match containment policy")
+        return self
 
 
 class RetrievalSourceRef(BaseModel):
@@ -257,6 +415,10 @@ class RetrievalSourceRef(BaseModel):
 class RetrievalPolicyMetadata(BaseModel):
     memory_domains: List[str] = Field(default_factory=list)
     sensitivity: Optional[str] = None
+    content_class: Optional[str] = None
+    entity_ids: List[str] = Field(default_factory=list)
+    relationship_ids: List[str] = Field(default_factory=list)
+    relationship_scopes: List[str] = Field(default_factory=list)
 
 
 class DerivedProvenance(BaseModel):
@@ -420,6 +582,7 @@ class FileIngestionRequest(BaseModel):
     source_surface: Optional[str] = None
     repo_name: Optional[str] = None
     paths: List[str] = Field(default_factory=list)
+    policy_metadata: Optional[RetrievalRecordPolicyMetadata] = None
 
 
 class FileIngestionResponse(BaseModel):
@@ -442,6 +605,8 @@ class EventEntityIn(BaseModel):
 
 
 class EventIngestRequest(BaseModel):
+    RESERVED_POLICY_METADATA_KEY: ClassVar[str] = RESERVED_POLICY_METADATA_KEY
+
     request_id: str
     owner_id: str
     source_type: str
@@ -450,6 +615,13 @@ class EventIngestRequest(BaseModel):
     event_time: Optional[datetime] = None
     payload_json: Dict[str, Any] = Field(default_factory=dict)
     entities: List[EventEntityIn] = Field(default_factory=list)
+    policy_metadata: Optional[RetrievalRecordPolicyMetadata] = None
+
+    @model_validator(mode="after")
+    def reject_payload_spoofing(self):
+        if self.RESERVED_POLICY_METADATA_KEY in self.payload_json:
+            raise ValueError("payload_json cannot contain reserved retrieval policy metadata")
+        return self
 
 
 class EventIngestResponse(BaseModel):

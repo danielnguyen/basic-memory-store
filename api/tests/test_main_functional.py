@@ -53,7 +53,7 @@ class FakePG:
         cid = await self.create_conversation(owner_id, client_id, title)
         return cid, False
 
-    async def add_message(self, conversation_id, owner_id, role, content, client_id, metadata=None):
+    async def add_message(self, conversation_id, owner_id, role, content, client_id, metadata=None, policy_metadata=None):
         mid = uuid.uuid4()
         self.messages.append(
             {
@@ -116,6 +116,7 @@ class FakePG:
         ingestion_id=None,
         sha256=None,
         status="pending",
+        policy_metadata=None,
     ):
         row = {
             "artifact_id": str(artifact_id),
@@ -136,6 +137,7 @@ class FakePG:
             "repo_ref": repo_ref,
             "file_path": file_path,
             "ingestion_id": str(ingestion_id) if ingestion_id else None,
+            "policy_metadata": policy_metadata,
         }
         self.artifacts[str(artifact_id)] = row
         return row
@@ -160,7 +162,7 @@ class FakePG:
                 out.append(m)
         return out[-limit:]
 
-    async def get_recent_message_items(self, conversation_id, limit=10):
+    async def get_recent_message_items(self, conversation_id, limit=10, policy_filter=None):
         return await self.get_recent_message_snippets(conversation_id, limit=limit)
 
     async def create_derived_text(self, *, artifact_id, kind, text, language, derivation_params):

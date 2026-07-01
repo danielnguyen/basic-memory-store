@@ -4,7 +4,7 @@ import types
 from uuid import uuid4
 
 import pytest
-from qdrant_client.models import FieldCondition, Filter, IsEmptyCondition
+from qdrant_client.models import FieldCondition, Filter, IsEmptyCondition, MatchAny
 
 from storage.qdrant import QdrantStore
 
@@ -46,6 +46,24 @@ def _point(*, owner_id: str, conversation_id: str | None, score: float = 0.9):
     }
     if conversation_id is not None:
         payload["conversation_id"] = conversation_id
+    return types.SimpleNamespace(score=score, payload=payload)
+
+
+def _message_point(*, owner_id: str, score: float, domains=None, sensitivity="low"):
+    message_id = str(uuid4())
+    payload = {
+        "ref_type": "message",
+        "message_id": message_id,
+        "owner_id": owner_id,
+        "conversation_id": str(uuid4()),
+        "role": "assistant",
+        "retrieval_policy_valid": True,
+        "memory_domains": domains or ["technical"],
+        "sensitivity": sensitivity,
+        "entity_ids": [],
+        "relationship_ids": [],
+        "relationship_scopes": [],
+    }
     return types.SimpleNamespace(score=score, payload=payload)
 
 
@@ -138,14 +156,108 @@ async def test_artifact_conversation_scope_filter_prevents_high_score_crowding()
     assert fake_client.last_search["limit"] == 2
 
 
+@pytest.mark.asyncio
+async def test_message_mandatory_policy_filter_prevents_high_score_crowding():
+    eligible = _message_point(owner_id="owner-a", score=0.1, domains=["technical"])
+    ineligible = [
+        _message_point(owner_id="owner-a", score=0.99 - (idx / 1000), domains=["personal"])
+        for idx in range(150)
+    ]
+    store = QdrantStore(url="http://unused", collection="messages", embedder=FakeEmbedder(), embed_model="local")
+    fake_client = FakeQdrantClient([*ineligible, eligible])
+    store.client = fake_client
+    store._collection_ready = True
+
+    hits = await store.search(
+        owner_id="owner-a",
+        query="alpha",
+        k=1,
+        min_score=0.0,
+        policy_filter={
+            "allowed_domains": ["technical"],
+            "blocked_domains": [],
+            "allowed_sensitivities": ["low", "medium", "high"],
+            "relationship_scope": {"applied": False},
+        },
+    )
+
+    assert [hit.message_id for hit in hits] == [eligible.payload["message_id"]]
+    must = fake_client.last_search["query_filter"].must
+    assert any(
+        isinstance(item, FieldCondition)
+        and item.key == "memory_domains"
+        and isinstance(item.match, MatchAny)
+        and item.match.any == ["technical"]
+        for item in must
+    )
+    assert fake_client.last_search["limit"] == 1
+
+
+@pytest.mark.asyncio
+async def test_artifact_mandatory_policy_filter_prevents_metadata_crowding():
+    eligible = _point(owner_id="owner-a", conversation_id=None, score=0.1)
+    eligible.payload.update(
+        {
+            "retrieval_policy_valid": True,
+            "memory_domains": ["technical"],
+            "sensitivity": "low",
+            "content_class": "document",
+            "entity_ids": [],
+            "relationship_ids": [],
+            "relationship_scopes": [],
+        }
+    )
+    ineligible = []
+    for idx in range(150):
+        point = _point(owner_id="owner-a", conversation_id=None, score=0.99 - (idx / 1000))
+        point.payload.update(
+            {
+                "retrieval_policy_valid": True,
+                "memory_domains": ["personal"],
+                "sensitivity": "low",
+                "content_class": "document",
+                "entity_ids": [],
+                "relationship_ids": [],
+                "relationship_scopes": [],
+            }
+        )
+        ineligible.append(point)
+    store = QdrantStore(url="http://unused", collection="messages", embedder=FakeEmbedder(), embed_model="local")
+    fake_client = FakeQdrantClient([*ineligible, eligible])
+    store.client = fake_client
+    store._collection_ready = True
+
+    hits = await store.search_artifact_chunks(
+        owner_id="owner-a",
+        query="alpha",
+        k=1,
+        min_score=0.0,
+        policy_filter={
+            "allowed_domains": ["technical"],
+            "blocked_domains": [],
+            "allowed_sensitivities": ["low", "medium"],
+            "content_classes": ["document"],
+            "relationship_scope": {"applied": False},
+        },
+    )
+
+    assert [hit.derived_text_id for hit in hits] == [eligible.payload["derived_text_id"]]
+    assert fake_client.last_search["limit"] == 1
+
+
 def _matches_filter(payload: dict, query_filter) -> bool:
     must = query_filter.must or []
     if isinstance(must, (FieldCondition, Filter, IsEmptyCondition)):
         must = [must]
+    must_not = query_filter.must_not or []
+    if isinstance(must_not, (FieldCondition, Filter, IsEmptyCondition)):
+        must_not = [must_not]
     should = query_filter.should or []
     if isinstance(should, (FieldCondition, Filter, IsEmptyCondition)):
         should = [should]
-    return all(_matches_condition(payload, item) for item in must) and (
+    return all(_matches_condition(payload, item) for item in must) and not any(
+        _matches_condition(payload, item) for item in must_not
+    ) and (
         not should or any(_matches_condition(payload, item) for item in should)
     )
 
@@ -155,6 +267,11 @@ def _matches_condition(payload: dict, condition) -> bool:
         return _matches_filter(payload, condition)
     if isinstance(condition, FieldCondition):
         if condition.match is not None:
+            if isinstance(condition.match, MatchAny):
+                value = payload.get(condition.key)
+                if isinstance(value, list):
+                    return bool(set(value) & set(condition.match.any))
+                return value in set(condition.match.any)
             return payload.get(condition.key) == condition.match.value
         return False
     if isinstance(condition, IsEmptyCondition):

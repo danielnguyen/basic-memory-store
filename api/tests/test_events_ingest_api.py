@@ -82,7 +82,7 @@ class FakePG:
             "message_id": row["message_id"],
         }
 
-    async def add_message(self, conversation_id, owner_id, role, content, client_id=None, metadata=None):
+    async def add_message(self, conversation_id, owner_id, role, content, client_id=None, metadata=None, policy_metadata=None):
         mid = uuid.uuid4()
         self.messages.append(
             {

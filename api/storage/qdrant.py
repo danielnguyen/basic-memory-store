@@ -13,6 +13,7 @@ from qdrant_client.models import (
     Filter,
     FieldCondition,
     IsEmptyCondition,
+    MatchAny,
     MatchValue,
 )
 
@@ -34,6 +35,70 @@ class ArtifactChunkHit:
     file_path: str
     repo_name: str | None
     score: float
+
+
+def _policy_payload(policy_metadata: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(policy_metadata, dict):
+        return {"retrieval_policy_valid": False}
+    payload: dict[str, Any] = {
+        "retrieval_policy_valid": True,
+        "memory_domains": list(policy_metadata.get("memory_domains") or []),
+        "sensitivity": policy_metadata.get("sensitivity"),
+        "entity_ids": list(policy_metadata.get("entity_ids") or []),
+        "relationship_ids": list(policy_metadata.get("relationship_ids") or []),
+        "relationship_scopes": list(policy_metadata.get("relationship_scopes") or []),
+    }
+    if policy_metadata.get("content_class") is not None:
+        payload["content_class"] = policy_metadata.get("content_class")
+    return payload
+
+
+def _append_policy_filter(must: list[Any], must_not: list[Any], policy_filter: dict[str, Any] | None) -> bool:
+    if policy_filter is None:
+        return True
+    allowed_domains = list(policy_filter.get("allowed_domains") or [])
+    if not allowed_domains:
+        return False
+    must.extend(
+        [
+            FieldCondition(key="retrieval_policy_valid", match=MatchValue(value=True)),
+            FieldCondition(key="memory_domains", match=MatchAny(any=allowed_domains)),
+            FieldCondition(
+                key="sensitivity",
+                match=MatchAny(any=list(policy_filter.get("allowed_sensitivities") or ["low", "medium", "high"])),
+            ),
+        ]
+    )
+    blocked_domains = list(policy_filter.get("blocked_domains") or [])
+    if blocked_domains:
+        must_not.append(FieldCondition(key="memory_domains", match=MatchAny(any=blocked_domains)))
+    content_classes = list(policy_filter.get("content_classes") or [])
+    if content_classes:
+        must.append(FieldCondition(key="content_class", match=MatchAny(any=content_classes)))
+    relationship = policy_filter.get("relationship_scope") or {}
+    if relationship.get("applied"):
+        relationship_ids = list(relationship.get("relationship_ids") or [])
+        entity_ids = list(relationship.get("entity_ids") or [])
+        must.append(
+            Filter(
+                should=[
+                    FieldCondition(key="relationship_ids", match=MatchAny(any=relationship_ids)),
+                    FieldCondition(key="entity_ids", match=MatchAny(any=entity_ids)),
+                ]
+            )
+        )
+        relationship_scopes = list(relationship.get("relationship_scopes") or [])
+        if relationship_scopes:
+            must.append(
+                Filter(
+                    should=[
+                        IsEmptyCondition(is_empty={"key": "relationship_scopes"}),
+                        FieldCondition(key="relationship_scopes", match=MatchAny(any=relationship_scopes)),
+                    ]
+                )
+            )
+    return True
+
 
 class QdrantStore:
     def __init__(
@@ -86,6 +151,7 @@ class QdrantStore:
         content: str,
         client_id: str | None = None,
         tags: dict | None = None,
+        policy_metadata: dict[str, Any] | None = None,
     ) -> None:
         vec = (await self.embedder.embed_texts(self.embed_model, [content]))[0]
         self.ensure_collection(vector_size=len(vec))
@@ -103,6 +169,7 @@ class QdrantStore:
 
         if tags:
             payload["tags"] = tags
+        payload.update(_policy_payload(policy_metadata))
 
         point = PointStruct(
             id=str(message_id),   # Qdrant accepts UUID strings
@@ -131,6 +198,7 @@ class QdrantStore:
         file_path: str,
         repo_name: str | None,
         chunk_index: int,
+        policy_metadata: dict[str, Any] | None = None,
     ) -> None:
         vec = (await self.embedder.embed_texts(self.embed_model, [content]))[0]
         self.ensure_collection(vector_size=len(vec))
@@ -154,6 +222,7 @@ class QdrantStore:
             payload["derivation_attempt_id"] = str(derivation_attempt_id)
         if derivation_version is not None:
             payload["derivation_version"] = derivation_version
+        payload.update(_policy_payload(policy_metadata))
 
         point = PointStruct(
             id=str(qdrant_point_id or derived_text_id),
@@ -186,6 +255,7 @@ class QdrantStore:
         client_id: str | None = None,
         min_score: float = 0.25,
         exclude_message_ids: list[str] | None = None,
+        policy_filter: dict[str, Any] | None = None,
     ) -> list[RetrievalHit]:
 
         qvec = (await self.embedder.embed_texts(self.embed_model, [query]))[0]
@@ -202,12 +272,14 @@ class QdrantStore:
         if conversation_id is not None:
             must.append(FieldCondition(key="conversation_id", match=MatchValue(value=str(conversation_id))))
 
-        must_not = []
+        must_not: list[Any] = []
 
         if exclude_message_ids:
             # Exclude exact message ids (common case: query message or freshly inserted ids)
             for mid in exclude_message_ids:
                 must_not.append(FieldCondition(key="message_id", match=MatchValue(value=str(mid))))
+        if not _append_policy_filter(must, must_not, policy_filter):
+            return []
 
         qfilter = Filter(must=must, must_not=must_not or None)
 
@@ -236,15 +308,17 @@ class QdrantStore:
         min_score: float,
         client_id: str | None = None,
         conversation_id: UUID | str | None = None,
+        policy_filter: dict[str, Any] | None = None,
     ) -> list[ArtifactChunkHit]:
         qvec = (await self.embedder.embed_texts(self.embed_model, [query]))[0]
         self.ensure_collection(vector_size=len(qvec))
 
-        must = [
+        must: list[Any] = [
             FieldCondition(key="owner_id", match=MatchValue(value=owner_id)),
             FieldCondition(key="ref_type", match=MatchValue(value="derived_text")),
             FieldCondition(key="derivation_status", match=MatchValue(value="active")),
         ]
+        must_not: list[Any] = []
         if client_id is not None:
             must.append(FieldCondition(key="client_id", match=MatchValue(value=str(client_id))))
         if conversation_id is not None:
@@ -256,11 +330,13 @@ class QdrantStore:
                     ]
                 )
             )
+        if not _append_policy_filter(must, must_not, policy_filter):
+            return []
         res = self.client.search(
             collection_name=self.collection,
             query_vector=qvec,
             limit=k,
-            query_filter=Filter(must=must),
+            query_filter=Filter(must=must, must_not=must_not or None),
         )
 
         hits: list[ArtifactChunkHit] = []

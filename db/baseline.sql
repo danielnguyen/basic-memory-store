@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
   repo_name TEXT,
   repo_ref TEXT,
   file_path TEXT,
+  policy_metadata JSONB,
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'completed', 'failed')),
   content_hash_version TEXT NOT NULL DEFAULT 'v1',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),

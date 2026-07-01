@@ -30,7 +30,7 @@ class FakePG:
             }
         ] if ids else []
 
-    async def get_recent_message_items(self, conversation_id, limit):
+    async def get_recent_message_items(self, conversation_id, limit, policy_filter=None):
         return [
             {
                 "message_id": str(uuid.uuid4()),
