@@ -1017,7 +1017,8 @@ async def retrieve_tiered(conversation_id: str, body: TieredRetrieveRequest):
     except ValueError:
         raise HTTPException(status_code=400, detail="conversation_id must be a UUID")
 
-    if not await pg.conversation_exists(cid):
+    conversation = await pg.get_conversation(cid)
+    if conversation is None or conversation.get("owner_id") != body.owner_id:
         raise HTTPException(status_code=404, detail="conversation_id not found")
 
     message_policy_filter = containment_policy_filter(body.containment_policy, artifact=False)
@@ -1047,7 +1048,11 @@ async def retrieve_tiered(conversation_id: str, body: TieredRetrieveRequest):
         semantic_snips = filtered_semantic_snips
     semantic_score_by_id = {h.message_id: h.score for h in semantic_hits}
     if message_policy_filter is None:
-        working_snips = await pg.get_recent_message_snippets(conversation_id=cid, limit=body.working_limit)
+        working_snips = await pg.get_recent_message_snippets(
+            conversation_id=cid,
+            limit=body.working_limit,
+            owner_id=body.owner_id,
+        )
         pinned_items = await pg.get_pinned_memories(owner_id=body.owner_id, conversation_id=cid, limit=body.pinned_limit)
         policy_items = await pg.get_policy_overlays(owner_id=body.owner_id, surface=body.surface)
         persona_items = await pg.get_persona_overlays(owner_id=body.owner_id, surface=body.surface)
@@ -1056,6 +1061,7 @@ async def retrieve_tiered(conversation_id: str, body: TieredRetrieveRequest):
             conversation_id=cid,
             limit=body.working_limit,
             policy_filter=message_policy_filter,
+            owner_id=body.owner_id,
         )
         pinned_items = await pg.get_pinned_memories(
             owner_id=body.owner_id,

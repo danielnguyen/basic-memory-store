@@ -13,6 +13,7 @@ from tools import reindex
 @pytest.mark.asyncio
 async def test_reindex_uses_dedicated_policy_metadata_only(monkeypatch):
     legacy_spoof_id = uuid.uuid4()
+    malformed_id = uuid.uuid4()
     structured_id = uuid.uuid4()
     valid_policy = {
         "memory_domains": ["technical"],
@@ -31,6 +32,16 @@ async def test_reindex_uses_dedicated_policy_metadata_only(monkeypatch):
             "content": "legacy spoof",
             "metadata": {"retrieval_policy_metadata": valid_policy},
             "policy_metadata": None,
+        },
+        {
+            "message_id": malformed_id,
+            "conversation_id": uuid.uuid4(),
+            "owner_id": "owner",
+            "client_id": "client",
+            "role": "assistant",
+            "content": "malformed policy",
+            "metadata": {},
+            "policy_metadata": {"memory_domains": "", "sensitivity": "low"},
         },
         {
             "message_id": structured_id,
@@ -88,11 +99,12 @@ async def test_reindex_uses_dedicated_policy_metadata_only(monkeypatch):
     monkeypatch.setattr(
         sys,
         "argv",
-        ["reindex", "--owner-id", "owner", "--batch-size", "2", "--max", "2"],
+        ["reindex", "--owner-id", "owner", "--batch-size", "3", "--max", "3"],
     )
 
     await reindex.main()
 
     assert recorded_payloads[str(legacy_spoof_id)] == {"retrieval_policy_valid": False}
+    assert recorded_payloads[str(malformed_id)] == {"retrieval_policy_valid": False}
     assert recorded_payloads[str(structured_id)]["retrieval_policy_valid"] is True
     assert recorded_payloads[str(structured_id)]["memory_domains"] == ["technical"]

@@ -18,9 +18,13 @@ class FakeQdrantClient:
     def __init__(self, points):
         self.points = points
         self.last_search = None
+        self.upserts = []
 
     def create_collection(self, **kwargs):
         return None
+
+    def upsert(self, **kwargs):
+        self.upserts.extend(kwargs["points"])
 
     def search(self, **kwargs):
         self.last_search = kwargs
@@ -50,6 +54,55 @@ def test_policy_payload_exact_validation_rejects_legacy_spoof_and_malformed_shap
     assert _policy_payload({"memory_domains": ["technical", 7], "sensitivity": "low"}) == {
         "retrieval_policy_valid": False
     }
+    assert _policy_payload({"memory_domains": [], "sensitivity": "low"}) == {"retrieval_policy_valid": False}
+
+
+@pytest.mark.asyncio
+async def test_direct_qdrant_upsert_marks_malformed_or_incomplete_policy_invalid():
+    store = QdrantStore(url="http://unused", collection="messages", embedder=FakeEmbedder(), embed_model="local")
+    fake_client = FakeQdrantClient([])
+    store.client = fake_client
+
+    await store.upsert_message_vector(
+        message_id=uuid4(),
+        owner_id="owner-a",
+        conversation_id=uuid4(),
+        role="assistant",
+        content="malformed policy",
+        policy_metadata={"memory_domains": "technical", "sensitivity": "low"},
+    )
+    await store.upsert_message_vector(
+        message_id=uuid4(),
+        owner_id="owner-a",
+        conversation_id=uuid4(),
+        role="assistant",
+        content="incomplete policy",
+        policy_metadata={"memory_domains": [], "sensitivity": "low"},
+    )
+    await store.upsert_message_vector(
+        message_id=uuid4(),
+        owner_id="owner-a",
+        conversation_id=uuid4(),
+        role="assistant",
+        content="valid policy",
+        policy_metadata={
+            "memory_domains": ["technical"],
+            "sensitivity": "low",
+            "entity_ids": [],
+            "relationship_ids": [],
+            "relationship_scopes": [],
+        },
+    )
+
+    malformed_payload = fake_client.upserts[0].payload
+    incomplete_payload = fake_client.upserts[1].payload
+    valid_payload = fake_client.upserts[2].payload
+    assert malformed_payload["retrieval_policy_valid"] is False
+    assert "memory_domains" not in malformed_payload
+    assert incomplete_payload["retrieval_policy_valid"] is False
+    assert "memory_domains" not in incomplete_payload
+    assert valid_payload["retrieval_policy_valid"] is True
+    assert valid_payload["memory_domains"] == ["technical"]
 
 
 def _point(*, owner_id: str, conversation_id: str | None, score: float = 0.9):

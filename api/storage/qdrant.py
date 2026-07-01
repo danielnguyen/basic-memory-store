@@ -48,6 +48,8 @@ def _policy_payload(policy_metadata: dict[str, Any] | None) -> dict[str, Any]:
     except ValidationError:
         return {"retrieval_policy_valid": False}
     payload_data = validated.model_dump(mode="json")
+    if not payload_data.get("memory_domains") or payload_data.get("sensitivity") is None:
+        return {"retrieval_policy_valid": False}
     payload: dict[str, Any] = {
         "retrieval_policy_valid": True,
         "memory_domains": list(payload_data.get("memory_domains") or []),

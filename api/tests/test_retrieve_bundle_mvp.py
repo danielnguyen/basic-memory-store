@@ -5,7 +5,7 @@ import httpx
 import pytest
 
 import main as main_module
-from models import ArtifactInitRequest, MessageCreateRequest
+from models import ArtifactInitRequest, MessageCreateRequest, RetrievalRecordPolicyMetadata
 
 
 class FakePG:
@@ -2014,3 +2014,34 @@ def test_structured_policy_metadata_rejects_reserved_spoofing_and_mime_contradic
         metadata={"domain": "personal"},
     )
     assert request.policy_metadata is None
+
+
+def test_retrieval_record_policy_metadata_rejects_falsey_non_list_shapes_exactly():
+    valid = {
+        "memory_domains": ["technical"],
+        "sensitivity": "low",
+    }
+
+    for field_name, malformed in (
+        ("entity_ids", ""),
+        ("entity_ids", None),
+        ("relationship_ids", 0),
+        ("relationship_ids", False),
+        ("relationship_scopes", {}),
+        ("relationship_scopes", ""),
+        ("memory_domains", "technical"),
+        ("memory_domains", []),
+    ):
+        with pytest.raises(ValueError):
+            RetrievalRecordPolicyMetadata.model_validate({**valid, field_name: malformed})
+
+    with pytest.raises(ValueError):
+        RetrievalRecordPolicyMetadata.model_validate({**valid, "entity_ids": ["entity", 7]})
+    with pytest.raises(ValueError):
+        RetrievalRecordPolicyMetadata.model_validate({**valid, "unexpected": "nope"})
+
+    omitted = RetrievalRecordPolicyMetadata.model_validate(valid)
+    assert omitted.memory_domains == ["technical"]
+    assert omitted.entity_ids == []
+    assert omitted.relationship_ids == []
+    assert omitted.relationship_scopes == []

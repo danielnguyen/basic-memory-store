@@ -158,15 +158,15 @@ class FakePG:
     async def get_artifact(self, artifact_id):
         return self.artifacts.get(str(artifact_id))
 
-    async def get_recent_message_snippets(self, conversation_id, limit=10):
+    async def get_recent_message_snippets(self, conversation_id, limit=10, owner_id=None):
         out = []
         for m in self.messages:
-            if m["conversation_id"] == str(conversation_id):
+            if m["conversation_id"] == str(conversation_id) and (owner_id is None or m["owner_id"] == owner_id):
                 out.append(m)
         return out[-limit:]
 
-    async def get_recent_message_items(self, conversation_id, limit=10, policy_filter=None):
-        return await self.get_recent_message_snippets(conversation_id, limit=limit)
+    async def get_recent_message_items(self, conversation_id, limit=10, policy_filter=None, owner_id=None):
+        return await self.get_recent_message_snippets(conversation_id, limit=limit, owner_id=owner_id)
 
     async def create_derived_text(self, *, artifact_id, kind, text, language, derivation_params):
         did = uuid.uuid4()
@@ -1681,6 +1681,89 @@ def test_tiered_retrieve_endpoint(client, monkeypatch):
     assert "persona" in body
 
 
+def test_tiered_retrieve_cross_owner_returns_bounded_404_without_storage_calls(client, monkeypatch):
+    convo = str(uuid.uuid4())
+    main_module.pg.conversations.add(uuid.UUID(convo))
+
+    async def fail_call(*args, **kwargs):
+        raise AssertionError("retrieval storage must not be called after owner check fails")
+
+    monkeypatch.setattr(main_module.qdrant, "search", fail_call, raising=True)
+    monkeypatch.setattr(main_module.pg, "get_message_snippets_by_ids", fail_call, raising=True)
+    monkeypatch.setattr(main_module.pg, "get_recent_message_snippets", fail_call, raising=True)
+    monkeypatch.setattr(main_module.pg, "get_recent_message_items", fail_call, raising=True)
+    monkeypatch.setattr(main_module.pg, "get_pinned_memories", fail_call, raising=True)
+    monkeypatch.setattr(main_module.pg, "get_policy_overlays", fail_call, raising=True)
+    monkeypatch.setattr(main_module.pg, "get_persona_overlays", fail_call, raising=True)
+
+    containment = {
+        "enforcement_mode": "mandatory",
+        "allowed_memory_domains": ["technical"],
+        "blocked_memory_domains": [],
+        "artifact_access_policy": {
+            "enforcement_mode": "mandatory",
+            "allowed_content_classes": ["document", "code"],
+            "allowed_domains": ["technical"],
+            "maximum_sensitivity": "medium",
+            "surface_content_capabilities": ["document", "code"],
+            "reason_codes": ["artifact_policy_applied"],
+        },
+    }
+
+    for body in (
+        {"owner_id": "other-owner", "query": "note", "k": 4},
+        {"owner_id": "other-owner", "query": "note", "k": 4, "containment_policy": containment},
+    ):
+        r = client.post(
+            f"/v1/conversations/{convo}/retrieve",
+            headers=auth_headers(),
+            json=body,
+        )
+        assert r.status_code == 404
+        assert r.json()["detail"] == "conversation_id not found"
+
+    missing = client.post(
+        f"/v1/conversations/{uuid.uuid4()}/retrieve",
+        headers=auth_headers(),
+        json={"owner_id": "other-owner", "query": "note", "k": 4},
+    )
+    assert missing.status_code == 404
+    assert missing.json()["detail"] == "conversation_id not found"
+
+
+def test_tiered_retrieve_legacy_correct_owner_keeps_working_memory(client, monkeypatch):
+    convo = str(uuid.uuid4())
+    main_module.pg.conversations.add(uuid.UUID(convo))
+
+    async def fake_search(**kwargs):
+        return []
+
+    monkeypatch.setattr(main_module.qdrant, "search", fake_search, raising=True)
+    anyio.run(
+        main_module.pg.add_message,
+        uuid.UUID(convo),
+        "daniel",
+        "user",
+        "same-owner working memory",
+        "vscode",
+    )
+
+    r = client.post(
+        f"/v1/conversations/{convo}/retrieve",
+        headers=auth_headers(),
+        json={
+            "owner_id": "daniel",
+            "query": "note",
+            "k": 4,
+        },
+    )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert [item["content"] for item in body["working"]] == ["same-owner working memory"]
+    assert body["semantic"] == []
+
+
 def test_tiered_retrieve_mandatory_policy_filters_all_tiers(client, monkeypatch):
     convo = str(uuid.uuid4())
     main_module.pg.conversations.add(uuid.UUID(convo))
@@ -1739,9 +1822,10 @@ def test_tiered_retrieve_mandatory_policy_filters_all_tiers(client, monkeypatch)
             },
         ]
 
-    async def fake_recent(conversation_id, limit=10, policy_filter=None):
+    async def fake_recent(conversation_id, limit=10, policy_filter=None, owner_id=None):
         calls["working_policy_filter"] = policy_filter
         calls["working_limit"] = limit
+        calls["working_owner_id"] = owner_id
         return [
             {
                 "message_id": str(uuid.uuid4()),
@@ -1815,6 +1899,7 @@ def test_tiered_retrieve_mandatory_policy_filters_all_tiers(client, monkeypatch)
     assert calls["semantic_policy_filter"]["allowed_domains"] == ["technical"]
     assert calls["working_policy_filter"]["blocked_domains"] == ["finance"]
     assert calls["working_limit"] == 2
+    assert calls["working_owner_id"] == "daniel"
     assert calls["pinned_policy_filter"]["allowed_domains"] == ["technical"]
     assert calls["pinned_limit"] == 2
     assert calls["policy_overlay_filter"]["allowed_domains"] == ["technical"]

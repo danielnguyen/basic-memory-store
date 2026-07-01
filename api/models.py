@@ -62,9 +62,17 @@ def _normalize_labels(values: list[str]) -> list[str]:
     return normalized
 
 
-def _validate_bounded_string_list(value: Any, *, field_name: str, max_length: int) -> list[str]:
+def _validate_bounded_string_list(
+    value: Any,
+    *,
+    field_name: str,
+    max_length: int,
+    min_length: int = 0,
+) -> list[str]:
     if not isinstance(value, list):
         raise ValueError(f"{field_name} must be a list")
+    if len(value) < min_length:
+        raise ValueError(f"{field_name} must contain at least {min_length} item")
     if len(value) > max_length:
         raise ValueError(f"{field_name} exceeds maximum length")
     out: list[str] = []
@@ -81,7 +89,7 @@ def _validate_bounded_string_list(value: Any, *, field_name: str, max_length: in
 class RetrievalRecordPolicyMetadata(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    memory_domains: List[BoundedLabel] = Field(..., max_length=16)
+    memory_domains: List[BoundedLabel] = Field(..., min_length=1, max_length=16)
     sensitivity: RetrievalSensitivity
     content_class: Optional[ArtifactContentClass] = None
     entity_ids: List[BoundedScopeId] = Field(default_factory=list, max_length=64)
@@ -91,17 +99,17 @@ class RetrievalRecordPolicyMetadata(BaseModel):
     @field_validator("memory_domains", mode="before")
     @classmethod
     def validate_memory_domains_shape(cls, value: Any) -> list[str]:
-        return _validate_bounded_string_list(value, field_name="memory_domains", max_length=16)
+        return _validate_bounded_string_list(value, field_name="memory_domains", min_length=1, max_length=16)
 
     @field_validator("entity_ids", "relationship_ids", mode="before")
     @classmethod
     def validate_scope_ids_shape(cls, value: Any) -> list[str]:
-        return _validate_bounded_string_list(value or [], field_name="scope_ids", max_length=64)
+        return _validate_bounded_string_list(value, field_name="scope_ids", max_length=64)
 
     @field_validator("relationship_scopes", mode="before")
     @classmethod
     def validate_relationship_scopes_shape(cls, value: Any) -> list[str]:
-        return _validate_bounded_string_list(value or [], field_name="relationship_scopes", max_length=16)
+        return _validate_bounded_string_list(value, field_name="relationship_scopes", max_length=16)
 
     @field_validator("memory_domains", "relationship_scopes", mode="after")
     @classmethod

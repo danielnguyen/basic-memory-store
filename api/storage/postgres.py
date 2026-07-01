@@ -2028,17 +2028,28 @@ class PostgresStore:
                     "idempotent": False,
                 }
 
-    async def get_recent_message_snippets(self, conversation_id: UUID, limit: int = 10) -> list[dict[str, Any]]:
-        q = """
+    async def get_recent_message_snippets(
+        self,
+        conversation_id: UUID,
+        limit: int = 10,
+        owner_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        where = ["conversation_id = %s"]
+        params: list[Any] = [conversation_id]
+        if owner_id is not None:
+            where.append("owner_id = %s")
+            params.append(owner_id)
+        params.append(limit)
+        q = f"""
         SELECT id, conversation_id, role, content, created_at
         FROM messages
-        WHERE conversation_id = %s
+        WHERE {' AND '.join(where)}
         ORDER BY created_at DESC
         LIMIT %s;
         """
         async with self.pool.connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(q, (conversation_id, limit))
+                await cur.execute(q, tuple(params))
                 rows = await cur.fetchall()
 
         rows.reverse()
@@ -2341,9 +2352,13 @@ class PostgresStore:
         conversation_id: UUID,
         limit: int = 10,
         policy_filter: dict[str, Any] | None = None,
+        owner_id: str | None = None,
     ) -> list[dict[str, Any]]:
         where = ["conversation_id = %s"]
         params: list[Any] = [conversation_id]
+        if owner_id is not None:
+            where.append("owner_id = %s")
+            params.append(owner_id)
         if policy_filter is not None:
             allowed_domains = list(policy_filter.get("allowed_domains") or [])
             if not allowed_domains:
