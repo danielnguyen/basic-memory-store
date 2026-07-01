@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import types
 from uuid import uuid4
 
@@ -8,6 +9,7 @@ import psycopg
 
 import main as main_module
 from storage.postgres import PostgresStore
+from storage.qdrant import _policy_payload
 
 
 class FakeQdrant:
@@ -134,3 +136,137 @@ def test_request_id_mismatch_persists_no_trace_with_postgresql_16(
             ([body_request_id, header_request_id],),
         ).fetchone()[0]
     assert count == 0
+
+
+def test_message_policy_metadata_round_trips_dedicated_column_with_postgresql_16(postgres_database):
+    policy = {
+        "memory_domains": ["technical"],
+        "sensitivity": "low",
+        "entity_ids": [],
+        "relationship_ids": [],
+        "relationship_scopes": [],
+    }
+    legacy_metadata = {"domain": "personal"}
+
+    async def run():
+        store = PostgresStore(postgres_database)
+        await store.open()
+        try:
+            conversation_id = await store.create_conversation(
+                owner_id="owner-policy",
+                client_id="client-policy",
+                title="Policy metadata",
+            )
+            message_id = await store.add_message(
+                conversation_id=conversation_id,
+                owner_id="owner-policy",
+                role="assistant",
+                content="Structured policy belongs in the dedicated column.",
+                client_id="client-policy",
+                metadata=legacy_metadata,
+                policy_metadata=policy,
+            )
+
+            snippets = await store.get_message_snippets_by_ids([message_id])
+            reindex_rows = await store.get_messages_for_reindex(owner_id="owner-policy")
+        finally:
+            await store.close()
+        return str(message_id), snippets, reindex_rows
+
+    message_id, snippets, reindex_rows = asyncio.run(run())
+
+    assert len(snippets) == 1
+    assert snippets[0]["message_id"] == message_id
+    assert snippets[0]["metadata"] == legacy_metadata
+    assert snippets[0]["policy_metadata"] == policy
+    assert reindex_rows[0]["metadata"] == legacy_metadata
+    assert reindex_rows[0]["policy_metadata"] == policy
+    qdrant_payload = _policy_payload(reindex_rows[0]["policy_metadata"])
+    assert qdrant_payload["retrieval_policy_valid"] is True
+    assert qdrant_payload["memory_domains"] == ["technical"]
+
+
+def test_working_message_queries_are_owner_qualified_before_limit_with_postgresql_16(postgres_database):
+    policy = {
+        "memory_domains": ["technical"],
+        "sensitivity": "low",
+        "entity_ids": [],
+        "relationship_ids": [],
+        "relationship_scopes": [],
+    }
+    policy_filter = {
+        "allowed_domains": ["technical"],
+        "blocked_domains": [],
+        "allowed_sensitivities": ["low", "medium", "high"],
+        "relationship_scope": {"applied": False},
+    }
+
+    async def run():
+        store = PostgresStore(postgres_database)
+        await store.open()
+        try:
+            conversation_id = await store.create_conversation(
+                owner_id="owner-working",
+                client_id="client-working",
+                title="Working owner scope",
+            )
+            owner_message_id = await store.add_message(
+                conversation_id=conversation_id,
+                owner_id="owner-working",
+                role="assistant",
+                content="same owner working survives",
+                client_id="client-working",
+                policy_metadata=policy,
+            )
+            cross_owner_message_id = await store.add_message(
+                conversation_id=conversation_id,
+                owner_id="other-owner",
+                role="assistant",
+                content="cross owner working must not consume limit",
+                client_id="client-working",
+                policy_metadata=policy,
+            )
+        finally:
+            await store.close()
+        return conversation_id, owner_message_id, cross_owner_message_id
+
+    conversation_id, owner_message_id, cross_owner_message_id = asyncio.run(run())
+    with psycopg.connect(postgres_database) as conn:
+        conn.execute(
+            """
+            UPDATE messages
+            SET created_at = CASE
+              WHEN id = %s THEN now() - interval '1 hour'
+              WHEN id = %s THEN now()
+              ELSE created_at
+            END
+            WHERE id = ANY(%s)
+            """,
+            (owner_message_id, cross_owner_message_id, [owner_message_id, cross_owner_message_id]),
+        )
+        conn.commit()
+
+    async def read():
+        store = PostgresStore(postgres_database)
+        await store.open()
+        try:
+            mandatory = await store.get_recent_message_items(
+                conversation_id=conversation_id,
+                owner_id="owner-working",
+                limit=1,
+                policy_filter=policy_filter,
+            )
+            legacy = await store.get_recent_message_snippets(
+                conversation_id=conversation_id,
+                owner_id="owner-working",
+                limit=1,
+            )
+        finally:
+            await store.close()
+        return mandatory, legacy
+
+    mandatory, legacy = asyncio.run(read())
+
+    assert [item["message_id"] for item in mandatory] == [str(owner_message_id)]
+    assert mandatory[0]["policy_metadata"] == policy
+    assert [item["message_id"] for item in legacy] == [str(owner_message_id)]

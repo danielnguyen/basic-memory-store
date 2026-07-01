@@ -986,7 +986,10 @@ def test_derivation_version_cleanup_migrates_only_exact_legacy_values_and_defaul
     payload = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
     repeated = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
 
-    assert payload["applied_migrations"] == [cleanup_migration.name]
+    assert payload["applied_migrations"] == [
+        cleanup_migration.name,
+        "20260701120000_artifact_policy_metadata.sql",
+    ]
     assert repeated["applied_migrations"] == []
     assert column_default(pg_database, "memory_items", "derivation_version") == f"'{MEMORY_ITEM_DERIVATION_VERSION}'::text"
     assert column_default(pg_database, "episodes", "derivation_version") == f"'{EPISODE_DERIVATION_VERSION}'::text"

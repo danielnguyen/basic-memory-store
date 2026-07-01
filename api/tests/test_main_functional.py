@@ -53,7 +53,7 @@ class FakePG:
         cid = await self.create_conversation(owner_id, client_id, title)
         return cid, False
 
-    async def add_message(self, conversation_id, owner_id, role, content, client_id, metadata=None):
+    async def add_message(self, conversation_id, owner_id, role, content, client_id, metadata=None, policy_metadata=None):
         mid = uuid.uuid4()
         self.messages.append(
             {
@@ -63,6 +63,8 @@ class FakePG:
                 "role": role,
                 "content": content,
                 "client_id": client_id,
+                "metadata": metadata or {},
+                "policy_metadata": policy_metadata,
                 "created_at": "2026-01-01 00:00:00+00:00",
             }
         )
@@ -88,7 +90,8 @@ class FakePG:
                         "conversation_id": m["conversation_id"],
                         "role": m["role"],
                         "content": m["content"],
-                        "metadata": {},
+                        "metadata": m.get("metadata", {}),
+                        "policy_metadata": m.get("policy_metadata"),
                         "created_at": m["created_at"],
                     }
                 )
@@ -116,6 +119,7 @@ class FakePG:
         ingestion_id=None,
         sha256=None,
         status="pending",
+        policy_metadata=None,
     ):
         row = {
             "artifact_id": str(artifact_id),
@@ -136,6 +140,7 @@ class FakePG:
             "repo_ref": repo_ref,
             "file_path": file_path,
             "ingestion_id": str(ingestion_id) if ingestion_id else None,
+            "policy_metadata": policy_metadata,
         }
         self.artifacts[str(artifact_id)] = row
         return row
@@ -153,15 +158,15 @@ class FakePG:
     async def get_artifact(self, artifact_id):
         return self.artifacts.get(str(artifact_id))
 
-    async def get_recent_message_snippets(self, conversation_id, limit=10):
+    async def get_recent_message_snippets(self, conversation_id, limit=10, owner_id=None):
         out = []
         for m in self.messages:
-            if m["conversation_id"] == str(conversation_id):
+            if m["conversation_id"] == str(conversation_id) and (owner_id is None or m["owner_id"] == owner_id):
                 out.append(m)
         return out[-limit:]
 
-    async def get_recent_message_items(self, conversation_id, limit=10):
-        return await self.get_recent_message_snippets(conversation_id, limit=limit)
+    async def get_recent_message_items(self, conversation_id, limit=10, policy_filter=None, owner_id=None):
+        return await self.get_recent_message_snippets(conversation_id, limit=limit, owner_id=owner_id)
 
     async def create_derived_text(self, *, artifact_id, kind, text, language, derivation_params):
         did = uuid.uuid4()
@@ -232,6 +237,7 @@ class FakePG:
                     "file_path": params.get("file_path") or artifact.get("file_path") or artifact.get("filename") or "",
                     "repo_name": params.get("repo_name") or artifact.get("repo_name"),
                     "mime": artifact.get("mime", "text/plain"),
+                    "policy_metadata": artifact.get("policy_metadata"),
                 }
             )
         return out
@@ -270,16 +276,16 @@ class FakePG:
     async def get_memory_items_for_source_refs(self, owner_id, source_refs):
         return {}
 
-    async def get_pinned_memories(self, owner_id: str, conversation_id=None, limit=5):
+    async def get_pinned_memories(self, owner_id: str, conversation_id=None, limit=5, policy_filter=None):
         return []
 
     async def get_pinned_memories_for_hygiene(self, owner_id: str, limit=50):
         return []
 
-    async def get_policy_overlays(self, owner_id: str, surface=None):
+    async def get_policy_overlays(self, owner_id: str, surface=None, policy_filter=None):
         return []
 
-    async def get_persona_overlays(self, owner_id: str, surface=None):
+    async def get_persona_overlays(self, owner_id: str, surface=None, policy_filter=None):
         return []
 
     async def create_hygiene_flag(self, *, owner_id: str, subject_type: str, subject_id, flag_type: str, details=None):
@@ -370,7 +376,17 @@ class FakeQdrant:
         self.upserts.append(kwargs)
         return True
 
-    async def search(self, owner_id, query, k, min_score, conversation_id=None, client_id=None, exclude_message_ids=None):
+    async def search(
+        self,
+        owner_id,
+        query,
+        k,
+        min_score,
+        conversation_id=None,
+        client_id=None,
+        exclude_message_ids=None,
+        policy_filter=None,
+    ):
         # Return empty by default (tests can monkeypatch this per-case)
         return []
 
@@ -1437,6 +1453,97 @@ def test_file_ingestion_creates_artifacts_and_chunks(client, tmp_path):
     assert main_module.qdrant.derived_upserts[0]["file_path"] == "module.py"
 
 
+def test_file_ingestion_derives_per_file_policy_classes_and_rejects_incompatible_class(client, tmp_path):
+    src_dir = tmp_path / "repo"
+    src_dir.mkdir()
+    py_file = src_dir / "module.py"
+    md_file = src_dir / "README.md"
+    py_file.write_text("def useful_helper():\n    return 'ok'\n", encoding="utf-8")
+    md_file.write_text("# Notes\n\nalpha beta gamma\n", encoding="utf-8")
+
+    incompatible = client.post(
+        "/v1/ingestion/files",
+        headers=auth_headers(),
+        json={
+            "owner_id": "daniel",
+            "client_id": "vscode",
+            "source_surface": "vscode",
+            "repo_name": "basic-memory-store",
+            "paths": [str(src_dir)],
+            "policy_metadata": {
+                "memory_domains": ["technical"],
+                "sensitivity": "low",
+                "content_class": "image",
+            },
+        },
+    )
+    assert incompatible.status_code == 422
+
+    r = client.post(
+        "/v1/ingestion/files",
+        headers=auth_headers(),
+        json={
+            "owner_id": "daniel",
+            "client_id": "vscode",
+            "source_surface": "vscode",
+            "repo_name": "basic-memory-store",
+            "paths": [str(src_dir)],
+            "policy_metadata": {
+                "memory_domains": ["technical"],
+                "sensitivity": "low",
+            },
+        },
+    )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["files_ingested"] == 2
+    policy_by_file = {
+        row["file_path"]: row["policy_metadata"]
+        for row in main_module.pg.artifacts.values()
+    }
+    assert policy_by_file["module.py"]["content_class"] == "code"
+    assert policy_by_file["README.md"]["content_class"] == "document"
+    qdrant_policy_by_file = {
+        point["file_path"]: point["policy_metadata"]
+        for point in main_module.qdrant.derived_upserts
+        if point.get("derivation_status") == "active"
+    }
+    assert qdrant_policy_by_file["module.py"]["content_class"] == "code"
+    assert qdrant_policy_by_file["README.md"]["content_class"] == "document"
+
+    convo = uuid.uuid4()
+    main_module.pg.conversations.add(convo)
+    retrieval = client.post(
+        f"/v2/conversations/{convo}/retrieve",
+        headers={**auth_headers(), "X-Request-ID": "rid-file-policy-retrieval"},
+        json={
+            "request_id": "rid-file-policy-retrieval",
+            "owner_id": "daniel",
+            "query": "helper notes",
+            "include_artifacts": True,
+            "retrieval": {"k": 3, "min_score": 0.0, "scope": "conversation"},
+            "containment_policy": {
+                "enforcement_mode": "mandatory",
+                "allowed_memory_domains": ["technical"],
+                "blocked_memory_domains": [],
+                "artifact_access_policy": {
+                    "enforcement_mode": "mandatory",
+                    "allowed_content_classes": ["document", "code"],
+                    "allowed_domains": ["technical"],
+                    "maximum_sensitivity": "medium",
+                    "surface_content_capabilities": ["document", "code"],
+                    "reason_codes": ["artifact_policy_applied"],
+                },
+            },
+        },
+    )
+    assert retrieval.status_code == 200
+    refs = retrieval.json()["bundle"]["artifact_refs"]
+    assert {ref["file_path"] for ref in refs} == {"module.py", "README.md"}
+    assert {ref["policy_metadata"]["content_class"] for ref in refs} == {"code", "document"}
+
+
 def test_v2_retrieval_returns_same_uploaded_artifact_source_metadata(client, monkeypatch):
     convo = uuid.uuid4()
     main_module.pg.conversations.add(convo)
@@ -1572,6 +1679,231 @@ def test_tiered_retrieve_endpoint(client, monkeypatch):
     assert "pinned" in body
     assert "policy" in body
     assert "persona" in body
+
+
+def test_tiered_retrieve_cross_owner_returns_bounded_404_without_storage_calls(client, monkeypatch):
+    convo = str(uuid.uuid4())
+    main_module.pg.conversations.add(uuid.UUID(convo))
+
+    async def fail_call(*args, **kwargs):
+        raise AssertionError("retrieval storage must not be called after owner check fails")
+
+    monkeypatch.setattr(main_module.qdrant, "search", fail_call, raising=True)
+    monkeypatch.setattr(main_module.pg, "get_message_snippets_by_ids", fail_call, raising=True)
+    monkeypatch.setattr(main_module.pg, "get_recent_message_snippets", fail_call, raising=True)
+    monkeypatch.setattr(main_module.pg, "get_recent_message_items", fail_call, raising=True)
+    monkeypatch.setattr(main_module.pg, "get_pinned_memories", fail_call, raising=True)
+    monkeypatch.setattr(main_module.pg, "get_policy_overlays", fail_call, raising=True)
+    monkeypatch.setattr(main_module.pg, "get_persona_overlays", fail_call, raising=True)
+
+    containment = {
+        "enforcement_mode": "mandatory",
+        "allowed_memory_domains": ["technical"],
+        "blocked_memory_domains": [],
+        "artifact_access_policy": {
+            "enforcement_mode": "mandatory",
+            "allowed_content_classes": ["document", "code"],
+            "allowed_domains": ["technical"],
+            "maximum_sensitivity": "medium",
+            "surface_content_capabilities": ["document", "code"],
+            "reason_codes": ["artifact_policy_applied"],
+        },
+    }
+
+    for body in (
+        {"owner_id": "other-owner", "query": "note", "k": 4},
+        {"owner_id": "other-owner", "query": "note", "k": 4, "containment_policy": containment},
+    ):
+        r = client.post(
+            f"/v1/conversations/{convo}/retrieve",
+            headers=auth_headers(),
+            json=body,
+        )
+        assert r.status_code == 404
+        assert r.json()["detail"] == "conversation_id not found"
+
+    missing = client.post(
+        f"/v1/conversations/{uuid.uuid4()}/retrieve",
+        headers=auth_headers(),
+        json={"owner_id": "other-owner", "query": "note", "k": 4},
+    )
+    assert missing.status_code == 404
+    assert missing.json()["detail"] == "conversation_id not found"
+
+
+def test_tiered_retrieve_legacy_correct_owner_keeps_working_memory(client, monkeypatch):
+    convo = str(uuid.uuid4())
+    main_module.pg.conversations.add(uuid.UUID(convo))
+
+    async def fake_search(**kwargs):
+        return []
+
+    monkeypatch.setattr(main_module.qdrant, "search", fake_search, raising=True)
+    anyio.run(
+        main_module.pg.add_message,
+        uuid.UUID(convo),
+        "daniel",
+        "user",
+        "same-owner working memory",
+        "vscode",
+    )
+
+    r = client.post(
+        f"/v1/conversations/{convo}/retrieve",
+        headers=auth_headers(),
+        json={
+            "owner_id": "daniel",
+            "query": "note",
+            "k": 4,
+        },
+    )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert [item["content"] for item in body["working"]] == ["same-owner working memory"]
+    assert body["semantic"] == []
+
+
+def test_tiered_retrieve_mandatory_policy_filters_all_tiers(client, monkeypatch):
+    convo = str(uuid.uuid4())
+    main_module.pg.conversations.add(uuid.UUID(convo))
+    spoof_id = str(uuid.uuid4())
+    eligible_id = str(uuid.uuid4())
+    policy = {
+        "memory_domains": ["technical"],
+        "sensitivity": "low",
+        "entity_ids": [],
+        "relationship_ids": [],
+        "relationship_scopes": [],
+    }
+    containment = {
+        "enforcement_mode": "mandatory",
+        "allowed_memory_domains": ["technical"],
+        "blocked_memory_domains": ["finance"],
+        "artifact_access_policy": {
+            "enforcement_mode": "mandatory",
+            "allowed_content_classes": ["document", "code"],
+            "allowed_domains": ["technical"],
+            "maximum_sensitivity": "medium",
+            "surface_content_capabilities": ["document", "code"],
+            "reason_codes": ["artifact_policy_applied"],
+        },
+    }
+    calls = {}
+
+    class Hit:
+        def __init__(self, message_id, score):
+            self.message_id = message_id
+            self.score = score
+
+    async def fake_search(**kwargs):
+        calls["semantic_policy_filter"] = kwargs.get("policy_filter")
+        return [Hit(message_id=spoof_id, score=0.99), Hit(message_id=eligible_id, score=0.2)]
+
+    async def fake_snips(ids):
+        return [
+            {
+                "message_id": spoof_id,
+                "conversation_id": convo,
+                "role": "user",
+                "content": "spoof semantic",
+                "metadata": {"retrieval_policy_metadata": policy},
+                "policy_metadata": None,
+                "created_at": "2026-01-01 00:00:00+00:00",
+            },
+            {
+                "message_id": eligible_id,
+                "conversation_id": convo,
+                "role": "user",
+                "content": "eligible semantic",
+                "metadata": {},
+                "policy_metadata": policy,
+                "created_at": "2026-01-01 00:00:00+00:00",
+            },
+        ]
+
+    async def fake_recent(conversation_id, limit=10, policy_filter=None, owner_id=None):
+        calls["working_policy_filter"] = policy_filter
+        calls["working_limit"] = limit
+        calls["working_owner_id"] = owner_id
+        return [
+            {
+                "message_id": str(uuid.uuid4()),
+                "conversation_id": str(conversation_id),
+                "role": "assistant",
+                "content": "malformed working",
+                "metadata": {},
+                "policy_metadata": {"memory_domains": "technical", "sensitivity": "low"},
+                "created_at": "2026-01-01 00:00:00+00:00",
+            },
+            {
+                "message_id": str(uuid.uuid4()),
+                "conversation_id": str(conversation_id),
+                "role": "assistant",
+                "content": "eligible working",
+                "metadata": {},
+                "policy_metadata": policy,
+                "created_at": "2026-01-01 00:00:00+00:00",
+            },
+        ]
+
+    async def fake_pinned(owner_id, conversation_id=None, limit=5, policy_filter=None):
+        calls["pinned_policy_filter"] = policy_filter
+        calls["pinned_limit"] = limit
+        return [
+            {"id": "pin-spoof", "content": "spoof pin", "metadata": {}, "policy_metadata": None},
+            {"id": "pin-ok", "content": "eligible pin", "metadata": {}, "policy_metadata": policy},
+        ]
+
+    async def fake_policy(owner_id, surface=None, policy_filter=None):
+        calls["policy_overlay_filter"] = policy_filter
+        return [
+            {"id": "policy-blocked", "content": "blocked", "metadata": {}, "policy_metadata": {**policy, "memory_domains": ["finance"]}},
+            {"id": "policy-ok", "content": "eligible policy", "metadata": {}, "policy_metadata": policy},
+        ]
+
+    async def fake_persona(owner_id, surface=None, policy_filter=None):
+        calls["persona_overlay_filter"] = policy_filter
+        return [
+            {"id": "persona-malformed", "content": "bad", "metadata": {}, "policy_metadata": {"memory_domains": ["technical"], "sensitivity": "restricted"}},
+            {"id": "persona-ok", "content": "eligible persona", "metadata": {}, "policy_metadata": policy},
+        ]
+
+    monkeypatch.setattr(main_module.qdrant, "search", fake_search, raising=True)
+    monkeypatch.setattr(main_module.pg, "get_message_snippets_by_ids", fake_snips, raising=True)
+    monkeypatch.setattr(main_module.pg, "get_recent_message_items", fake_recent, raising=True)
+    monkeypatch.setattr(main_module.pg, "get_pinned_memories", fake_pinned, raising=True)
+    monkeypatch.setattr(main_module.pg, "get_policy_overlays", fake_policy, raising=True)
+    monkeypatch.setattr(main_module.pg, "get_persona_overlays", fake_persona, raising=True)
+
+    r = client.post(
+        f"/v1/conversations/{convo}/retrieve",
+        headers=auth_headers(),
+        json={
+            "owner_id": "daniel",
+            "query": "note",
+            "k": 4,
+            "working_limit": 2,
+            "pinned_limit": 2,
+            "containment_policy": containment,
+        },
+    )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert [item["message_id"] for item in body["semantic"]] == [eligible_id]
+    assert [item["content"] for item in body["working"]] == ["eligible working"]
+    assert [item["id"] for item in body["pinned"]] == ["pin-ok"]
+    assert [item["id"] for item in body["policy"]] == ["policy-ok"]
+    assert [item["id"] for item in body["persona"]] == ["persona-ok"]
+    assert calls["semantic_policy_filter"]["allowed_domains"] == ["technical"]
+    assert calls["working_policy_filter"]["blocked_domains"] == ["finance"]
+    assert calls["working_limit"] == 2
+    assert calls["working_owner_id"] == "daniel"
+    assert calls["pinned_policy_filter"]["allowed_domains"] == ["technical"]
+    assert calls["pinned_limit"] == 2
+    assert calls["policy_overlay_filter"]["allowed_domains"] == ["technical"]
+    assert calls["persona_overlay_filter"]["allowed_domains"] == ["technical"]
 
 
 def test_orchestrate_chat_and_trace_read(client):

@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS messages (
   role TEXT NOT NULL CHECK (role IN ('user','assistant','system','tool')),
   content TEXT NOT NULL,
   metadata JSONB,
+  policy_metadata JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -46,6 +47,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
   repo_name TEXT,
   repo_ref TEXT,
   file_path TEXT,
+  policy_metadata JSONB,
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'completed', 'failed')),
   content_hash_version TEXT NOT NULL DEFAULT 'v1',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -306,6 +308,7 @@ CREATE TABLE IF NOT EXISTS pinned_memories (
   conversation_id UUID NULL REFERENCES conversations(id) ON DELETE SET NULL,
   content TEXT NOT NULL,
   metadata JSONB,
+  policy_metadata JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -317,6 +320,7 @@ CREATE TABLE IF NOT EXISTS policy_overlays (
   owner_id TEXT NOT NULL,
   surface TEXT,
   policy_json JSONB NOT NULL,
+  policy_metadata JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -328,6 +332,7 @@ CREATE TABLE IF NOT EXISTS persona_overlays (
   owner_id TEXT NOT NULL,
   surface TEXT,
   persona_json JSONB NOT NULL,
+  policy_metadata JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

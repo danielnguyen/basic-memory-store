@@ -5,12 +5,16 @@ from pathlib import Path
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
+from models import RetrievalRecordPolicyMetadata
 from services.chunking import chunk_text, iter_ingestable_paths
 
 
 TEXT_ARTIFACT_DERIVATION_VERSION = "text-artifact-chunk-v1"
 LOCAL_FILE_DERIVATION_VERSION = "file-chunk-v1"
 SUPPORTED_TEXT_ARTIFACT_MIME = {"text/plain", "text/markdown", "application/json"}
+CODE_EXTENSIONS = {".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".rb", ".php", ".sh", ".sql", ".yaml", ".yml", ".toml"}
+DOCUMENT_EXTENSIONS = {".txt", ".md", ".markdown", ".json", ".csv", ".rst"}
+RESERVED_POLICY_METADATA_KEY = "retrieval_policy_metadata"
 
 
 async def derive_text_chunks_for_artifact(
@@ -58,6 +62,7 @@ async def derive_text_chunks_for_artifact(
         )
 
     attempt_id = str(uuid4())
+    artifact_policy_metadata = artifact.get("policy_metadata")
     pending: list[dict[str, Any]] = []
     chunks_created = 0
     chunks_indexed = 0
@@ -92,6 +97,7 @@ async def derive_text_chunks_for_artifact(
                         "support_kind": "direct",
                     }
                 ],
+                RESERVED_POLICY_METADATA_KEY: artifact_policy_metadata,
                 "chunk_index": chunk_index,
                 "char_start": chunk["char_start"],
                 "char_end": chunk["char_end"],
@@ -115,6 +121,7 @@ async def derive_text_chunks_for_artifact(
             file_path=file_path or artifact.get("file_path") or artifact.get("filename") or "",
             repo_name=repo_name or artifact.get("repo_name"),
             chunk_index=chunk_index,
+            policy_metadata=artifact_policy_metadata,
         )
         await pg.create_embedding_ref(
             ref_type="derived_text",
@@ -154,6 +161,7 @@ async def derive_text_chunks_for_artifact(
             file_path=file_path or artifact.get("file_path") or artifact.get("filename") or "",
             repo_name=repo_name or artifact.get("repo_name"),
             chunk_index=int(params["chunk_index"]),
+            policy_metadata=params.get(RESERVED_POLICY_METADATA_KEY) or artifact_policy_metadata,
         )
 
     activated = await pg.activate_derived_text_attempt(
@@ -171,6 +179,32 @@ async def derive_text_chunks_for_artifact(
 
 def is_supported_text_artifact_mime(mime: str | None) -> bool:
     return (mime or "").split(";")[0].strip().lower() in SUPPORTED_TEXT_ARTIFACT_MIME
+
+
+def content_class_for_local_file(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in CODE_EXTENSIONS:
+        return "code"
+    if suffix in DOCUMENT_EXTENSIONS:
+        return "document"
+    return "document"
+
+
+def policy_metadata_for_local_file(
+    policy_metadata: dict | None,
+    *,
+    path: Path,
+) -> dict | None:
+    if policy_metadata is None:
+        return None
+    expected_class = content_class_for_local_file(path)
+    validated = RetrievalRecordPolicyMetadata.model_validate(policy_metadata)
+    if validated.content_class is not None and validated.content_class != expected_class:
+        raise ValueError("file policy content_class contradicts file type")
+    per_file = validated.model_copy(update={"content_class": expected_class})
+    if per_file.sensitivity == "restricted":
+        raise ValueError("restricted artifact policy metadata is not retrievable")
+    return per_file.model_dump(mode="json")
 
 
 def _is_completed_chunk(row: dict[str, Any], *, expected_indexes: set[int]) -> bool:
@@ -237,6 +271,7 @@ async def ingest_files(
     source_surface: str | None,
     repo_name: str | None,
     paths: list[str],
+    policy_metadata: dict | None = None,
 ) -> dict[str, str | int | None]:
     allowed_extensions = {item.strip().lower() for item in settings.ingest_allowed_extensions.split(",") if item.strip()}
     exclude_globs = [item.strip() for item in settings.ingest_exclude_globs_default.split(",") if item.strip()]
@@ -262,6 +297,7 @@ async def ingest_files(
             continue
 
         file_path = _derive_file_path(path, root_candidates)
+        artifact_policy_metadata = policy_metadata_for_local_file(policy_metadata, path=path)
         artifact_id = uuid4()
         artifact = await pg.create_artifact(
             artifact_id=artifact_id,
@@ -280,6 +316,7 @@ async def ingest_files(
             ingestion_id=ingestion_id,
             sha256=hashlib.sha256(data.encode("utf-8")).hexdigest(),
             status="completed",
+            policy_metadata=artifact_policy_metadata,
         )
         artifacts_created += 1
 
