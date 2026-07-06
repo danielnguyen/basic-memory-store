@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "reviewed_at": "2026-07-06",
+  "reviewed_by": "Codex",
+  "entries": [
+    {
+      "path": "api/services/episode_intelligence.py",
+      "token": "phase",
+      "pattern": "phase",
+      "bucket": "runtime evidence taxonomy compatibility debt",
+      "reason": "Existing episode evidence term recognizes historical planning language in source text; changing extraction behavior is out of scope for this baseline guardrail.",
+      "context_contains": "\"evidence_terms\": (\"pr\", \"phase\", \"wave\", \"cluster\", \"milestone\", \"merged\", \"completed\"),",
+      "reviewed_at": "2026-07-06",
+      "reviewed_by": "Codex",
+      "removal_required_later": true
+    },
+    {
+      "path": "api/services/episode_intelligence.py",
+      "token": "wave",
+      "pattern": "wave",
+      "bucket": "runtime evidence taxonomy compatibility debt",
+      "reason": "Existing episode evidence term recognizes historical planning language in source text; changing extraction behavior is out of scope for this baseline guardrail.",
+      "context_contains": "\"evidence_terms\": (\"pr\", \"phase\", \"wave\", \"cluster\", \"milestone\", \"merged\", \"completed\"),",
+      "reviewed_at": "2026-07-06",
+      "reviewed_by": "Codex",
+      "removal_required_later": true
+    },
+    {
+      "path": "api/services/episode_intelligence.py",
+      "token": "cluster",
+      "pattern": "cluster",
+      "bucket": "runtime evidence taxonomy compatibility debt",
+      "reason": "Existing episode evidence term recognizes historical planning language in source text; changing extraction behavior is out of scope for this baseline guardrail.",
+      "context_contains": "\"evidence_terms\": (\"pr\", \"phase\", \"wave\", \"cluster\", \"milestone\", \"merged\", \"completed\"),",
+      "reviewed_at": "2026-07-06",
+      "reviewed_by": "Codex",
+      "removal_required_later": true
+    },
+    {
+      "path": "api/services/memory_promotion.py",
+      "token": "R20",
+      "pattern": "R[0-9]+",
+      "bucket": "persisted derivation metadata compatibility debt",
+      "reason": "Existing promotion score formula metadata includes a requirement label; changing persisted derivation metadata is out of scope for this baseline guardrail.",
+      "context_contains": "\"score_formula\": \"weighted R20 promotion factors\"",
+      "reviewed_at": "2026-07-06",
+      "reviewed_by": "Codex",
+      "removal_required_later": true
+    }
+  ]
+}
