@@ -13,7 +13,7 @@ TEST_ENV := \
 	-e EMBED_MODEL=test-embed \
 	-e OBJECT_STORE_ENABLED=false
 
-.PHONY: test test-image test-postgres artifact-storage-test artifact-storage-smoke provenance-test replay-test raw-retrieval-test raw-retrieval-smoke derivation-replay-test derivation-version-test lifecycle-smoke dev-python-check dev-up dev-down dev-reset dev-bootstrap dev-seed-profiles dev-logs dev-setup dev-test dev-install dev-start dev-start-reload dev-migrate-status dev-migrate-check dev-migrate-adopt
+.PHONY: test test-image test-postgres wave4-memory-test artifact-storage-test artifact-storage-smoke provenance-test replay-test raw-retrieval-test raw-retrieval-smoke derivation-replay-test derivation-version-test lifecycle-smoke dev-python-check dev-up dev-down dev-reset dev-bootstrap dev-seed-profiles dev-logs dev-setup dev-test dev-install dev-start dev-start-reload dev-migrate-status dev-migrate-check dev-migrate-adopt
 
 test: test-image
 	@docker run --rm $(TEST_ENV) $(TEST_IMAGE) sh -lc \
@@ -24,6 +24,13 @@ test-image:
 
 test-postgres: test-image
 	@TEST_IMAGE=$(TEST_IMAGE) ./scripts/test_postgres_docker.sh
+
+wave4-memory-test: test-image
+	@docker run --rm $(TEST_ENV) $(TEST_IMAGE) python -m pytest -q \
+		tests/test_memory_promotion_service.py \
+		tests/test_memory_items_api.py \
+		tests/test_recall_api.py \
+		tests/test_recall_service.py
 
 artifact-storage-test: test-image
 	@docker run --rm $(TEST_ENV) $(TEST_IMAGE) python -m pytest -q \
