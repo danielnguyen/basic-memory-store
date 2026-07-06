@@ -3695,6 +3695,34 @@ class PostgresStore:
             "events": [self._episode_event_from_row(event_row) for event_row in event_rows],
         }
 
+    async def list_episode_candidates(
+        self,
+        *,
+        owner_id: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        select_cols = """
+            id, owner_id, title, summary, episode_type, trigger_json,
+            outcome, significance, unresolved_json, source_refs_json,
+            source_ref_hash, episode_key, callback_candidates_json,
+            time_window_json, participants_json, status, derivation_version,
+            confidence, explanation_json, generation_trace_id, created_at, updated_at
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"""
+                    SELECT {select_cols}
+                    FROM episodes
+                    WHERE owner_id = %s AND status = 'active'
+                    ORDER BY updated_at DESC, id ASC
+                    LIMIT %s;
+                    """,
+                    (owner_id, max(1, min(100, limit))),
+                )
+                rows = await cur.fetchall()
+        return [self._episode_from_row(row) for row in rows]
+
     async def transition_episode_status(
         self,
         *,
