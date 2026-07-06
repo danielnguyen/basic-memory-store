@@ -345,7 +345,7 @@ def evaluate_episode_callback(*, context: dict[str, Any], candidate: dict[str, A
     if recency < 0.2 and not unresolved:
         decision = "defer" if decision == "include" else decision
         reasons.append("stale_episode")
-    if context_scene and episode_scene and context_scene != episode_scene and relevance < 0.75:
+    if context_scene and episode_scene and context_scene != episode_scene:
         decision = "suppress"
         reasons.append("scene_inappropriate")
     if awkwardness >= 0.65:

@@ -150,6 +150,20 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 settings = get_settings()
 
+
+def _bounded_episode_scene(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key in ("scene_id", "scene", "surface"):
+        raw = value.get(key)
+        if raw is None:
+            continue
+        text = str(raw).strip()[:160]
+        if text:
+            out[key] = text
+    return out
+
 # --- Auth: adds Swagger "Authorize" for X-API-Key ---
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
@@ -2406,6 +2420,9 @@ async def retrieve_episode_callbacks(body: EpisodeRetrieveRequest, request: Requ
             "recency_score": explanation.get("recency_score"),
             "awkwardness_score": explanation.get("awkwardness_score"),
         }
+        scene = _bounded_episode_scene(shaped.get("scene")) or _bounded_episode_scene(explanation.get("scene"))
+        if scene:
+            signals["scene"] = scene
         candidates.append(
             {
                 **shaped,

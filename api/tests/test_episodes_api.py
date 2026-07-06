@@ -14,10 +14,11 @@ from services.derivation_versions import EPISODE_DERIVATION_VERSION
 
 
 class FakePG:
-    def __init__(self):
+    def __init__(self, *, retrieval_scene=None):
         self.episode_calls = []
         self.link_calls = []
         self.list_calls = []
+        self.retrieval_scene = retrieval_scene
 
     async def open(self):
         return None
@@ -158,6 +159,7 @@ class FakePG:
                     "continuity_value": 0.8,
                     "recency_score": 0.7,
                     "awkwardness_score": 0.1,
+                    **({"scene": self.retrieval_scene} if self.retrieval_scene is not None else {}),
                 },
                 "generation_trace_id": "rid-1",
                 "created_at": now,
@@ -399,5 +401,65 @@ def test_episode_callback_evaluate_and_retrieve_are_bounded_and_owner_scoped(mon
         assert body["eligible_count"] == 1
         assert body["decisions"][0]["episode"]["source_refs"][0]["ref_id"] == "m-1"
         assert pg.list_calls[0]["owner_id"] == "owner"
+    finally:
+        client.close()
+
+
+def test_episode_retrieve_suppresses_persisted_episode_when_stored_scene_mismatches(monkeypatch):
+    pg = FakePG(retrieval_scene={"scene_id": "personal"})
+    monkeypatch.setattr(main_module, "settings", _settings(), raising=True)
+    monkeypatch.setattr(main_module, "pg", pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", FakeQdrant(), raising=True)
+
+    client = TestClient(main_module.app)
+    try:
+        retrieve = client.post(
+            "/v1/internal/episodes/retrieve",
+            headers={"X-API-Key": "testkey", "X-Request-ID": "rid-scene-mismatch"},
+            json={
+                "request_id": "rid-scene-mismatch",
+                "owner_id": "owner",
+                "context": {"scene_id": "coding"},
+                "limit": 5,
+            },
+        )
+
+        assert retrieve.status_code == 200, retrieve.text
+        body = retrieve.json()
+        assert body["candidate_count"] == 1
+        assert body["eligible_count"] == 0
+        assert body["decisions"][0]["decision"] == "suppress"
+        assert body["decisions"][0]["prompt_eligible"] is False
+        assert "scene_inappropriate" in body["decisions"][0]["reasons"]
+    finally:
+        client.close()
+
+
+def test_episode_retrieve_keeps_persisted_episode_eligible_when_stored_scene_matches(monkeypatch):
+    pg = FakePG(retrieval_scene={"scene_id": "coding"})
+    monkeypatch.setattr(main_module, "settings", _settings(), raising=True)
+    monkeypatch.setattr(main_module, "pg", pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", FakeQdrant(), raising=True)
+
+    client = TestClient(main_module.app)
+    try:
+        retrieve = client.post(
+            "/v1/internal/episodes/retrieve",
+            headers={"X-API-Key": "testkey", "X-Request-ID": "rid-scene-match"},
+            json={
+                "request_id": "rid-scene-match",
+                "owner_id": "owner",
+                "context": {"scene_id": "coding"},
+                "limit": 5,
+            },
+        )
+
+        assert retrieve.status_code == 200, retrieve.text
+        body = retrieve.json()
+        assert body["candidate_count"] == 1
+        assert body["eligible_count"] == 1
+        assert body["decisions"][0]["decision"] == "include"
+        assert body["decisions"][0]["prompt_eligible"] is True
+        assert "relevant_continuity_supported" in body["decisions"][0]["reasons"]
     finally:
         client.close()
