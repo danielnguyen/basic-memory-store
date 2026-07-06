@@ -27,6 +27,13 @@ def _bounded_scalar_map(value: dict[str, Any] | None) -> dict[str, Any]:
     return out
 
 
+def _coerce_score(value: Any) -> float:
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _append_metadata_lifecycle_event(metadata: dict[str, Any], event: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     lifecycle = metadata.get("lifecycle") if isinstance(metadata.get("lifecycle"), dict) else {}
     events = lifecycle.get("events") if isinstance(lifecycle.get("events"), list) else []
@@ -2896,6 +2903,70 @@ class PostgresStore:
                     "events_appended": events_appended,
                 }
 
+    async def record_memory_decision(
+        self,
+        *,
+        owner_id: str,
+        memory_type: str,
+        summary: str,
+        source_refs_json: list[dict[str, Any]],
+        source_ref_hash: str,
+        scores_json: dict[str, Any],
+        promotion_state: str,
+        status: str,
+        explanation_json: dict[str, Any],
+        request_id: str,
+        event_type: str,
+        reason_json: dict[str, Any],
+        derivation_version: str = MEMORY_ITEM_DERIVATION_VERSION,
+    ) -> dict[str, Any]:
+        select_cols = """
+            id, owner_id, memory_type, summary, source_refs_json, source_ref_hash,
+            scores_json, promotion_state, status, supersedes_memory_id,
+            superseded_by_memory_id, last_reinforced_at, expires_at,
+            derivation_version, confidence, explanation_json, generation_trace_id,
+            created_at, updated_at
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"""
+                    INSERT INTO memory_items (
+                        owner_id, memory_type, summary, source_refs_json,
+                        source_ref_hash, scores_json, promotion_state, status,
+                        derivation_version, explanation_json
+                    ) VALUES (%s, %s, %s, %s::jsonb, %s, %s::jsonb, %s, %s, %s, %s::jsonb)
+                    RETURNING {select_cols};
+                    """,
+                    (
+                        owner_id,
+                        memory_type,
+                        summary,
+                        Json(source_refs_json),
+                        source_ref_hash,
+                        Json(scores_json),
+                        promotion_state,
+                        status,
+                        derivation_version,
+                        Json(explanation_json),
+                    ),
+                )
+                row = await cur.fetchone()
+                memory_id = row[0]
+                await cur.execute(
+                    """
+                    INSERT INTO memory_events (memory_id, owner_id, event_type, reason_json)
+                    VALUES (%s, %s, %s, %s::jsonb);
+                    """,
+                    (
+                        memory_id,
+                        owner_id,
+                        event_type,
+                        Json({**reason_json, "request_id": request_id}),
+                    ),
+                )
+        return await self.get_memory_debug(memory_id, owner_id)
+
     async def reinforce_memory_item(
         self,
         *,
@@ -2922,7 +2993,11 @@ class PostgresStore:
                 if row is None:
                     return None
                 existing = self._memory_item_from_row(row)
-                merged_scores = {**(existing.get("scores_json") or {}), **scores_json}
+                previous_scores = existing.get("scores_json") or {}
+                merged_scores = {**previous_scores, **scores_json}
+                previous_salience = previous_scores.get("salience_score")
+                refreshed_salience = max(_coerce_score(previous_salience) + 0.1, _coerce_score(scores_json.get("salience_score")))
+                merged_scores["salience_score"] = round(min(1.0, refreshed_salience), 4)
                 await cur.execute(
                     f"""
                     UPDATE memory_items
@@ -2941,6 +3016,77 @@ class PostgresStore:
                     VALUES (%s, %s, 'reinforced', %s::jsonb);
                     """,
                     (memory_id, owner_id, Json({**reason_json, "request_id": request_id})),
+                )
+        return self._memory_item_from_row(updated_row)
+
+    async def decay_memory_item(
+        self,
+        *,
+        memory_id: UUID,
+        owner_id: str,
+        decay_factor: float,
+        demote: bool,
+        reason_json: dict[str, Any],
+        request_id: str,
+    ) -> dict[str, Any] | None:
+        select_cols = """
+            id, owner_id, memory_type, summary, source_refs_json, source_ref_hash,
+            scores_json, promotion_state, status, supersedes_memory_id,
+            superseded_by_memory_id, last_reinforced_at, expires_at,
+            derivation_version, confidence, explanation_json, generation_trace_id,
+            created_at, updated_at
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"SELECT {select_cols} FROM memory_items WHERE id = %s AND owner_id = %s FOR UPDATE;",
+                    (memory_id, owner_id),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    return None
+                existing = self._memory_item_from_row(row)
+                previous_scores = existing.get("scores_json") or {}
+                previous_salience = _coerce_score(previous_scores.get("salience_score"))
+                new_salience = round(max(0.0, previous_salience * (1.0 - max(0.0, min(1.0, decay_factor)))), 4)
+                merged_scores = {
+                    **previous_scores,
+                    "salience_score": new_salience,
+                    "last_decay_factor": round(max(0.0, min(1.0, decay_factor)), 4),
+                }
+                new_status = "forgotten_or_demoted" if demote else "stale"
+                new_promotion_state = "decayed" if demote or new_salience <= 0.2 else existing["promotion_state"]
+                await cur.execute(
+                    f"""
+                    UPDATE memory_items
+                    SET scores_json = %s::jsonb,
+                        promotion_state = %s,
+                        status = %s,
+                        updated_at = now()
+                    WHERE id = %s AND owner_id = %s
+                    RETURNING {select_cols};
+                    """,
+                    (Json(merged_scores), new_promotion_state, new_status, memory_id, owner_id),
+                )
+                updated_row = await cur.fetchone()
+                await cur.execute(
+                    """
+                    INSERT INTO memory_events (memory_id, owner_id, event_type, reason_json)
+                    VALUES (%s, %s, 'decayed', %s::jsonb);
+                    """,
+                    (
+                        memory_id,
+                        owner_id,
+                        Json(
+                            {
+                                **reason_json,
+                                "request_id": request_id,
+                                "previous_salience_score": previous_salience,
+                                "new_salience_score": new_salience,
+                                "demoted": demote,
+                            }
+                        ),
+                    ),
                 )
         return self._memory_item_from_row(updated_row)
 

@@ -33,6 +33,7 @@ from services.retrieval import (
 )
 from services.proactive import evaluate_event as evaluate_initiative_event
 from services.memory_items import normalize_scores, normalize_source_refs, shape_memory_event, shape_memory_item, source_ref_hash
+from services.memory_promotion import evaluate_promotion_candidate
 from services.episodes import DEFAULT_DERIVATION_VERSION as EPISODE_DERIVATION_VERSION, episode_key, normalize_json_list, normalize_json_map, normalize_source_refs as normalize_episode_source_refs, shape_episode, shape_episode_event, shape_episode_link, source_ref_hash as episode_source_ref_hash
 from services.recall import select_recall_decision, shape_recall_decision
 from services.derived_contract import CONTRACT_ADAPTERS
@@ -95,6 +96,9 @@ from models import (
     DerivedReplayRequest,
     DerivedReplayResponse,
     MemoryDebugResponse,
+    MemoryDecayRequest,
+    MemoryEvaluateRequest,
+    MemoryEvaluateResponse,
     MemoryEventItem,
     MemoryItemResponse,
     MemoryPromoteRequest,
@@ -1930,6 +1934,66 @@ async def evaluate_proactive(body: ProactiveEvaluateRequest, request: Request):
 
 
 @app.post(
+    "/v1/internal/memory/evaluate",
+    response_model=MemoryEvaluateResponse,
+    tags=["memory-internal"],
+    dependencies=[Depends(require_api_key)],
+    summary="Deterministically evaluate whether a candidate should become durable memory",
+)
+async def evaluate_memory_candidate(body: MemoryEvaluateRequest, request: Request):
+    request_id = _require_matching_request_id(request, body.request_id)
+    evaluation = evaluate_promotion_candidate(body.candidate)
+    decision_record = None
+
+    if body.persist_decision and evaluation["decision"] in {"suppress", "defer"}:
+        raw_refs = body.candidate.get("source_refs")
+        if not isinstance(raw_refs, list) or not raw_refs:
+            raw_refs = [{"ref_type": "candidate", "ref_id": request_id, "support_kind": "decision_record"}]
+        try:
+            normalized_refs = normalize_source_refs(raw_refs)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        summary = str(
+            body.candidate.get("summary")
+            or body.candidate.get("candidate_text")
+            or body.candidate.get("claim")
+            or "suppressed memory candidate"
+        )[:4000]
+        event_type = "suppressed" if evaluation["decision"] == "suppress" else "state_changed"
+        record = await pg.record_memory_decision(
+            owner_id=body.owner_id,
+            memory_type=evaluation["target_memory_type"],
+            summary=summary,
+            source_refs_json=normalized_refs,
+            source_ref_hash=source_ref_hash(normalized_refs),
+            scores_json=normalize_scores({**evaluation["factor_scores"], "promotion_score": evaluation["promotion_score"]}),
+            promotion_state="suppressed" if evaluation["decision"] == "suppress" else "candidate",
+            status="forgotten_or_demoted" if evaluation["decision"] == "suppress" else "parked",
+            explanation_json=evaluation["reasons"],
+            request_id=request_id,
+            event_type=event_type,
+            reason_json=evaluation["reasons"],
+        )
+        decision_record = {
+            "memory": shape_memory_item(record["memory"]),
+            "events": [shape_memory_event(event) for event in record["events"]],
+        }
+
+    return MemoryEvaluateResponse(
+        request_id=request_id,
+        owner_id=body.owner_id,
+        decision=evaluation["decision"],
+        target_memory_type=evaluation["target_memory_type"],
+        factor_scores=evaluation["factor_scores"],
+        promotion_score=evaluation["promotion_score"],
+        suppression_reasons=evaluation["suppression_reasons"],
+        defer_reasons=evaluation["defer_reasons"],
+        reasons=evaluation["reasons"],
+        decision_record=decision_record,
+    )
+
+
+@app.post(
     "/v1/internal/memory/promote",
     response_model=MemoryPromoteResponse,
     tags=["memory-internal"],
@@ -2006,6 +2070,37 @@ async def reinforce_memory(memory_id: str, body: MemoryReinforceRequest, request
     if row is None:
         raise HTTPException(status_code=404, detail="memory not found")
     return MemoryItemResponse(**shape_memory_item(row))
+
+
+@app.post(
+    "/v1/internal/memory/{memory_id}/decay",
+    response_model=MemoryTransitionResponse,
+    tags=["memory-internal"],
+    dependencies=[Depends(require_api_key)],
+    summary="Decay or demote one derived memory item while preserving source evidence",
+)
+async def decay_memory(memory_id: str, body: MemoryDecayRequest, request: Request):
+    request_id = _require_matching_request_id(request, body.request_id)
+    try:
+        mid = UUID(memory_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="memory_id must be a UUID")
+    row = await pg.decay_memory_item(
+        memory_id=mid,
+        owner_id=body.owner_id,
+        decay_factor=body.decay_factor,
+        demote=body.demote,
+        reason_json={"reason_code": body.reason.code, "reason_metadata": body.reason.metadata},
+        request_id=request_id,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="memory not found")
+    return MemoryTransitionResponse(
+        request_id=request_id,
+        changed=True,
+        memory=MemoryItemResponse(**shape_memory_item(row)),
+        events_appended=["decayed"],
+    )
 
 
 @app.post(

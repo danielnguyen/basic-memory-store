@@ -336,6 +336,57 @@ def test_existing_promote_supersession_remains_atomic_and_auditable(monkeypatch,
         assert conflict.status_code == 409
 
 
+def test_decay_and_suppression_decision_records_are_debuggable_in_postgres(monkeypatch, postgres_database):
+    monkeypatch.setattr(main_module, "settings", _settings(), raising=True)
+    monkeypatch.setattr(main_module, "qdrant", FakeQdrant(), raising=True)
+    store = PostgresStore(postgres_database)
+    monkeypatch.setattr(main_module, "pg", store, raising=True)
+
+    with TestClient(main_module.app) as client:
+        memory = _promote(client, request_id="rid-decay-create", owner_id="owner-a", ref_id="message-decay")
+        decay = client.post(
+            f"/v1/internal/memory/{memory['memory_id']}/decay",
+            headers={"X-API-Key": "testkey", "X-Request-ID": "rid-decay"},
+            json={
+                "request_id": "rid-decay",
+                "owner_id": "owner-a",
+                "decay_factor": 0.5,
+                "demote": True,
+                "reason": {"code": "stale_implementation_detail", "metadata": {"age_days": 90}},
+            },
+        )
+        assert decay.status_code == 200, decay.text
+        decayed = decay.json()["memory"]
+        assert decayed["promotion_state"] == "decayed"
+        assert decayed["freshness_state"] == "forgotten_or_demoted"
+        assert decayed["source_refs"] == memory["source_refs"]
+
+        debug = client.get(
+            f"/v1/internal/memory/{memory['memory_id']}/debug?owner_id=owner-a",
+            headers={"X-API-Key": "testkey"},
+        ).json()
+        decayed_event = next(event for event in debug["events"] if event["event_type"] == "decayed")
+        assert decayed_event["reason"]["reason_code"] == "stale_implementation_detail"
+        assert decayed_event["reason"]["demoted"] is True
+
+        suppressed = client.post(
+            "/v1/internal/memory/evaluate",
+            headers={"X-API-Key": "testkey", "X-Request-ID": "rid-suppressed"},
+            json={
+                "request_id": "rid-suppressed",
+                "owner_id": "owner-a",
+                "persist_decision": True,
+                "candidate": {"summary": "unsupported candidate", "unsupported": True},
+            },
+        )
+        assert suppressed.status_code == 200, suppressed.text
+        record = suppressed.json()["decision_record"]
+        assert record["memory"]["promotion_state"] == "suppressed"
+        assert record["memory"]["freshness_state"] == "forgotten_or_demoted"
+        assert record["memory"]["source_refs"][0]["support_kind"] == "decision_record"
+        assert record["events"][0]["event_type"] == "suppressed"
+
+
 def test_event_storage_failure_rolls_back_status_change(monkeypatch, postgres_database):
     monkeypatch.setattr(main_module, "settings", _settings(), raising=True)
     monkeypatch.setattr(main_module, "qdrant", FakeQdrant(), raising=True)

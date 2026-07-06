@@ -992,6 +992,8 @@ MemoryDurableStatus = Literal[
     "forgotten_or_demoted",
     "rebuilding",
 ]
+MemoryPromotionDecision = Literal["promote", "update", "suppress", "defer"]
+MemoryPromotionTargetType = Literal["short_horizon", "core", "procedural", "episodic", "dormant"]
 
 
 class MemorySourceRef(BaseModel):
@@ -1050,6 +1052,26 @@ class MemoryPromoteResponse(BaseModel):
     events_appended: List[MemoryEventType] = Field(default_factory=list)
 
 
+class MemoryEvaluateRequest(BaseModel):
+    request_id: str = Field(..., min_length=1, max_length=160)
+    owner_id: str = Field(..., min_length=1, max_length=160)
+    candidate: Dict[str, Any] = Field(..., min_length=1)
+    persist_decision: bool = False
+
+
+class MemoryEvaluateResponse(BaseModel):
+    request_id: str
+    owner_id: str
+    decision: MemoryPromotionDecision
+    target_memory_type: MemoryPromotionTargetType
+    factor_scores: Dict[str, float] = Field(default_factory=dict)
+    promotion_score: float
+    suppression_reasons: List[str] = Field(default_factory=list)
+    defer_reasons: List[str] = Field(default_factory=list)
+    reasons: Dict[str, Any] = Field(default_factory=dict)
+    decision_record: Optional[Dict[str, Any]] = None
+
+
 class MemoryReinforceRequest(BaseModel):
     request_id: str = Field(..., min_length=1, max_length=160)
     owner_id: str = Field(..., min_length=1, max_length=160)
@@ -1068,6 +1090,14 @@ class MemoryTransitionRequest(BaseModel):
     status: MemoryDurableStatus
     reason: MemoryTransitionReason
     related_memory_id: Optional[str] = None
+
+
+class MemoryDecayRequest(BaseModel):
+    request_id: str = Field(..., min_length=1, max_length=160)
+    owner_id: str = Field(..., min_length=1, max_length=160)
+    reason: MemoryTransitionReason
+    decay_factor: float = Field(default=0.25, ge=0.0, le=1.0)
+    demote: bool = False
 
 
 class MemoryTransitionResponse(BaseModel):

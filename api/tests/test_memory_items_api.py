@@ -18,6 +18,8 @@ class FakePG:
         self.promote_calls = []
         self.reinforce_calls = []
         self.transition_calls = []
+        self.decay_calls = []
+        self.decision_calls = []
         self.debug_payload = None
 
     async def open(self):
@@ -64,6 +66,8 @@ class FakePG:
     async def reinforce_memory_item(self, **kwargs):
         self.reinforce_calls.append(kwargs)
         now = "2026-01-01T00:00:00+00:00"
+        scores = {**kwargs["scores_json"]}
+        scores.setdefault("salience_score", 0.6)
         return {
             "memory_id": str(kwargs["memory_id"]),
             "owner_id": kwargs["owner_id"],
@@ -71,7 +75,7 @@ class FakePG:
             "summary": "remember concise answers",
             "source_refs_json": [{"ref_type": "message", "ref_id": "m-1", "support_kind": "direct"}],
             "source_ref_hash": "hash",
-            "scores_json": kwargs["scores_json"],
+            "scores_json": scores,
             "promotion_state": "promoted",
             "status": "active",
             "supersedes_memory_id": None,
@@ -84,6 +88,69 @@ class FakePG:
             "generation_trace_id": None,
             "created_at": now,
             "updated_at": now,
+        }
+
+    async def decay_memory_item(self, **kwargs):
+        self.decay_calls.append(kwargs)
+        now = "2026-01-01T00:00:02+00:00"
+        return {
+            "memory_id": str(kwargs["memory_id"]),
+            "owner_id": kwargs["owner_id"],
+            "memory_type": "core",
+            "summary": "remember concise answers",
+            "source_refs_json": [{"ref_type": "message", "ref_id": "m-1", "support_kind": "direct"}],
+            "source_ref_hash": "hash",
+            "scores_json": {"salience_score": 0.3, "last_decay_factor": kwargs["decay_factor"]},
+            "promotion_state": "decayed" if kwargs["demote"] else "promoted",
+            "status": "forgotten_or_demoted" if kwargs["demote"] else "stale",
+            "supersedes_memory_id": None,
+            "superseded_by_memory_id": None,
+            "last_reinforced_at": None,
+            "expires_at": None,
+            "derivation_version": MEMORY_ITEM_DERIVATION_VERSION,
+            "confidence": None,
+            "explanation_json": {},
+            "generation_trace_id": None,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    async def record_memory_decision(self, **kwargs):
+        self.decision_calls.append(kwargs)
+        now = "2026-01-01T00:00:03+00:00"
+        memory_id = str(uuid.uuid4())
+        return {
+            "memory": {
+                "memory_id": memory_id,
+                "owner_id": kwargs["owner_id"],
+                "memory_type": kwargs["memory_type"],
+                "summary": kwargs["summary"],
+                "source_refs_json": kwargs["source_refs_json"],
+                "source_ref_hash": kwargs["source_ref_hash"],
+                "scores_json": kwargs["scores_json"],
+                "promotion_state": kwargs["promotion_state"],
+                "status": kwargs["status"],
+                "supersedes_memory_id": None,
+                "superseded_by_memory_id": None,
+                "last_reinforced_at": None,
+                "expires_at": None,
+                "derivation_version": MEMORY_ITEM_DERIVATION_VERSION,
+                "confidence": None,
+                "explanation_json": kwargs["explanation_json"],
+                "generation_trace_id": None,
+                "created_at": now,
+                "updated_at": now,
+            },
+            "events": [
+                {
+                    "event_id": str(uuid.uuid4()),
+                    "memory_id": memory_id,
+                    "owner_id": kwargs["owner_id"],
+                    "event_type": kwargs["event_type"],
+                    "reason_json": {**kwargs["reason_json"], "request_id": kwargs["request_id"]},
+                    "created_at": now,
+                }
+            ],
         }
 
     async def transition_memory_item(self, **kwargs):
@@ -232,6 +299,7 @@ def test_reinforce_and_debug_endpoints(monkeypatch):
         )
         assert reinforce.status_code == 200
         assert reinforce.json()["last_reinforced_at"] is not None
+        assert reinforce.json()["scores"]["salience_score"] == 0.6
         assert pg.reinforce_calls[0]["scores_json"] == {"recurrence_score": 0.4}
 
         debug = client.get(
@@ -243,6 +311,69 @@ def test_reinforce_and_debug_endpoints(monkeypatch):
         assert body["memory"]["memory_id"] == memory_id
         assert body["events"][0]["event_type"] == "created"
         assert body["events"][0]["reason"] == {"request_id": "rid-1"}
+    finally:
+        client.close()
+
+
+def test_evaluate_suppression_persists_debuggable_decision_record(monkeypatch):
+    pg = FakePG()
+    monkeypatch.setattr(main_module, "settings", _settings(), raising=True)
+    monkeypatch.setattr(main_module, "pg", pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", FakeQdrant(), raising=True)
+
+    client = TestClient(main_module.app)
+    try:
+        response = client.post(
+            "/v1/internal/memory/evaluate",
+            headers={"X-API-Key": "testkey", "X-Request-ID": "rid-evaluate"},
+            json={
+                "request_id": "rid-evaluate",
+                "owner_id": "owner",
+                "persist_decision": True,
+                "candidate": {"summary": "unsupported trivia", "unsupported": True},
+            },
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["decision"] == "suppress"
+        assert "unsupported" in body["suppression_reasons"]
+        assert body["decision_record"]["memory"]["promotion_state"] == "suppressed"
+        assert body["decision_record"]["memory"]["freshness_state"] == "forgotten_or_demoted"
+        assert body["decision_record"]["events"][0]["event_type"] == "suppressed"
+        assert pg.decision_calls[0]["source_refs_json"][0]["support_kind"] == "decision_record"
+    finally:
+        client.close()
+
+
+def test_decay_endpoint_lowers_salience_without_changing_source_refs(monkeypatch):
+    pg = FakePG()
+    monkeypatch.setattr(main_module, "settings", _settings(), raising=True)
+    monkeypatch.setattr(main_module, "pg", pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", FakeQdrant(), raising=True)
+    memory_id = str(uuid.uuid4())
+
+    client = TestClient(main_module.app)
+    try:
+        response = client.post(
+            f"/v1/internal/memory/{memory_id}/decay",
+            headers={"X-API-Key": "testkey", "X-Request-ID": "rid-decay"},
+            json={
+                "request_id": "rid-decay",
+                "owner_id": "owner",
+                "decay_factor": 0.5,
+                "demote": True,
+                "reason": {"code": "stale_implementation_detail", "metadata": {"age_days": 120}},
+            },
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["events_appended"] == ["decayed"]
+        assert body["memory"]["scores"]["salience_score"] == 0.3
+        assert body["memory"]["source_refs"] == [{"ref_type": "message", "ref_id": "m-1", "support_kind": "direct"}]
+        assert body["memory"]["freshness_state"] == "forgotten_or_demoted"
+        assert pg.decay_calls[0]["reason_json"]["reason_code"] == "stale_implementation_detail"
     finally:
         client.close()
 

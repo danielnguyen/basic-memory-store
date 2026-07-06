@@ -196,3 +196,52 @@ def test_recall_select_sensitive_context_never_prompt_eligible(monkeypatch):
         assert decision["prompt_eligible"] is False
     finally:
         client.close()
+
+
+def test_recall_debug_is_request_and_owner_scoped(monkeypatch):
+    pg = FakePG()
+    monkeypatch.setattr(main_module, "settings", _settings(), raising=True)
+    monkeypatch.setattr(main_module, "pg", pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", ExplodingQdrant(), raising=True)
+
+    client = TestClient(main_module.app)
+    try:
+        body = {
+            "request_id": "rid-owner-scope",
+            "owner_id": "owner-a",
+            "context": {"surface": "chat", "urgency": "low", "sensitivity": "low"},
+            "candidates": [
+                {
+                    "candidate_id": "mem-light",
+                    "candidate_type": "memory_item",
+                    "relevance_score": 0.76,
+                    "salience_score": 0.62,
+                    "source_refs": [{"ref_type": "message", "ref_id": "m-light"}],
+                }
+            ],
+        }
+        response = client.post(
+            "/v1/internal/recall/select",
+            headers={"X-API-Key": "testkey", "X-Request-ID": "rid-owner-scope"},
+            json=body,
+        )
+        assert response.status_code == 200
+        decision = response.json()["decisions"][0]
+        assert decision["decision"] == "mention"
+        assert decision["mention_strategy"] == "light_callback"
+        assert decision["reason"]["rule_id"] == "light_callback_allowed"
+
+        missing = client.get(
+            "/v1/internal/recall/debug/rid-owner-scope?owner_id=owner-b",
+            headers={"X-API-Key": "testkey"},
+        )
+        assert missing.status_code == 404
+
+        present = client.get(
+            "/v1/internal/recall/debug/rid-owner-scope?owner_id=owner-a",
+            headers={"X-API-Key": "testkey"},
+        )
+        assert present.status_code == 200
+        assert present.json()["decisions"][0]["source_refs"][0]["ref_id"] == "m-light"
+    finally:
+        client.close()
