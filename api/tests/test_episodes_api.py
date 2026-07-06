@@ -17,6 +17,7 @@ class FakePG:
     def __init__(self):
         self.episode_calls = []
         self.link_calls = []
+        self.list_calls = []
 
     async def open(self):
         return None
@@ -129,6 +130,41 @@ class FakePG:
             ],
         }
 
+    async def list_episode_candidates(self, **kwargs):
+        self.list_calls.append(kwargs)
+        now = "2026-01-01T00:00:00+00:00"
+        return [
+            {
+                "episode_id": "ep-eligible",
+                "owner_id": kwargs["owner_id"],
+                "title": "Useful mitigation",
+                "summary": "A failed replay was resolved with a repeatable mitigation.",
+                "episode_type": "successful_mitigation",
+                "trigger_json": {"kind": "deterministic_extraction"},
+                "outcome": "resolved",
+                "significance": "Useful later",
+                "unresolved_json": {},
+                "source_refs_json": [{"ref_type": "message", "ref_id": "m-1", "support_kind": "direct"}],
+                "source_ref_hash": "hash",
+                "episode_key": "episode-key",
+                "callback_candidates_json": [],
+                "time_window_json": {},
+                "participants_json": [],
+                "status": "active",
+                "derivation_version": EPISODE_DERIVATION_VERSION,
+                "confidence": 0.9,
+                "explanation_json": {
+                    "relevance_score": 0.8,
+                    "continuity_value": 0.8,
+                    "recency_score": 0.7,
+                    "awkwardness_score": 0.1,
+                },
+                "generation_trace_id": "rid-1",
+                "created_at": now,
+                "updated_at": now,
+            }
+        ]
+
 
 class FakeQdrant:
     def ping(self):
@@ -224,5 +260,144 @@ def test_episode_links_and_debug_endpoints(monkeypatch):
         assert body["links"][0]["relationship"] == "supports"
         assert body["events"][0]["event_type"] == "created"
         assert body["events"][0]["reason"] == {"request_id": "rid-1"}
+    finally:
+        client.close()
+
+
+def test_episode_extract_persists_accepted_decision_and_returns_rejections(monkeypatch):
+    pg = FakePG()
+    monkeypatch.setattr(main_module, "settings", _settings(), raising=True)
+    monkeypatch.setattr(main_module, "pg", pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", FakeQdrant(), raising=True)
+
+    client = TestClient(main_module.app)
+    try:
+        response = client.post(
+            "/v1/internal/episodes/extract",
+            headers={"X-API-Key": "testkey", "X-Request-ID": "rid-extract"},
+            json={
+                "request_id": "rid-extract",
+                "owner_id": "owner",
+                "scene": {"scene_id": "coding"},
+                "source_items": [
+                    {
+                        "message_id": "msg-1",
+                        "owner_id": "owner",
+                        "content": "Wave 4A PR merged and the project milestone completed.",
+                    },
+                    {"message_id": "msg-2", "owner_id": "owner", "content": "thanks"},
+                ],
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["accepted_count"] == 1
+        assert body["rejected_count"] == 1
+        assert body["decisions"][0]["episode"]["episode_type"] == "project_milestone_completed"
+        assert body["decisions"][1]["reasons"] == ["low_value_generic_chat"]
+        call = pg.episode_calls[0]
+        assert call["owner_id"] == "owner"
+        assert call["source_refs_json"][0]["ref_id"] == "msg-1"
+        assert call["explanation_json"]["rationale"] == "deterministic_episode_extraction"
+    finally:
+        client.close()
+
+
+def test_episode_extract_duplicate_uses_same_episode_key(monkeypatch):
+    pg = FakePG()
+    monkeypatch.setattr(main_module, "settings", _settings(), raising=True)
+    monkeypatch.setattr(main_module, "pg", pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", FakeQdrant(), raising=True)
+
+    client = TestClient(main_module.app)
+    try:
+        payload = {
+            "request_id": "rid-dup",
+            "owner_id": "owner",
+            "source_items": [
+                {
+                    "message_id": "msg-stable",
+                    "owner_id": "owner",
+                    "content": "Wave 4A PR merged and the project milestone completed.",
+                }
+            ],
+        }
+        first = client.post(
+            "/v1/internal/episodes/extract",
+            headers={"X-API-Key": "testkey", "X-Request-ID": "rid-dup"},
+            json=payload,
+        )
+        second = client.post(
+            "/v1/internal/episodes/extract",
+            headers={"X-API-Key": "testkey", "X-Request-ID": "rid-dup"},
+            json=payload,
+        )
+
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert pg.episode_calls[0]["episode_key"] == pg.episode_calls[1]["episode_key"]
+    finally:
+        client.close()
+
+
+def test_episode_callback_evaluate_and_retrieve_are_bounded_and_owner_scoped(monkeypatch):
+    pg = FakePG()
+    monkeypatch.setattr(main_module, "settings", _settings(), raising=True)
+    monkeypatch.setattr(main_module, "pg", pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", FakeQdrant(), raising=True)
+
+    client = TestClient(main_module.app)
+    try:
+        callback = client.post(
+            "/v1/internal/episodes/callback/evaluate",
+            headers={"X-API-Key": "testkey", "X-Request-ID": "rid-callback"},
+            json={
+                "request_id": "rid-callback",
+                "owner_id": "owner",
+                "context": {"scene_id": "coding"},
+                "candidates": [
+                    {
+                        "episode_id": "ep-1",
+                        "title": "Useful mitigation",
+                        "summary": "A failure was mitigated.",
+                        "episode_type": "successful_mitigation",
+                        "confidence": 0.9,
+                        "relevance_score": 0.8,
+                        "continuity_value": 0.8,
+                        "recency_score": 0.7,
+                        "source_refs": [{"ref_type": "message", "ref_id": "m-1"}],
+                    },
+                    {
+                        "episode_id": "ep-2",
+                        "title": "Awkward tangent",
+                        "summary": "Tangential callback.",
+                        "episode_type": "useful_lesson_extracted",
+                        "confidence": 0.8,
+                        "relevance_score": 0.8,
+                        "continuity_value": 0.8,
+                        "awkwardness_score": 0.9,
+                    },
+                ],
+            },
+        )
+        assert callback.status_code == 200, callback.text
+        decisions = callback.json()["decisions"]
+        assert decisions[0]["decision"] == "include"
+        assert decisions[0]["prompt_eligible"] is True
+        assert decisions[1]["decision"] == "suppress"
+        assert "awkward_or_tangential" in decisions[1]["reasons"]
+
+        retrieve = client.post(
+            "/v1/internal/episodes/retrieve",
+            headers={"X-API-Key": "testkey", "X-Request-ID": "rid-retrieve"},
+            json={"request_id": "rid-retrieve", "owner_id": "owner", "context": {"scene_id": "coding"}, "limit": 5},
+        )
+        assert retrieve.status_code == 200, retrieve.text
+        body = retrieve.json()
+        assert body["candidate_count"] == 1
+        assert body["eligible_count"] == 1
+        assert body["decisions"][0]["episode"]["source_refs"][0]["ref_id"] == "m-1"
+        assert pg.list_calls[0]["owner_id"] == "owner"
     finally:
         client.close()

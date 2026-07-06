@@ -35,6 +35,7 @@ from services.proactive import evaluate_event as evaluate_initiative_event
 from services.memory_items import normalize_scores, normalize_source_refs, shape_memory_event, shape_memory_item, source_ref_hash
 from services.memory_promotion import evaluate_promotion_candidate
 from services.episodes import DEFAULT_DERIVATION_VERSION as EPISODE_DERIVATION_VERSION, episode_key, normalize_json_list, normalize_json_map, normalize_source_refs as normalize_episode_source_refs, shape_episode, shape_episode_event, shape_episode_link, source_ref_hash as episode_source_ref_hash
+from services.episode_intelligence import evaluate_episode_callback, extract_episode_decisions, select_episode_callbacks
 from services.recall import select_recall_decision, shape_recall_decision
 from services.derived_contract import CONTRACT_ADAPTERS
 from services.derivation_lifecycle import (
@@ -83,12 +84,20 @@ from models import (
     MessageCreateResponse,
     EpisodeCreateRequest,
     EpisodeCreateResponse,
+    EpisodeCallbackDecisionItem,
+    EpisodeCallbackEvaluateRequest,
+    EpisodeCallbackEvaluateResponse,
     EpisodeDebugResponse,
     EpisodeEventItem,
+    EpisodeExtractRequest,
+    EpisodeExtractResponse,
+    EpisodeExtractionDecisionItem,
     EpisodeItemResponse,
     EpisodeLinkItem,
     EpisodeLinkRequest,
     EpisodeLinkResponse,
+    EpisodeRetrieveRequest,
+    EpisodeRetrieveResponse,
     DerivedInspectionResponse,
     DerivedInvalidationRequest,
     DerivedInvalidationResponse,
@@ -2171,6 +2180,82 @@ async def debug_memory(memory_id: str, owner_id: str):
 
 
 @app.post(
+    "/v1/internal/episodes/extract",
+    response_model=EpisodeExtractResponse,
+    tags=["episodes-internal"],
+    dependencies=[Depends(require_api_key)],
+    summary="Deterministically extract meaningful episode candidates from bounded message/event evidence",
+)
+async def extract_episodes(body: EpisodeExtractRequest, request: Request):
+    request_id = _require_matching_request_id(request, body.request_id)
+    payload = body.model_dump(exclude_none=True)
+    decisions = extract_episode_decisions(payload)
+    shaped: list[EpisodeExtractionDecisionItem] = []
+
+    for decision in decisions:
+        item = dict(decision)
+        if body.persist and decision.get("decision") == "accept":
+            source_refs = decision.get("source_refs") or []
+            try:
+                normalized_refs = normalize_episode_source_refs(source_refs)
+            except ValueError as exc:
+                item["decision"] = "defer"
+                item.setdefault("reasons", []).append(str(exc)[:80])
+                shaped.append(EpisodeExtractionDecisionItem(**item))
+                continue
+            source_hash = episode_source_ref_hash(normalized_refs)
+            trigger = normalize_json_map(decision.get("trigger") or {})
+            time_window = normalize_json_map(decision.get("time_window") or {})
+            explanation = {
+                "rationale": "deterministic_episode_extraction",
+                "decision_id": decision["decision_id"],
+                "reasons": decision.get("reasons") or [],
+                "evidence": decision.get("evidence") or [],
+                "scene": decision.get("scene") or {},
+                "conversation_id": decision.get("conversation_id"),
+            }
+            result = await pg.create_or_update_episode(
+                owner_id=body.owner_id,
+                title=decision["title"],
+                summary=decision["summary"],
+                episode_type=decision["episode_type"],
+                trigger_json=trigger,
+                outcome=decision.get("outcome"),
+                significance=decision.get("significance"),
+                unresolved_json=normalize_json_map(decision.get("unresolved") or {}),
+                source_refs_json=normalized_refs,
+                source_ref_hash=source_hash,
+                episode_key=episode_key(
+                    episode_type=decision["episode_type"],
+                    source_ref_hash_value=source_hash,
+                    trigger_json=trigger,
+                    time_window_json=time_window,
+                ),
+                callback_candidates_json=normalize_json_list(decision.get("callback_candidates") or []),
+                time_window_json=time_window,
+                participants_json=normalize_json_list(decision.get("participants") or []),
+                confidence=decision.get("confidence"),
+                explanation_json=normalize_json_map(explanation),
+                generation_trace_id=request_id,
+                request_id=request_id,
+                derivation_version=EPISODE_DERIVATION_VERSION,
+            )
+            item["episode"] = EpisodeItemResponse(**shape_episode(result["episode"]))
+            item["created"] = result["created"]
+            item["updated"] = result["updated"]
+        shaped.append(EpisodeExtractionDecisionItem(**item))
+
+    return EpisodeExtractResponse(
+        request_id=request_id,
+        owner_id=body.owner_id,
+        accepted_count=sum(1 for item in shaped if item.decision == "accept"),
+        rejected_count=sum(1 for item in shaped if item.decision == "reject"),
+        deferred_count=sum(1 for item in shaped if item.decision == "defer"),
+        decisions=shaped,
+    )
+
+
+@app.post(
     "/v1/internal/episodes",
     response_model=EpisodeCreateResponse,
     tags=["episodes-internal"],
@@ -2270,6 +2355,77 @@ async def debug_episode(episode_id: str, owner_id: str):
         episode=EpisodeItemResponse(**shape_episode(debug["episode"])),
         links=[EpisodeLinkItem(**shape_episode_link(link)) for link in debug["links"]],
         events=[EpisodeEventItem(**shape_episode_event(event)) for event in debug["events"]],
+    )
+
+
+@app.post(
+    "/v1/internal/episodes/callback/evaluate",
+    response_model=EpisodeCallbackEvaluateResponse,
+    tags=["episodes-internal"],
+    dependencies=[Depends(require_api_key)],
+    summary="Deterministically evaluate whether episode callbacks are appropriate for current context",
+)
+async def evaluate_episode_callbacks(body: EpisodeCallbackEvaluateRequest, request: Request):
+    request_id = _require_matching_request_id(request, body.request_id)
+    context = body.context.model_dump(exclude_none=True)
+    decisions = [
+        EpisodeCallbackDecisionItem(
+            **evaluate_episode_callback(
+                context=context,
+                candidate=candidate.model_dump(exclude_none=True),
+            )
+        )
+        for candidate in body.candidates
+    ]
+    decisions.sort(key=lambda item: (item.decision != "include", -item.callback_score, item.episode_id))
+    return EpisodeCallbackEvaluateResponse(
+        request_id=request_id,
+        owner_id=body.owner_id,
+        decision_count=len(decisions),
+        decisions=decisions,
+    )
+
+
+@app.post(
+    "/v1/internal/episodes/retrieve",
+    response_model=EpisodeRetrieveResponse,
+    tags=["episodes-internal"],
+    dependencies=[Depends(require_api_key)],
+    summary="Return bounded owner-scoped episode callback candidates suitable for later composition",
+)
+async def retrieve_episode_callbacks(body: EpisodeRetrieveRequest, request: Request):
+    request_id = _require_matching_request_id(request, body.request_id)
+    rows = await pg.list_episode_candidates(owner_id=body.owner_id, limit=body.limit * 4)
+    candidates = []
+    for row in rows:
+        shaped = shape_episode(row)
+        explanation = shaped.get("explanation") or {}
+        signals = {
+            "relevance_score": explanation.get("relevance_score"),
+            "continuity_value": explanation.get("continuity_value"),
+            "recency_score": explanation.get("recency_score"),
+            "awkwardness_score": explanation.get("awkwardness_score"),
+        }
+        candidates.append(
+            {
+                **shaped,
+                **{key: value for key, value in signals.items() if value is not None},
+            }
+        )
+    decisions = [
+        EpisodeCallbackDecisionItem(**item)
+        for item in select_episode_callbacks(
+            context=body.context.model_dump(exclude_none=True),
+            candidates=candidates,
+            limit=body.limit,
+        )
+    ]
+    return EpisodeRetrieveResponse(
+        request_id=request_id,
+        owner_id=body.owner_id,
+        candidate_count=len(rows),
+        eligible_count=sum(1 for item in decisions if item.prompt_eligible),
+        decisions=decisions,
     )
 
 

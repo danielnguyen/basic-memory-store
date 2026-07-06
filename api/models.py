@@ -1124,6 +1124,9 @@ class MemoryDebugResponse(BaseModel):
 # ---- Episodes ----
 
 EpisodeEventType = Literal["created", "updated", "linked"]
+EpisodeExtractionDecisionValue = Literal["accept", "reject", "defer"]
+EpisodeCallbackDecisionValue = Literal["include", "suppress", "defer"]
+EpisodeCallbackStrategy = Literal["none", "light_callback", "explicit_callback"]
 
 
 class EpisodeSourceRef(BaseModel):
@@ -1227,6 +1230,137 @@ class EpisodeDebugResponse(BaseModel):
     episode: EpisodeItemResponse
     links: List[EpisodeLinkItem] = Field(default_factory=list)
     events: List[EpisodeEventItem] = Field(default_factory=list)
+
+
+class EpisodeSourceItem(BaseModel):
+    id: Optional[str] = Field(default=None, max_length=160)
+    message_id: Optional[str] = Field(default=None, max_length=160)
+    event_id: Optional[str] = Field(default=None, max_length=160)
+    owner_id: Optional[str] = Field(default=None, max_length=160)
+    role: Optional[str] = Field(default=None, max_length=64)
+    content: Optional[str] = Field(default=None, max_length=4000)
+    text: Optional[str] = Field(default=None, max_length=4000)
+    summary: Optional[str] = Field(default=None, max_length=4000)
+    title: Optional[str] = Field(default=None, max_length=400)
+    description: Optional[str] = Field(default=None, max_length=4000)
+    event_text: Optional[str] = Field(default=None, max_length=4000)
+    source_ref: Optional[EpisodeSourceRef] = None
+    outcome: Optional[str] = Field(default=None, max_length=1000)
+    unresolved: Dict[str, Any] = Field(default_factory=dict)
+    time_window: Dict[str, Any] = Field(default_factory=dict)
+    participants: List[Any] = Field(default_factory=list, max_length=20)
+    entities: List[Any] = Field(default_factory=list, max_length=20)
+    unsupported: bool = False
+    evidence_supported: Optional[bool] = None
+
+
+class EpisodeExtractRequest(BaseModel):
+    request_id: str = Field(..., min_length=1, max_length=160)
+    owner_id: str = Field(..., min_length=1, max_length=160)
+    conversation_id: Optional[str] = Field(default=None, max_length=160)
+    scene: Dict[str, Any] = Field(default_factory=dict)
+    source_items: List[EpisodeSourceItem] = Field(..., min_length=1, max_length=50)
+    persist: bool = True
+
+
+class EpisodeExtractionDecisionItem(BaseModel):
+    decision_id: str
+    decision: EpisodeExtractionDecisionValue
+    episode_type: str
+    reasons: List[str] = Field(default_factory=list)
+    episode_key: Optional[str] = None
+    title: Optional[str] = None
+    summary: Optional[str] = None
+    trigger: Dict[str, Any] = Field(default_factory=dict)
+    outcome: Optional[str] = None
+    significance: Optional[str] = None
+    unresolved: Dict[str, Any] = Field(default_factory=dict)
+    evidence: List[Dict[str, Any]] = Field(default_factory=list)
+    source_refs: List[Dict[str, Any]] = Field(default_factory=list)
+    time_window: Dict[str, Any] = Field(default_factory=dict)
+    participants: List[Any] = Field(default_factory=list)
+    entities: List[Any] = Field(default_factory=list)
+    callback_candidates: List[Any] = Field(default_factory=list)
+    confidence: Optional[float] = None
+    episode: Optional[EpisodeItemResponse] = None
+    created: bool = False
+    updated: bool = False
+
+
+class EpisodeExtractResponse(BaseModel):
+    request_id: str
+    owner_id: str
+    accepted_count: int
+    rejected_count: int
+    deferred_count: int
+    decisions: List[EpisodeExtractionDecisionItem] = Field(default_factory=list)
+
+
+class EpisodeCallbackContext(BaseModel):
+    scene_id: Optional[str] = Field(default=None, max_length=160)
+    surface: Optional[str] = Field(default=None, max_length=80)
+    urgency: Optional[str] = Field(default=None, max_length=80)
+    sensitivity: Optional[str] = Field(default=None, max_length=80)
+
+
+class EpisodeCallbackCandidate(BaseModel):
+    episode_id: Optional[str] = Field(default=None, max_length=160)
+    candidate_id: Optional[str] = Field(default=None, max_length=160)
+    episode_key: Optional[str] = Field(default=None, max_length=160)
+    title: Optional[str] = Field(default=None, max_length=400)
+    summary: Optional[str] = Field(default=None, max_length=4000)
+    episode_type: Optional[str] = Field(default=None, max_length=80)
+    source_refs: List[EpisodeSourceRef] = Field(default_factory=list, max_length=50)
+    confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    significance: Optional[str] = Field(default=None, max_length=4000)
+    unresolved: Dict[str, Any] = Field(default_factory=dict)
+    time_window: Dict[str, Any] = Field(default_factory=dict)
+    scene: Dict[str, Any] = Field(default_factory=dict)
+    relevance_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    continuity_value: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    recency_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    awkwardness_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class EpisodeCallbackEvaluateRequest(BaseModel):
+    request_id: str = Field(..., min_length=1, max_length=160)
+    owner_id: str = Field(..., min_length=1, max_length=160)
+    context: EpisodeCallbackContext = Field(default_factory=EpisodeCallbackContext)
+    candidates: List[EpisodeCallbackCandidate] = Field(..., min_length=1, max_length=100)
+
+
+class EpisodeCallbackDecisionItem(BaseModel):
+    episode_id: str
+    decision: EpisodeCallbackDecisionValue
+    callback_strategy: EpisodeCallbackStrategy
+    callback_score: float
+    prompt_eligible: bool
+    reasons: List[str] = Field(default_factory=list)
+    signals: Dict[str, Any] = Field(default_factory=dict)
+    episode: Dict[str, Any] = Field(default_factory=dict)
+
+
+class EpisodeCallbackEvaluateResponse(BaseModel):
+    request_id: str
+    owner_id: str
+    decision_count: int
+    decisions: List[EpisodeCallbackDecisionItem] = Field(default_factory=list)
+
+
+class EpisodeRetrieveRequest(BaseModel):
+    request_id: str = Field(..., min_length=1, max_length=160)
+    owner_id: str = Field(..., min_length=1, max_length=160)
+    context: EpisodeCallbackContext = Field(default_factory=EpisodeCallbackContext)
+    limit: int = Field(default=10, ge=1, le=50)
+
+
+class EpisodeRetrieveResponse(BaseModel):
+    request_id: str
+    owner_id: str
+    candidate_count: int
+    eligible_count: int
+    decisions: List[EpisodeCallbackDecisionItem] = Field(default_factory=list)
 
 
 # ---- Recall selection ----
