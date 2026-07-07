@@ -18,6 +18,7 @@ case "${1:-}" in
       tests/test_memory_items_service.py \
       tests/test_memory_lifecycle_service.py \
       tests/test_memory_items_api.py \
+      tests/test_recall_api.py \
       tests/test_episodes_service.py \
       tests/test_episodes_api.py \
       tests/test_traces_api.py \
