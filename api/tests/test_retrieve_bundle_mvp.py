@@ -16,8 +16,10 @@ class FakePG:
         message_metadata=None,
         message_policy_metadata=None,
         artifact_metadata=None,
+        artifact_rows_by_id=None,
         memory_items_by_ref=None,
         artifact_owner_by_id=None,
+        artifact_lookup_fail_ids=None,
         source_lookup_fails=False,
         derived_text_lookup_fails=False,
         unique_derived_snippets=False,
@@ -26,8 +28,10 @@ class FakePG:
         self.message_metadata = message_metadata or {}
         self.message_policy_metadata = message_policy_metadata or {}
         self.artifact_metadata = artifact_metadata or {}
+        self.artifact_rows_by_id = artifact_rows_by_id or {}
         self.memory_items_by_ref = memory_items_by_ref or {}
         self.artifact_owner_by_id = artifact_owner_by_id or {}
+        self.artifact_lookup_fail_ids = set(artifact_lookup_fail_ids or [])
         self.source_lookup_fails = source_lookup_fails
         self.derived_text_lookup_fails = derived_text_lookup_fails
         self.unique_derived_snippets = unique_derived_snippets
@@ -122,29 +126,28 @@ class FakePG:
                 return f"api/helpers_{idx}.py"
             return "api/helpers.py"
 
-        return (
-            [
-                {
-                    "derived_text_id": str(item),
-                    "artifact_id": str(uuid.uuid4()),
-                    "owner_id": "owner",
-                    "kind": "chunk",
-                    "text": _text(idx),
-                    "derivation_params": self.artifact_metadata.get(str(item), {}),
-                    "policy_metadata": _trusted_policy(self.artifact_metadata.get(str(item))),
-                    "created_at": "2026-01-01T00:00:00+00:00",
-                    "file_path": _file_path(idx),
-                    "repo_name": "basic-memory-store",
-                    "mime": "text/plain",
-                }
-                for idx, item in enumerate(ids)
-            ]
-            if ids
-            else []
-        )
+        out = []
+        for idx, item in enumerate(ids):
+            key = str(item)
+            base = {
+                "derived_text_id": str(item),
+                "artifact_id": str(uuid.uuid4()),
+                "owner_id": "owner",
+                "kind": "chunk",
+                "text": _text(idx),
+                "derivation_params": self.artifact_metadata.get(key, {}),
+                "policy_metadata": _trusted_policy(self.artifact_metadata.get(key)),
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "file_path": _file_path(idx),
+                "repo_name": "basic-memory-store",
+                "mime": "text/plain",
+            }
+            base.update(self.artifact_rows_by_id.get(key, {}))
+            out.append(base)
+        return out
 
     async def get_artifact(self, artifact_id):
-        if self.source_lookup_fails:
+        if self.source_lookup_fails or str(artifact_id) in self.artifact_lookup_fail_ids:
             raise RuntimeError("source lookup unavailable")
         owner_id = self.artifact_owner_by_id.get(str(artifact_id), "owner")
         if owner_id is None:
@@ -183,10 +186,11 @@ class FakePG:
 
 
 class FakeQdrant:
-    def __init__(self, *, message_scores=None, message_ids=None, artifact_ids=None):
+    def __init__(self, *, message_scores=None, message_ids=None, artifact_ids=None, artifact_scores=None):
         self.message_scores = message_scores or [0.77]
         self.message_ids = message_ids
         self.artifact_ids = artifact_ids
+        self.artifact_scores = artifact_scores
         self.artifact_search_calls = []
         self.search_calls = []
 
@@ -203,22 +207,17 @@ class FakeQdrant:
 
     async def search_artifact_chunks(self, **kwargs):
         self.artifact_search_calls.append(kwargs)
-        ids = self.artifact_ids or [str(uuid.uuid4()), str(uuid.uuid4())]
+        scores = self.artifact_scores or [0.66, 0.61]
+        ids = self.artifact_ids or [str(uuid.uuid4()) for _ in scores]
         return [
             types.SimpleNamespace(
-                derived_text_id=ids[0],
+                derived_text_id=derived_id,
                 artifact_id=str(uuid.uuid4()),
-                file_path="api/helpers.py",
+                file_path=f"api/helpers_{idx}.py" if idx else "api/helpers.py",
                 repo_name="basic-memory-store",
-                score=0.66,
-            ),
-            types.SimpleNamespace(
-                derived_text_id=ids[1],
-                artifact_id=str(uuid.uuid4()),
-                file_path="api/helpers.py",
-                repo_name="basic-memory-store",
-                score=0.61,
-            ),
+                score=scores[min(idx, len(scores) - 1)],
+            )
+            for idx, derived_id in enumerate(ids)
         ]
 
 
@@ -1694,6 +1693,282 @@ async def test_mandatory_containment_rejects_malformed_policy_shapes(monkeypatch
     assert [item["message_id"] for item in body["bundle"]["semantic"]] == [eligible_id]
     omitted = body["bundle"]["retrieval_debug"]["containment_policy"]["omitted_counts_by_reason"]
     assert omitted["malformed_policy_metadata"] == 2
+
+
+@pytest.mark.asyncio
+async def test_retrieve_bundle_filters_message_candidates_before_limit(monkeypatch):
+    eligible_id = str(uuid.uuid4())
+    blocked_id = str(uuid.uuid4())
+    outside_id = str(uuid.uuid4())
+    spoofed_id = str(uuid.uuid4())
+    untagged_id = str(uuid.uuid4())
+    extra_outside_ids = [str(uuid.uuid4()) for _ in range(4)]
+    fake_pg = FakePG(
+        message_metadata={
+            spoofed_id: {"retrieval_policy_metadata": _record_policy(domains=["technical"])},
+        },
+        message_policy_metadata={
+            eligible_id: _record_policy(domains=["technical"], sensitivity="low"),
+            blocked_id: _record_policy(domains=["technical", "finance"], sensitivity="low"),
+            outside_id: _record_policy(domains=["personal"], sensitivity="low"),
+            **{
+                item_id: _record_policy(domains=["personal"], sensitivity="low")
+                for item_id in extra_outside_ids
+            },
+        },
+    )
+    ordered_ids = [
+        blocked_id,
+        outside_id,
+        spoofed_id,
+        untagged_id,
+        *extra_outside_ids,
+        eligible_id,
+    ]
+    fake_qdrant = FakeQdrant(
+        message_ids=ordered_ids,
+        message_scores=[0.99, 0.98, 0.97, 0.96, 0.95, 0.94, 0.93, 0.92, 0.2],
+    )
+    fake_settings = types.SimpleNamespace(
+        memory_api_key="testkey",
+        require_request_id=True,
+        enforce_request_id_header_body_match=True,
+        retrieval_k=1,
+        retrieval_recent_half_life_days=14,
+        retrieval_balanced_half_life_days=45,
+        retrieval_historical_half_life_days=365,
+        retrieval_conversation_boost=0.08,
+        retrieval_pinned_bias=0.12,
+        retrieval_missing_penalty_cap=0.15,
+        recent_turns=10,
+    )
+    monkeypatch.setattr(main_module, "settings", fake_settings, raising=True)
+    monkeypatch.setattr(main_module, "pg", fake_pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", fake_qdrant, raising=True)
+
+    rid = "rid-message-containment-crowding"
+    r = await _post_retrieve_bundle(
+        conversation_id=str(uuid.uuid4()),
+        request_id=rid,
+        body={
+            "request_id": rid,
+            "owner_id": "owner",
+            "query": "eligible-memory-note",
+            "include_artifacts": False,
+            "containment_policy": _mandatory_policy(domains=["technical"], blocked=["finance"]),
+        },
+    )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert [item["message_id"] for item in body["bundle"]["semantic"]] == [eligible_id]
+    returned_ids = {item["message_id"] for item in body["bundle"]["semantic"]}
+    assert returned_ids.isdisjoint({blocked_id, outside_id, spoofed_id, untagged_id, *extra_outside_ids})
+    assert fake_qdrant.search_calls[0]["k"] == 1
+    assert fake_qdrant.search_calls[0]["policy_filter"]["allowed_domains"] == ["technical"]
+    containment = body["bundle"]["retrieval_debug"]["containment_policy"]
+    assert containment["pre_limit_policy_filter_applied"] is True
+    assert containment["post_fetch_validation_count"] == len(ordered_ids)
+    assert containment["retained_count"] == 1
+    omitted = containment["omitted_counts_by_reason"]
+    assert omitted["blocked_domain"] == 1
+    assert omitted["outside_allowed_domain"] == 1 + len(extra_outside_ids)
+    assert omitted["missing_policy_metadata"] == 2
+    assert "mandatory_containment_applied" in body["diagnostics"]["reason_codes"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_bundle_filters_artifact_candidates_before_limit(monkeypatch):
+    selected_rel = str(uuid.uuid4())
+
+    def artifact_params(source_id, *, domains=None, sensitivity="low", content_class="code", relationship=True):
+        return {
+            **_record_policy(
+                domains=domains,
+                sensitivity=sensitivity,
+                content_class=content_class,
+                relationship_ids=[selected_rel] if relationship else [],
+                scopes=["project"] if relationship else [],
+            ),
+            "source_refs": [{"ref_type": "artifact", "ref_id": source_id, "support_kind": "direct"}],
+            "derivation_type": "chunk",
+            "derivation_version": "file-chunk-v1",
+            "status": "active",
+            "confidence": 0.9,
+            "generation_trace_id": "rid-artifact-containment-crowding",
+        }
+
+    derived_ids = {
+        name: str(uuid.uuid4())
+        for name in (
+            "blocked-domain-decoy",
+            "outside-domain-decoy",
+            "sensitive-artifact-decoy",
+            "unsupported-class-decoy",
+            "malformed-policy-decoy",
+            "incomplete-lifecycle-decoy",
+            "unavailable-source-decoy",
+            "irrelevant-record-decoy",
+            "eligible-code-artifact",
+            "eligible-document-artifact",
+        )
+    }
+    source_ids = {name: str(uuid.uuid4()) for name in derived_ids}
+    artifact_metadata = {
+        derived_ids["blocked-domain-decoy"]: artifact_params(
+            source_ids["blocked-domain-decoy"],
+            domains=["technical", "finance"],
+        ),
+        derived_ids["outside-domain-decoy"]: artifact_params(
+            source_ids["outside-domain-decoy"],
+            domains=["personal"],
+        ),
+        derived_ids["sensitive-artifact-decoy"]: artifact_params(
+            source_ids["sensitive-artifact-decoy"],
+            sensitivity="high",
+        ),
+        derived_ids["unsupported-class-decoy"]: artifact_params(
+            source_ids["unsupported-class-decoy"],
+            content_class="image",
+        ),
+        derived_ids["malformed-policy-decoy"]: {
+            **artifact_params(source_ids["malformed-policy-decoy"]),
+            "memory_domains": "technical",
+        },
+        derived_ids["incomplete-lifecycle-decoy"]: {
+            **_record_policy(
+                domains=["technical"],
+                sensitivity="low",
+                content_class="code",
+                relationship_ids=[selected_rel],
+                scopes=["project"],
+            ),
+            "derivation_type": "chunk",
+            "derivation_version": "file-chunk-v1",
+            "status": "active",
+        },
+        derived_ids["unavailable-source-decoy"]: artifact_params(
+            source_ids["unavailable-source-decoy"],
+        ),
+        derived_ids["irrelevant-record-decoy"]: artifact_params(
+            source_ids["irrelevant-record-decoy"],
+            relationship=False,
+        ),
+        derived_ids["eligible-code-artifact"]: artifact_params(
+            source_ids["eligible-code-artifact"],
+            content_class="code",
+        ),
+        derived_ids["eligible-document-artifact"]: artifact_params(
+            source_ids["eligible-document-artifact"],
+            content_class="document",
+        ),
+    }
+    fake_pg = FakePG(
+        artifact_metadata=artifact_metadata,
+        artifact_rows_by_id={
+            derived_ids["incomplete-lifecycle-decoy"]: {"artifact_id": None},
+        },
+        artifact_owner_by_id={source_id: "owner" for source_id in source_ids.values()},
+        artifact_lookup_fail_ids=[source_ids["unavailable-source-decoy"]],
+        unique_derived_snippets=True,
+    )
+    ordered_ids = [
+        derived_ids["blocked-domain-decoy"],
+        derived_ids["outside-domain-decoy"],
+        derived_ids["sensitive-artifact-decoy"],
+        derived_ids["unsupported-class-decoy"],
+        derived_ids["malformed-policy-decoy"],
+        derived_ids["incomplete-lifecycle-decoy"],
+        derived_ids["unavailable-source-decoy"],
+        derived_ids["irrelevant-record-decoy"],
+        derived_ids["eligible-code-artifact"],
+        derived_ids["eligible-document-artifact"],
+    ]
+    fake_qdrant = FakeQdrant(
+        artifact_ids=ordered_ids,
+        artifact_scores=[0.99, 0.98, 0.97, 0.96, 0.95, 0.94, 0.93, 0.92, 0.21, 0.2],
+    )
+
+    async def empty_message_search(**kwargs):
+        fake_qdrant.search_calls.append(kwargs)
+        return []
+
+    fake_qdrant.search = empty_message_search
+    fake_settings = types.SimpleNamespace(
+        memory_api_key="testkey",
+        require_request_id=True,
+        enforce_request_id_header_body_match=True,
+        retrieval_k=1,
+        retrieval_artifact_k=2,
+        retrieval_artifact_max_snippet_chars=500,
+        retrieval_recent_half_life_days=14,
+        retrieval_balanced_half_life_days=45,
+        retrieval_historical_half_life_days=365,
+        retrieval_conversation_boost=0.08,
+        retrieval_pinned_bias=0.12,
+        retrieval_missing_penalty_cap=0.15,
+        recent_turns=10,
+    )
+    monkeypatch.setattr(main_module, "settings", fake_settings, raising=True)
+    monkeypatch.setattr(main_module, "pg", fake_pg, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", fake_qdrant, raising=True)
+
+    relationship = {
+        "applied": True,
+        "relationship_ids": [selected_rel],
+        "entity_ids": [],
+        "relationship_scopes": ["project"],
+        "reason_codes": ["eligible_relationship_scope_selected"],
+    }
+    rid = "rid-artifact-containment-crowding"
+    r = await _post_retrieve_bundle(
+        conversation_id=str(uuid.uuid4()),
+        request_id=rid,
+        body={
+            "request_id": rid,
+            "owner_id": "owner",
+            "query": "eligible-code-artifact",
+            "include_artifacts": True,
+            "containment_policy": _mandatory_policy(
+                domains=["technical"],
+                blocked=["finance"],
+                relationship=relationship,
+            ),
+        },
+    )
+
+    assert r.status_code == 200
+    body = r.json()
+    refs = body["bundle"]["artifact_refs"]
+    returned_ids = [item["source_ref"]["ref_id"] for item in refs]
+    assert returned_ids == [
+        derived_ids["eligible-code-artifact"],
+        derived_ids["eligible-document-artifact"],
+    ]
+    assert set(returned_ids).isdisjoint(set(ordered_ids[:-2]))
+    assert fake_qdrant.artifact_search_calls[0]["k"] == 40
+    assert fake_qdrant.artifact_search_calls[0]["policy_filter"]["content_classes"] == ["code", "document"]
+    containment = body["bundle"]["retrieval_debug"]["containment_policy"]
+    assert containment["pre_limit_policy_filter_applied"] is True
+    assert containment["relationship_narrowing_applied"] is True
+    assert containment["retained_count"] == 2
+    omitted = containment["omitted_counts_by_reason"]
+    assert omitted["blocked_domain"] == 1
+    assert omitted["outside_allowed_domain"] == 1
+    assert omitted["sensitivity_ceiling_exceeded"] == 1
+    assert omitted["content_class_not_allowed"] == 1
+    assert omitted["malformed_policy_metadata"] == 1
+    assert omitted["relationship_scope_mismatch"] == 1
+    truth = body["bundle"]["retrieval_debug"]["truth_qualification"]
+    assert truth["source_malformed_count"] == 1
+    assert truth["source_unavailable_count"] == 1
+    assert truth["source_available_count"] == 2
+    assert truth["derivative_omissions_by_reason"]["malformed_derivative_provenance"] == 1
+    assert truth["derivative_omissions_by_reason"]["derivative_source_lookup_unavailable"] == 1
+    for item in refs:
+        assert item["source_availability"] == "available"
+        assert len(item["source_ref"]["ref_id"]) <= 160
+        assert all(len(check["ref_id"]) <= 160 for check in item["source_checks"])
 
 
 @pytest.mark.asyncio
