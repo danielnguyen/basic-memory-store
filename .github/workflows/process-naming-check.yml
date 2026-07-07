@@ -1,0 +1,20 @@
+name: Process naming check
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  process-naming-check:
+    name: process-naming-check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run process naming check
+        run: make process-naming-check
