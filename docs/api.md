@@ -71,7 +71,8 @@ replace service-level ownership checks.
 ## Traces and diagnostics
 
 - `POST /v1/traces` persists a bounded trace.
-- `GET /v1/traces/{request_id}` retrieves the trace owned by the caller.
+- `GET /v1/traces/{request_id}` retrieves the stored trace by request ID for an
+  authenticated service caller.
 - `POST /v1/hygiene/scan` evaluates stored content hygiene.
 - `GET /v1/hygiene/flags` lists bounded hygiene findings.
 
@@ -89,7 +90,7 @@ memory records through:
 - `POST /v1/internal/memory/{memory_id}/reinforce`
 - `POST /v1/internal/memory/{memory_id}/decay`
 - `POST /v1/internal/memory/{memory_id}/transition`
-- `GET /v1/internal/memory/{memory_id}/debug`
+- `GET /v1/internal/memory/{memory_id}/debug?owner_id={owner_id}`
 
 Related internal routes support episode extraction and retrieval, derived-data
 invalidation and replay, and bounded recall selection. These APIs own durable
