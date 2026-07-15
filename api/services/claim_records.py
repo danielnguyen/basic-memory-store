@@ -77,11 +77,11 @@ def _canonical_record(body: ClaimRecordCreateRequest) -> dict[str, Any]:
     if result.claim_anchor_digest != expected_digest:
         raise ClaimRecordError("claim_anchor_digest_mismatch")
     try:
-        UUID(body.conversation_id)
+        conversation_id = str(UUID(body.conversation_id))
     except ValueError as exc:
         raise ClaimRecordError("conversation_not_found") from exc
     try:
-        UUID(body.assistant_message_id)
+        assistant_message_id = str(UUID(body.assistant_message_id))
     except ValueError as exc:
         raise ClaimRecordError("assistant_message_not_found") from exc
     for reference in result.validated_evidence_references:
@@ -95,9 +95,9 @@ def _canonical_record(body: ClaimRecordCreateRequest) -> dict[str, Any]:
         "claim_id": result.claim_id,
         "schema_version": body.schema_version,
         "owner_id": body.owner_id,
-        "conversation_id": body.conversation_id,
+        "conversation_id": conversation_id,
         "request_id": body.request_id,
-        "assistant_message_id": body.assistant_message_id,
+        "assistant_message_id": assistant_message_id,
         "surface": body.surface,
         "runtime_session_id": body.runtime_session_id,
         "runtime_turn_id": body.runtime_turn_id,
@@ -111,7 +111,14 @@ def _canonical_record(body: ClaimRecordCreateRequest) -> dict[str, Any]:
         "freshness_summary": result.freshness_summary,
         "uncertainty_disclosure_required": result.uncertainty_disclosure_required,
         "validated_evidence_references": [
-            reference.model_dump(mode="json")
+            {
+                **reference.model_dump(mode="json"),
+                "conversation_id": (
+                    conversation_id
+                    if reference.conversation_id is not None
+                    else None
+                ),
+            }
             for reference in result.validated_evidence_references
         ],
         "limitation_codes": list(result.limitation_codes),

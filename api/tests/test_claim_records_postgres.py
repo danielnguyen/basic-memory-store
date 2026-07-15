@@ -66,8 +66,8 @@ def _request(
     *,
     claim_id: str,
     owner_id: str,
-    conversation_id: UUID,
-    assistant_message_id: UUID,
+    conversation_id: UUID | str,
+    assistant_message_id: UUID | str,
     request_id: str,
     references: list[dict],
 ) -> ClaimRecordCreateRequest:
@@ -239,6 +239,66 @@ def test_valid_record_is_immutable_idempotent_and_private(postgres_database):
     serialized = first.model_dump_json()
     assert PRIVATE_ANSWER not in serialized
     assert PRIVATE_TRACE not in serialized
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    ["uppercase", "compact"],
+)
+def test_uuid_spellings_are_canonical_and_idempotent(
+    postgres_database,
+    spelling,
+):
+    scope = _seed_request_scope(postgres_database)
+    canonical_conversation_id = str(scope["conversation_id"])
+    canonical_assistant_message_id = str(scope["assistant_message_id"])
+    if spelling == "uppercase":
+        supplied_conversation_id = canonical_conversation_id.upper()
+        supplied_assistant_message_id = canonical_assistant_message_id.upper()
+    else:
+        supplied_conversation_id = canonical_conversation_id.replace("-", "")
+        supplied_assistant_message_id = canonical_assistant_message_id.replace("-", "")
+    reference = _reference(
+        ref_type="external_source",
+        ref_id="external-source-1",
+        owner_id=scope["owner_id"],
+        conversation_id=supplied_conversation_id,
+    )
+    body = _request(
+        claim_id=f"claim_uuid_{spelling}",
+        owner_id=scope["owner_id"],
+        conversation_id=supplied_conversation_id,
+        assistant_message_id=supplied_assistant_message_id,
+        request_id=scope["request_id"],
+        references=[reference],
+    )
+
+    created, first = _run_create(postgres_database, body)
+    replay_created, replay = _run_create(postgres_database, body)
+
+    assert created is True
+    assert replay_created is False
+    assert replay == first
+    assert first.conversation_id == canonical_conversation_id
+    assert first.assistant_message_id == canonical_assistant_message_id
+    assert (
+        first.validated_evidence_references[0].conversation_id
+        == canonical_conversation_id
+    )
+    with psycopg.connect(postgres_database) as conn:
+        stored = conn.execute(
+            """
+            SELECT conversation_id::text, assistant_message_id::text,
+                   evidence_references_json, count(*) OVER ()
+            FROM claim_records
+            WHERE claim_id = %s
+            """,
+            (body.calibration_result.claim_id,),
+        ).fetchone()
+    assert stored[0] == canonical_conversation_id
+    assert stored[1] == canonical_assistant_message_id
+    assert stored[2][0]["conversation_id"] == canonical_conversation_id
+    assert stored[3] == 1
 
 
 def test_local_reference_types_require_existing_scoped_records(postgres_database):
