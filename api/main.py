@@ -9,7 +9,7 @@ from datetime import datetime, UTC, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Security, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Security, Request, Response
 from fastapi.security.api_key import APIKeyHeader
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, generate_latest
 
@@ -45,6 +45,12 @@ from services.derivation_lifecycle import (
     load_derived_row,
     replay_derived,
     structural_hash,
+)
+from services.claim_records import (
+    ClaimRecordError,
+    create_claim_record as persist_claim_record,
+    get_claim_record as load_claim_record,
+    list_claim_records as load_claim_records,
 )
 
 from models import (
@@ -140,6 +146,10 @@ from models import (
     ProfileResolveRequest,
     ProfileResolveResponse,
     SurfaceContext,
+    ClaimRecord,
+    ClaimRecordCreateRequest,
+    ClaimRecordCreateResponse,
+    ClaimRecordListResponse,
     TraceCreateRequest,
     TraceCreateResponse,
     TraceResponse,
@@ -171,6 +181,30 @@ api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 async def require_api_key(api_key: str | None = Security(api_key_header)) -> None:
     if not api_key or api_key != settings.memory_api_key:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+_CLAIM_RECORD_ERROR_STATUS = {
+    "claim_record_not_found": 404,
+    "claim_record_conflict": 409,
+    "conversation_not_found": 404,
+    "assistant_message_not_found": 404,
+    "assistant_message_not_assistant": 422,
+    "assistant_message_request_mismatch": 422,
+    "request_trace_not_found": 404,
+    "request_trace_scope_mismatch": 422,
+    "request_trace_not_eligible": 422,
+    "evidence_reference_not_in_trace": 422,
+    "evidence_reference_not_found": 404,
+    "evidence_reference_scope_mismatch": 422,
+    "claim_anchor_digest_mismatch": 422,
+}
+
+
+def _claim_record_http_error(exc: ClaimRecordError) -> HTTPException:
+    status_code = _CLAIM_RECORD_ERROR_STATUS.get(exc.code)
+    if status_code is None:
+        raise exc
+    return HTTPException(status_code=status_code, detail=exc.code)
 
 
 # Apply auth globally to avoid forgetting it per-route.
@@ -2658,6 +2692,66 @@ async def resolve_profile(body: ProfileResolveRequest):
         default_profile_name=settings.default_profile_name,
     )
     return ProfileResolveResponse(**out)
+
+
+@app.post(
+    "/v1/internal/claim-records",
+    response_model=ClaimRecordCreateResponse,
+    tags=["claim-records"],
+    dependencies=[Depends(require_api_key)],
+    summary="Persist one immutable calibrated claim record",
+)
+async def create_claim_record(body: ClaimRecordCreateRequest, request: Request):
+    _require_matching_request_id(request, body.request_id)
+    try:
+        created, record = await persist_claim_record(pg, body)
+    except ClaimRecordError as exc:
+        raise _claim_record_http_error(exc) from exc
+    return ClaimRecordCreateResponse(created=created, record=record)
+
+
+@app.get(
+    "/v1/internal/claim-records",
+    response_model=ClaimRecordListResponse,
+    tags=["claim-records"],
+    dependencies=[Depends(require_api_key)],
+    summary="List immutable calibrated claim records in one conversation",
+)
+async def list_claim_records(
+    owner_id: str,
+    conversation_id: str,
+    assistant_message_id: str | None = None,
+    request_id: str | None = None,
+    limit: int = Query(default=20, ge=1, le=50),
+):
+    records = await load_claim_records(
+        pg,
+        owner_id=owner_id,
+        conversation_id=conversation_id,
+        assistant_message_id=assistant_message_id,
+        request_id=request_id,
+        limit=limit,
+    )
+    return ClaimRecordListResponse(records=records)
+
+
+@app.get(
+    "/v1/internal/claim-records/{claim_id}",
+    response_model=ClaimRecord,
+    tags=["claim-records"],
+    dependencies=[Depends(require_api_key)],
+    summary="Get one immutable calibrated claim record",
+)
+async def get_claim_record(claim_id: str, owner_id: str, conversation_id: str):
+    try:
+        return await load_claim_record(
+            pg,
+            claim_id=claim_id,
+            owner_id=owner_id,
+            conversation_id=conversation_id,
+        )
+    except ClaimRecordError as exc:
+        raise _claim_record_http_error(exc) from exc
 
 
 @app.post(

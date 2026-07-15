@@ -1438,6 +1438,210 @@ class RecallDebugResponse(BaseModel):
     decisions: List[RecallDecisionItem] = Field(default_factory=list)
 
 
+# ---- Claim records ----
+
+ClaimRecordIdentifier = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=120,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    ),
+]
+ClaimEvidenceRefType = Literal[
+    "message",
+    "derived_text",
+    "artifact",
+    "external_source",
+    "world_state_claim",
+    "tool_output",
+    "integration_event",
+]
+ClaimEvidenceSupportKind = Literal[
+    "direct",
+    "corroborating",
+    "contextual",
+    "contradictory",
+]
+ClaimEvidenceAuthority = Literal[
+    "peer_reviewed_evidence",
+    "clinical_guidance",
+    "manufacturer_guidance",
+    "tool_output",
+    "trusted_integration",
+    "user_report",
+    "runtime_inference",
+    "speculation",
+    "unknown",
+]
+ClaimEvidenceFreshnessState = Literal[
+    "active",
+    "stale",
+    "superseded",
+    "corrected",
+    "unknown_freshness",
+    "not_applicable",
+]
+ClaimClass = Literal[
+    "verified_fact",
+    "source_backed_fact",
+    "manufacturer_guidance",
+    "expert_consensus",
+    "runtime_inference",
+    "speculation",
+    "unknown",
+]
+ClaimCalibrationStatus = Literal["supported", "limited", "unsupported"]
+ClaimEvidenceStrength = Literal["strong", "moderate", "weak", "none"]
+ClaimConfidence = Literal["high", "medium", "low", "unknown"]
+ClaimFreshnessSummary = Literal["current", "mixed", "stale", "unknown", "not_applicable"]
+ClaimLimitationCode = Literal[
+    "no_supporting_evidence",
+    "context_only",
+    "low_authority_evidence",
+    "stale_evidence",
+    "unknown_freshness",
+    "superseded_or_corrected_evidence",
+    "contradictory_evidence",
+    "single_source",
+    "inference_dominant",
+    "speculation_only",
+]
+
+
+class ClaimEvidenceReference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ref_type: ClaimEvidenceRefType
+    ref_id: ClaimRecordIdentifier
+    owner_id: ClaimRecordIdentifier
+    conversation_id: ClaimRecordIdentifier | None = None
+    support_kind: ClaimEvidenceSupportKind
+    authority: ClaimEvidenceAuthority
+    freshness_state: ClaimEvidenceFreshnessState
+
+
+class ClaimRecordCalibrationResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    claim_id: ClaimRecordIdentifier
+    claim_anchor: Annotated[str, Field(min_length=1, max_length=500)]
+    claim_anchor_digest: Annotated[
+        str,
+        Field(pattern=r"^sha256:[0-9a-f]{64}$"),
+    ]
+    claim_class: ClaimClass
+    calibration_status: ClaimCalibrationStatus
+    evidence_strength: ClaimEvidenceStrength
+    confidence: ClaimConfidence
+    strongest_authority: ClaimEvidenceAuthority
+    freshness_summary: ClaimFreshnessSummary
+    uncertainty_disclosure_required: bool
+    validated_evidence_references: List[ClaimEvidenceReference] = Field(
+        default_factory=list,
+        max_length=16,
+    )
+    limitation_codes: List[ClaimLimitationCode] = Field(default_factory=list, max_length=10)
+    user_safe_summary: Annotated[str, Field(min_length=1, max_length=500)]
+
+    @field_validator("claim_anchor", mode="before")
+    @classmethod
+    def normalize_claim_anchor(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        return " ".join(value.split())
+
+    @model_validator(mode="after")
+    def validate_bounded_collections(self):
+        identities = [
+            (reference.ref_type, reference.ref_id)
+            for reference in self.validated_evidence_references
+        ]
+        if len(identities) != len(set(identities)):
+            raise ValueError("duplicate_evidence_reference")
+        if len(self.limitation_codes) != len(set(self.limitation_codes)):
+            raise ValueError("duplicate_limitation_code")
+        self.validated_evidence_references = sorted(
+            self.validated_evidence_references,
+            key=lambda item: (
+                item.ref_type,
+                item.ref_id,
+                item.owner_id,
+                item.conversation_id or "",
+                item.support_kind,
+                item.authority,
+                item.freshness_state,
+            ),
+        )
+        return self
+
+
+class ClaimRecordCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["claim-record.v1"]
+    request_id: ClaimRecordIdentifier
+    owner_id: ClaimRecordIdentifier
+    conversation_id: ClaimRecordIdentifier
+    assistant_message_id: ClaimRecordIdentifier
+    surface: Annotated[str, Field(min_length=1, max_length=64)]
+    runtime_session_id: ClaimRecordIdentifier
+    runtime_turn_id: ClaimRecordIdentifier
+    calibration_result: ClaimRecordCalibrationResult
+
+    @model_validator(mode="after")
+    def validate_evidence_scope(self):
+        for reference in self.calibration_result.validated_evidence_references:
+            if reference.owner_id != self.owner_id:
+                raise ValueError("evidence_owner_mismatch")
+            if (
+                reference.conversation_id is not None
+                and reference.conversation_id != self.conversation_id
+            ):
+                raise ValueError("evidence_conversation_mismatch")
+        return self
+
+
+class ClaimRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    claim_id: ClaimRecordIdentifier
+    schema_version: Literal["claim-record.v1"]
+    owner_id: ClaimRecordIdentifier
+    conversation_id: ClaimRecordIdentifier
+    request_id: ClaimRecordIdentifier
+    assistant_message_id: ClaimRecordIdentifier
+    surface: Annotated[str, Field(min_length=1, max_length=64)]
+    runtime_session_id: ClaimRecordIdentifier
+    runtime_turn_id: ClaimRecordIdentifier
+    claim_anchor: Annotated[str, Field(min_length=1, max_length=500)]
+    claim_anchor_digest: Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
+    claim_class: ClaimClass
+    calibration_status: ClaimCalibrationStatus
+    evidence_strength: ClaimEvidenceStrength
+    confidence: ClaimConfidence
+    strongest_authority: ClaimEvidenceAuthority
+    freshness_summary: ClaimFreshnessSummary
+    uncertainty_disclosure_required: bool
+    validated_evidence_references: List[ClaimEvidenceReference] = Field(max_length=16)
+    limitation_codes: List[ClaimLimitationCode] = Field(max_length=10)
+    user_safe_summary: Annotated[str, Field(min_length=1, max_length=500)]
+    created_at: str
+
+
+class ClaimRecordCreateResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    created: bool
+    record: ClaimRecord
+
+
+class ClaimRecordListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    records: List[ClaimRecord]
+
+
 # ---- Traces ----
 
 class TraceCreateRequest(BaseModel):
