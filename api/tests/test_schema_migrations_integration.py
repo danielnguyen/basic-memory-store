@@ -702,6 +702,168 @@ def test_managed_migration_applies_once_and_commits_with_ledger(pg_database: str
     assert second["applied_migrations"] == []
 
 
+def test_prior_enrolled_baseline_advances_through_claim_record_migration(
+    pg_database: str,
+    temp_db_dir: Path,
+) -> None:
+    prior_checksum = "fa647801e25230ee1f59d85f385f4f363706c7f72f588bb43ebef12c0ab45eaf"
+    current_baseline = (SOURCE_DB_DIR / "baseline.sql").read_text(encoding="utf-8")
+    start = current_baseline.index("CREATE TABLE IF NOT EXISTS claim_records")
+    end_marker = "ON claim_records(owner_id, request_id, created_at ASC);\n\n"
+    end = current_baseline.index(end_marker, start) + len(end_marker)
+    prior_baseline = current_baseline[:start] + current_baseline[end:]
+    prior_path = temp_db_dir / "baseline.sql"
+    prior_path.write_text(prior_baseline, encoding="utf-8")
+    assert schema_migrations.compute_sha256(prior_path) == prior_checksum
+    execute_sql(pg_database, prior_baseline)
+
+    conversation_id = uuid4()
+    message_id = uuid4()
+    with psycopg.connect(pg_database) as conn:
+        schema_migrations.create_ledger_table(conn)
+        conn.execute(
+            """
+            INSERT INTO schema_migrations (version, kind, checksum_sha256, execution_ms)
+            VALUES (%s, 'baseline', %s, 1)
+            """,
+            (schema_migrations.BASELINE_VERSION, prior_checksum),
+        )
+        conn.execute(
+            "INSERT INTO conversations (id, owner_id, title) VALUES (%s, 'owner-prior', 'prior')",
+            (conversation_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO messages (id, conversation_id, owner_id, role, content)
+            VALUES (%s, %s, 'owner-prior', 'assistant', 'preserved')
+            """,
+            (message_id, conversation_id),
+        )
+        conn.commit()
+
+    prior_path.write_text(current_baseline, encoding="utf-8")
+    migration = SOURCE_DB_DIR / "migrations" / "managed" / "20260714230000_claim_records.sql"
+    shutil.copy2(migration, temp_db_dir / "migrations" / "managed" / migration.name)
+
+    before = run_cli_ok("status", dsn=pg_database, db_dir=temp_db_dir)
+    upgraded = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
+    status = run_cli_ok("status", dsn=pg_database, db_dir=temp_db_dir)
+    checked = run_cli_ok("check", dsn=pg_database, db_dir=temp_db_dir)
+
+    assert before["baseline_checksum_status"] == "compatible_prior"
+    assert before["pending_migrations"] == [migration.name]
+    assert upgraded["applied_migrations"] == [migration.name]
+    assert upgraded["baseline_checksum_status"] == "compatible_prior"
+    assert status["state"] == "current"
+    assert checked["state"] == "current"
+    assert table_exists(pg_database, "claim_records")
+    with psycopg.connect(pg_database) as conn:
+        assert conn.execute(
+            "SELECT owner_id FROM conversations WHERE id = %s",
+            (conversation_id,),
+        ).fetchone() == ("owner-prior",)
+        assert conn.execute(
+            "SELECT content FROM messages WHERE id = %s",
+            (message_id,),
+        ).fetchone() == ("preserved",)
+
+
+def test_clean_baseline_contains_claim_record_constraints_and_indexes(
+    pg_database: str,
+    temp_db_dir: Path,
+) -> None:
+    upgraded = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
+
+    assert upgraded["state"] == "current"
+    assert table_exists(pg_database, "claim_records")
+    with psycopg.connect(pg_database) as conn:
+        indexes = {
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT indexname
+                FROM pg_indexes
+                WHERE schemaname = 'public' AND tablename = 'claim_records'
+                """
+            ).fetchall()
+        }
+        checks = conn.execute(
+            """
+            SELECT count(*)
+            FROM pg_constraint con
+            JOIN pg_class rel ON rel.oid = con.conrelid
+            WHERE rel.relname = 'claim_records' AND con.contype = 'c'
+            """
+        ).fetchone()[0]
+        foreign_keys = conn.execute(
+            """
+            SELECT target.relname, con.confdeltype
+            FROM pg_constraint con
+            JOIN pg_class rel ON rel.oid = con.conrelid
+            JOIN pg_class target ON target.oid = con.confrelid
+            WHERE rel.relname = 'claim_records' AND con.contype = 'f'
+            """
+        ).fetchall()
+    assert {
+        "idx_claim_records_owner_conversation_newest",
+        "idx_claim_records_assistant_message",
+        "idx_claim_records_owner_request",
+    } <= indexes
+    assert checks >= 12
+    assert set(foreign_keys) == {("conversations", "c"), ("messages", "c")}
+
+
+@pytest.mark.parametrize(
+    "compatible_checksum",
+    [
+        "b68542ad271358abdc077a604b0ac90c295ef9e3a5fdb10f7548a40f835b27d8",
+        "205107414e8fba04dabaa7d4f95e731058f2f2f59e5819b8bd16577b3e880a5b",
+    ],
+)
+def test_existing_compatible_baseline_checksums_remain_accepted(
+    pg_database: str,
+    temp_db_dir: Path,
+    compatible_checksum: str,
+) -> None:
+    execute_sql(pg_database, (temp_db_dir / "baseline.sql").read_text(encoding="utf-8"))
+    with psycopg.connect(pg_database) as conn:
+        schema_migrations.create_ledger_table(conn)
+        conn.execute(
+            """
+            INSERT INTO schema_migrations (version, kind, checksum_sha256, execution_ms)
+            VALUES (%s, 'baseline', %s, 1)
+            """,
+            (schema_migrations.BASELINE_VERSION, compatible_checksum),
+        )
+        conn.commit()
+
+    status = run_cli_ok("status", dsn=pg_database, db_dir=temp_db_dir)
+
+    assert status["state"] == "current"
+    assert status["baseline_checksum_status"] == "compatible_prior"
+
+
+def test_unknown_baseline_checksum_still_fails_closed(
+    pg_database: str,
+    temp_db_dir: Path,
+) -> None:
+    execute_sql(pg_database, (temp_db_dir / "baseline.sql").read_text(encoding="utf-8"))
+    with psycopg.connect(pg_database) as conn:
+        schema_migrations.create_ledger_table(conn)
+        conn.execute(
+            """
+            INSERT INTO schema_migrations (version, kind, checksum_sha256, execution_ms)
+            VALUES (%s, 'baseline', %s, 1)
+            """,
+            (schema_migrations.BASELINE_VERSION, "f" * 64),
+        )
+        conn.commit()
+
+    payload = run_cli_fail("check", dsn=pg_database, db_dir=temp_db_dir)
+
+    assert "baseline checksum" in str(payload["error"]).lower()
+
+
 def test_prior_baseline_upgrades_lifecycle_without_rewriting_rows_or_events(
     pg_database: str, temp_db_dir: Path
 ) -> None:
@@ -989,6 +1151,7 @@ def test_derivation_version_cleanup_migrates_only_exact_legacy_values_and_defaul
     assert payload["applied_migrations"] == [
         cleanup_migration.name,
         "20260701120000_artifact_policy_metadata.sql",
+        "20260714230000_claim_records.sql",
     ]
     assert repeated["applied_migrations"] == []
     assert column_default(pg_database, "memory_items", "derivation_version") == f"'{MEMORY_ITEM_DERIVATION_VERSION}'::text"

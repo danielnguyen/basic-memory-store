@@ -80,6 +80,28 @@ The service also exposes scoped internal diagnostic routes alongside memory,
 episode, derived-data, and recall operations. These routes return bounded
 diagnostics rather than raw model prompts or unrestricted dependency output.
 
+## Internal claim records
+
+Authenticated internal callers can persist and retrieve bounded claim-calibration
+results through:
+
+- `POST /v1/internal/claim-records`
+- `GET /v1/internal/claim-records/{claim_id}?owner_id={owner_id}&conversation_id={conversation_id}`
+- `GET /v1/internal/claim-records?owner_id={owner_id}&conversation_id={conversation_id}`
+
+Claim records are immutable and scoped to one owner and conversation. Creation
+requires an exact assistant-message and request-trace association. Every evidence
+reference must appear in the request trace's bounded reference set; message,
+artifact, and derived-text references are also checked against locally owned
+records. Identities owned by another service can be stored when trace-associated,
+but Basic Memory Store does not claim to dereference or independently verify them.
+
+The list endpoint can be filtered by `assistant_message_id` or `request_id` and
+returns records in deterministic assistant-response order for later orchestration.
+It does not interpret follow-up intent. Claim-record responses exclude full
+answers, prompts, raw evidence, private memory, hidden reasoning, credentials,
+and trace payloads.
+
 ## Internal memory lifecycle
 
 Internal callers can evaluate, promote, reinforce, decay, and transition

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from uuid import UUID, uuid4
 
 from psycopg_pool import AsyncConnectionPool
@@ -10,6 +10,43 @@ from psycopg.types.json import Json
 
 from services.derivation_versions import EPISODE_DERIVATION_VERSION, MEMORY_ITEM_DERIVATION_VERSION
 from services.memory_lifecycle import bounded_transition_reason
+
+
+_CLAIM_RECORD_COLUMNS = """
+    claim_id, schema_version, owner_id, conversation_id, request_id,
+    assistant_message_id, surface, runtime_session_id, runtime_turn_id,
+    claim_anchor, claim_anchor_digest, claim_class, calibration_status,
+    evidence_strength, confidence, strongest_authority, freshness_summary,
+    uncertainty_disclosure_required, evidence_references_json,
+    limitation_codes_json, user_safe_summary, created_at
+"""
+
+
+def _claim_record_from_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "claim_id": row[0],
+        "schema_version": row[1],
+        "owner_id": row[2],
+        "conversation_id": str(row[3]),
+        "request_id": row[4],
+        "assistant_message_id": str(row[5]),
+        "surface": row[6],
+        "runtime_session_id": row[7],
+        "runtime_turn_id": row[8],
+        "claim_anchor": row[9],
+        "claim_anchor_digest": row[10],
+        "claim_class": row[11],
+        "calibration_status": row[12],
+        "evidence_strength": row[13],
+        "confidence": row[14],
+        "strongest_authority": row[15],
+        "freshness_summary": row[16],
+        "uncertainty_disclosure_required": row[17],
+        "validated_evidence_references": row[18] or [],
+        "limitation_codes": row[19] or [],
+        "user_safe_summary": row[20],
+        "created_at": str(row[21]),
+    }
 
 
 def _bounded_scalar_map(value: dict[str, Any] | None) -> dict[str, Any]:
@@ -4035,6 +4072,256 @@ class PostgresStore:
                 await cur.execute(q, (request_id, owner_id))
                 rows = await cur.fetchall()
         return [self._recall_decision_from_row(row) for row in rows]
+
+    async def create_claim_record(
+        self,
+        *,
+        record: dict[str, Any],
+        validate_association: Callable[
+            [dict[str, Any], dict[str, Any]],
+            dict[str, Any] | None,
+        ],
+    ) -> dict[str, Any]:
+        conversation_id = UUID(record["conversation_id"])
+        assistant_message_id = UUID(record["assistant_message_id"])
+        evidence = record["validated_evidence_references"]
+
+        async with self.pool.connection() as conn:
+            async with conn.transaction():
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0));",
+                        (record["claim_id"],),
+                    )
+                    await cur.execute(
+                        f"SELECT {_CLAIM_RECORD_COLUMNS} FROM claim_records WHERE claim_id = %s;",
+                        (record["claim_id"],),
+                    )
+                    existing_row = await cur.fetchone()
+                    existing = (
+                        _claim_record_from_row(existing_row)
+                        if existing_row is not None
+                        else None
+                    )
+
+                    await cur.execute(
+                        "SELECT owner_id FROM conversations WHERE id = %s LIMIT 1;",
+                        (conversation_id,),
+                    )
+                    conversation = await cur.fetchone()
+
+                    await cur.execute(
+                        """
+                        SELECT owner_id, conversation_id, role, metadata
+                        FROM messages
+                        WHERE id = %s
+                        LIMIT 1;
+                        """,
+                        (assistant_message_id,),
+                    )
+                    message = await cur.fetchone()
+
+                    await cur.execute(
+                        """
+                        SELECT owner_id, conversation_id, surface, status, references_json
+                        FROM traces
+                        WHERE request_id = %s
+                        LIMIT 1;
+                        """,
+                        (record["request_id"],),
+                    )
+                    trace = await cur.fetchone()
+
+                    local_references: dict[tuple[str, str], dict[str, Any] | None] = {}
+                    for reference in evidence:
+                        ref_type = reference["ref_type"]
+                        if ref_type not in {"message", "artifact", "derived_text"}:
+                            continue
+                        ref_id = UUID(reference["ref_id"])
+
+                        if ref_type == "message":
+                            await cur.execute(
+                                """
+                                SELECT owner_id, conversation_id
+                                FROM messages
+                                WHERE id = %s
+                                LIMIT 1;
+                                """,
+                                (ref_id,),
+                            )
+                        elif ref_type == "artifact":
+                            await cur.execute(
+                                """
+                                SELECT owner_id, conversation_id
+                                FROM artifacts
+                                WHERE id = %s
+                                LIMIT 1;
+                                """,
+                                (ref_id,),
+                            )
+                        else:
+                            await cur.execute(
+                                """
+                                SELECT a.owner_id, a.conversation_id
+                                FROM derived_text dt
+                                JOIN artifacts a ON a.id = dt.artifact_id
+                                WHERE dt.id = %s
+                                LIMIT 1;
+                                """,
+                                (ref_id,),
+                            )
+                        local_reference = await cur.fetchone()
+                        local_references[(ref_type, reference["ref_id"])] = (
+                            {
+                                "owner_id": local_reference[0],
+                                "conversation_id": (
+                                    str(local_reference[1])
+                                    if local_reference[1] is not None
+                                    else None
+                                ),
+                            }
+                            if local_reference is not None
+                            else None
+                        )
+
+                    validated_existing = validate_association(
+                        record,
+                        {
+                            "existing": existing,
+                            "conversation": (
+                                {"owner_id": conversation[0]}
+                                if conversation is not None
+                                else None
+                            ),
+                            "assistant_message": (
+                                {
+                                    "owner_id": message[0],
+                                    "conversation_id": str(message[1]),
+                                    "role": message[2],
+                                    "metadata": message[3],
+                                }
+                                if message is not None
+                                else None
+                            ),
+                            "trace": (
+                                {
+                                    "owner_id": trace[0],
+                                    "conversation_id": str(trace[1]),
+                                    "surface": trace[2],
+                                    "status": trace[3],
+                                    "references": trace[4] if isinstance(trace[4], list) else [],
+                                }
+                                if trace is not None
+                                else None
+                            ),
+                            "local_references": local_references,
+                        },
+                    )
+                    if validated_existing is not None:
+                        return {"created": False, "record": validated_existing}
+
+                    await cur.execute(
+                        """
+                        INSERT INTO claim_records (
+                            claim_id, schema_version, owner_id, conversation_id, request_id,
+                            assistant_message_id, surface, runtime_session_id, runtime_turn_id,
+                            claim_anchor, claim_anchor_digest, claim_class, calibration_status,
+                            evidence_strength, confidence, strongest_authority, freshness_summary,
+                            uncertainty_disclosure_required, evidence_references_json,
+                            limitation_codes_json, user_safe_summary
+                        ) VALUES (
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        )
+                        RETURNING
+                        """
+                        + _CLAIM_RECORD_COLUMNS,
+                        (
+                            record["claim_id"],
+                            record["schema_version"],
+                            record["owner_id"],
+                            conversation_id,
+                            record["request_id"],
+                            assistant_message_id,
+                            record["surface"],
+                            record["runtime_session_id"],
+                            record["runtime_turn_id"],
+                            record["claim_anchor"],
+                            record["claim_anchor_digest"],
+                            record["claim_class"],
+                            record["calibration_status"],
+                            record["evidence_strength"],
+                            record["confidence"],
+                            record["strongest_authority"],
+                            record["freshness_summary"],
+                            record["uncertainty_disclosure_required"],
+                            Json(evidence),
+                            Json(record["limitation_codes"]),
+                            record["user_safe_summary"],
+                        ),
+                    )
+                    inserted = await cur.fetchone()
+                    return {"created": True, "record": _claim_record_from_row(inserted)}
+
+    async def get_claim_record(
+        self,
+        *,
+        claim_id: str,
+        owner_id: str,
+        conversation_id: str,
+    ) -> dict[str, Any] | None:
+        try:
+            scoped_conversation_id = UUID(conversation_id)
+        except (TypeError, ValueError):
+            return None
+        query = f"""
+        SELECT {_CLAIM_RECORD_COLUMNS}
+        FROM claim_records
+        WHERE claim_id = %s AND owner_id = %s AND conversation_id = %s
+        LIMIT 1;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(query, (claim_id, owner_id, scoped_conversation_id))
+                row = await cur.fetchone()
+        return _claim_record_from_row(row) if row else None
+
+    async def list_claim_records(
+        self,
+        *,
+        owner_id: str,
+        conversation_id: str,
+        assistant_message_id: str | None,
+        request_id: str | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        try:
+            scoped_conversation_id = UUID(conversation_id)
+            scoped_message_id = UUID(assistant_message_id) if assistant_message_id else None
+        except (TypeError, ValueError):
+            return []
+        filters = ["cr.owner_id = %s", "cr.conversation_id = %s"]
+        parameters: list[Any] = [owner_id, scoped_conversation_id]
+        if scoped_message_id is not None:
+            filters.append("cr.assistant_message_id = %s")
+            parameters.append(scoped_message_id)
+        if request_id is not None:
+            filters.append("cr.request_id = %s")
+            parameters.append(request_id)
+        parameters.append(limit)
+        query = f"""
+        SELECT {', '.join('cr.' + column.strip() for column in _CLAIM_RECORD_COLUMNS.split(','))}
+        FROM claim_records cr
+        JOIN messages m ON m.id = cr.assistant_message_id
+        WHERE {' AND '.join(filters)}
+        ORDER BY m.created_at DESC, cr.created_at ASC, cr.claim_id ASC
+        LIMIT %s;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(query, tuple(parameters))
+                rows = await cur.fetchall()
+        return [_claim_record_from_row(row) for row in rows]
 
     async def create_trace(self, trace: dict[str, Any]) -> UUID:
         q = """
