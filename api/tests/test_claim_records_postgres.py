@@ -1,31 +1,41 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from hashlib import sha256
 from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from pydantic import ValidationError
 
-from models import ClaimRecordCreateRequest
+from models import ClaimRecord, ClaimRecordCreateRequest, ClaimRecordCreateResponse
 from services.claim_records import (
     ClaimRecordError,
+    _canonical_record,
     create_claim_record,
     get_claim_record,
     list_claim_records,
+    validate_claim_record_association,
 )
-from storage.postgres import PostgresStore
+from storage.postgres import (
+    PostgresStore,
+    _CLAIM_RECORD_COLUMNS,
+    _claim_record_from_row,
+)
 
 
 PRIVATE_ANSWER = "PRIVATE_ASSISTANT_ANSWER_SENTINEL"
 PRIVATE_TRACE = "PRIVATE_TRACE_INTERNAL_SENTINEL"
+DEFAULT_ANCHOR = "The selected setting changed."
+DEFAULT_ANCHOR_DIGEST = "sha256:" + sha256(DEFAULT_ANCHOR.encode()).hexdigest()
 
 
 def _calibration(
     *,
     claim_id: str,
     references: list[dict],
-    anchor: str = "The selected setting changed.",
+    anchor: str = DEFAULT_ANCHOR,
 ) -> dict:
     return {
         "claim_id": claim_id,
@@ -70,6 +80,7 @@ def _request(
     assistant_message_id: UUID | str,
     request_id: str,
     references: list[dict],
+    acquisition_manifest_id: str | None = None,
 ) -> ClaimRecordCreateRequest:
     return ClaimRecordCreateRequest(
         schema_version="claim-record.v1",
@@ -80,6 +91,7 @@ def _request(
         surface="desktop_private",
         runtime_session_id=f"session-{request_id}",
         runtime_turn_id=f"turn-{request_id}",
+        acquisition_manifest_id=acquisition_manifest_id,
         calibration_result=_calibration(
             claim_id=claim_id,
             references=references,
@@ -94,6 +106,7 @@ def _seed_request_scope(
     request_id: str = "request-claim",
     surface: str = "desktop_private",
     trace_status: str = "ok",
+    acquisition_manifest_id: str | None = None,
 ) -> dict:
     conversation_id = uuid4()
     assistant_message_id = uuid4()
@@ -102,6 +115,36 @@ def _seed_request_scope(
     artifact_id = uuid4()
     derived_text_id = uuid4()
     with psycopg.connect(dsn) as conn:
+        prompt = {"private": PRIVATE_TRACE}
+        if acquisition_manifest_id is not None:
+            prompt["evidence_acquisition"] = {
+                "enabled": True,
+                "attempted": True,
+                "status": "sufficient_for_declared_scope",
+                "manifest_id": acquisition_manifest_id,
+                "assistant_message_id": str(assistant_message_id),
+                "response_digest": DEFAULT_ANCHOR_DIGEST,
+                "inventory": {
+                    "source_count": 3,
+                },
+                "plan": {
+                    "plan_status": "ready",
+                },
+                "acquisition": {
+                    "sources_considered": ["source-a", "source-b", "source-c"],
+                    "sources_selected": ["source-a", "source-b"],
+                    "source_references_returned": ["source-ref-a", "source-ref-b"],
+                    "source_references_retained": ["source-ref-a", "source-ref-b"],
+                    "attempts": [
+                        {"source_id": "source-a", "outcome": "satisfied"},
+                        {"source_id": "source-b", "outcome": "satisfied"},
+                    ],
+                },
+                "sufficiency": {
+                    "status": "sufficient_for_declared_scope",
+                    "reason_codes": ["all_declared_requirements_satisfied"],
+                },
+            }
         conn.execute(
             "INSERT INTO conversations (id, owner_id, title) VALUES (%s, %s, 'Claim records')",
             (conversation_id, owner_id),
@@ -169,7 +212,7 @@ def _seed_request_scope(
                 psycopg.types.json.Json({"diagnostic": PRIVATE_TRACE}),
                 psycopg.types.json.Json(trace_references),
                 trace_status,
-                psycopg.types.json.Json({"private": PRIVATE_TRACE}),
+                psycopg.types.json.Json(prompt),
             ),
         )
         conn.commit()
@@ -197,6 +240,237 @@ def _run_create(dsn: str, body: ClaimRecordCreateRequest):
     return asyncio.run(run())
 
 
+def _pure_manifest_record_and_association(
+    *,
+    sufficiency_status: str = "sufficient_for_declared_scope",
+    plan_status: str = "ready",
+) -> tuple[dict, dict]:
+    conversation_id = str(uuid4())
+    assistant_message_id = str(uuid4())
+    manifest_id = "evidence_manifest_33333333333333333333333333333333"
+    body = _request(
+        claim_id="claim_pure_manifest",
+        owner_id="owner-pure",
+        conversation_id=conversation_id,
+        assistant_message_id=assistant_message_id,
+        request_id="request-pure-manifest",
+        references=[
+            _reference(
+                ref_type="external_source",
+                ref_id="external-source-1",
+                owner_id="owner-pure",
+                conversation_id=None,
+            )
+        ],
+        acquisition_manifest_id=manifest_id,
+    )
+    record = _canonical_record(body)
+    association = {
+        "existing": None,
+        "conversation": {"owner_id": body.owner_id},
+        "assistant_message": {
+            "owner_id": body.owner_id,
+            "conversation_id": conversation_id,
+            "role": "assistant",
+            "metadata": {"request_id": body.request_id},
+        },
+        "trace": {
+            "owner_id": body.owner_id,
+            "conversation_id": conversation_id,
+            "surface": body.surface,
+            "status": "ok",
+            "references": [
+                {"ref_type": "external_source", "ref_id": "external-source-1"}
+            ],
+            "prompt": {
+                "evidence_acquisition": {
+                    "attempted": True,
+                    "status": sufficiency_status,
+                    "manifest_id": manifest_id,
+                    "assistant_message_id": assistant_message_id,
+                    "response_digest": DEFAULT_ANCHOR_DIGEST,
+                    "plan": {"plan_status": plan_status},
+                    "sufficiency": {
+                        "status": sufficiency_status,
+                    },
+                }
+            },
+        },
+        "local_references": {},
+    }
+    return record, association
+
+
+@pytest.mark.parametrize(
+    ("sufficiency_status", "plan_status"),
+    [
+        ("sufficient_for_declared_scope", "ready"),
+        ("sufficient_with_limitations", "ready_with_limitations"),
+    ],
+)
+def test_manifest_association_and_legacy_serialization_are_bounded(
+    sufficiency_status,
+    plan_status,
+):
+    record, association = _pure_manifest_record_and_association(
+        sufficiency_status=sufficiency_status,
+        plan_status=plan_status,
+    )
+    manifest_id = record["acquisition_manifest_id"]
+
+    assert validate_claim_record_association(record, association) is None
+    linked = ClaimRecord(**{**record, "created_at": "2026-07-17T12:00:00+00:00"})
+    linked_response = ClaimRecordCreateResponse(created=True, record=linked).model_dump()
+    assert linked_response["record"]["acquisition_manifest_id"] == manifest_id
+
+    legacy_record = ClaimRecord(
+        **{
+            **record,
+            "acquisition_manifest_id": None,
+            "created_at": "2026-07-17T12:00:00+00:00",
+        }
+    )
+    legacy_response = ClaimRecordCreateResponse(
+        created=True,
+        record=legacy_record,
+    ).model_dump()
+    assert "acquisition_manifest_id" not in legacy_response["record"]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        ("prompt_missing", "acquisition_manifest_not_in_trace"),
+        ("manifest_missing", "acquisition_manifest_not_in_trace"),
+        ("manifest_malformed", "acquisition_manifest_not_in_trace"),
+        ("manifest_id_missing", "acquisition_manifest_not_in_trace"),
+        ("manifest_id_mismatch", "acquisition_manifest_association_mismatch"),
+        ("assistant_mismatch", "acquisition_manifest_association_mismatch"),
+        ("digest_mismatch", "acquisition_manifest_association_mismatch"),
+        ("not_attempted", "acquisition_manifest_not_eligible"),
+        ("plan_missing", "acquisition_manifest_not_eligible"),
+        ("plan_unsupported", "acquisition_manifest_not_eligible"),
+        ("sufficiency_missing", "acquisition_manifest_not_eligible"),
+        ("top_insufficient", "acquisition_manifest_not_eligible"),
+        ("nested_unknown", "acquisition_manifest_not_eligible"),
+        ("status_disagreement", "acquisition_manifest_not_eligible"),
+    ],
+)
+def test_manifest_association_errors_are_bounded_without_trace_disclosure(
+    mutation,
+    expected,
+):
+    record, association = _pure_manifest_record_and_association()
+    trace = association["trace"]
+    manifest = trace["prompt"]["evidence_acquisition"]
+    if mutation == "prompt_missing":
+        trace.pop("prompt")
+    elif mutation == "manifest_missing":
+        trace["prompt"].pop("evidence_acquisition")
+    elif mutation == "manifest_malformed":
+        trace["prompt"]["evidence_acquisition"] = ["private"]
+    elif mutation == "manifest_id_missing":
+        manifest.pop("manifest_id")
+    elif mutation == "manifest_id_mismatch":
+        manifest["manifest_id"] = "evidence_manifest_44444444444444444444444444444444"
+    elif mutation == "assistant_mismatch":
+        manifest["assistant_message_id"] = str(uuid4())
+    elif mutation == "digest_mismatch":
+        manifest["response_digest"] = "sha256:" + "0" * 64
+    elif mutation == "not_attempted":
+        manifest["attempted"] = False
+    elif mutation == "plan_missing":
+        manifest.pop("plan")
+    elif mutation == "plan_unsupported":
+        manifest["plan"]["plan_status"] = "unsupported"
+    elif mutation == "sufficiency_missing":
+        manifest.pop("sufficiency")
+    elif mutation == "top_insufficient":
+        manifest["status"] = "insufficient"
+    elif mutation == "nested_unknown":
+        manifest["sufficiency"]["status"] = "unknown"
+    else:
+        manifest["status"] = "sufficient_with_limitations"
+
+    with pytest.raises(ClaimRecordError) as exc_info:
+        validate_claim_record_association(record, association)
+    assert exc_info.value.code == expected
+    assert PRIVATE_TRACE not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "manifest_id",
+    [
+        "",
+        "manifest value",
+        "https://manifest.invalid",
+        "manifest?secret=value",
+        "x" * 121,
+    ],
+)
+def test_acquisition_manifest_identifier_contract_rejects_unsafe_values(
+    manifest_id,
+):
+    body = _request(
+        claim_id="claim_invalid_manifest",
+        owner_id="owner-pure",
+        conversation_id=str(uuid4()),
+        assistant_message_id=str(uuid4()),
+        request_id="request-invalid-manifest",
+        references=[],
+    )
+    payload = body.model_dump(mode="json")
+    payload["acquisition_manifest_id"] = manifest_id
+
+    with pytest.raises(ValidationError):
+        ClaimRecordCreateRequest.model_validate(payload)
+
+    payload = body.model_dump(mode="json")
+    payload["unrestricted_metadata"] = {"source_inventory": ["private"]}
+    with pytest.raises(ValidationError):
+        ClaimRecordCreateRequest.model_validate(payload)
+
+
+def test_claim_record_column_decoder_preserves_manifest_position():
+    row = (
+        "claim_decoder",
+        "claim-record.v1",
+        "owner-decoder",
+        uuid4(),
+        "request-decoder",
+        uuid4(),
+        "desktop_private",
+        "session-decoder",
+        "turn-decoder",
+        "evidence_manifest_55555555555555555555555555555555",
+        DEFAULT_ANCHOR,
+        DEFAULT_ANCHOR_DIGEST,
+        "source_backed_fact",
+        "supported",
+        "moderate",
+        "medium",
+        "trusted_integration",
+        "current",
+        False,
+        [],
+        [],
+        "Bounded decoder summary.",
+        "2026-07-17T12:00:00+00:00",
+    )
+
+    decoded = _claim_record_from_row(row)
+
+    assert "acquisition_manifest_id" in {
+        column.strip() for column in _CLAIM_RECORD_COLUMNS.split(",")
+    }
+    assert (
+        decoded["acquisition_manifest_id"]
+        == "evidence_manifest_55555555555555555555555555555555"
+    )
+    assert decoded["claim_anchor"] == DEFAULT_ANCHOR
+    assert decoded["user_safe_summary"] == "Bounded decoder summary."
+
+
 def test_valid_record_is_immutable_idempotent_and_private(postgres_database):
     scope = _seed_request_scope(postgres_database)
     references = [
@@ -218,6 +492,8 @@ def test_valid_record_is_immutable_idempotent_and_private(postgres_database):
     assert created is True
     assert replay_created is False
     assert replay == first
+    assert first.acquisition_manifest_id is None
+    assert "acquisition_manifest_id" not in first.model_dump()
     assert replay.validated_evidence_references[0].ref_id == "external-source-1"
     with psycopg.connect(postgres_database) as conn:
         count = conn.execute(
@@ -239,6 +515,222 @@ def test_valid_record_is_immutable_idempotent_and_private(postgres_database):
     serialized = first.model_dump_json()
     assert PRIVATE_ANSWER not in serialized
     assert PRIVATE_TRACE not in serialized
+
+
+def test_manifest_link_round_trips_without_copying_acquisition_scope(
+    postgres_database,
+):
+    manifest_id = "evidence_manifest_0123456789abcdef0123456789abcdef"
+    scope = _seed_request_scope(
+        postgres_database,
+        request_id="request-linked-manifest",
+        acquisition_manifest_id=manifest_id,
+    )
+    reference = _reference(
+        ref_type="artifact",
+        ref_id=str(scope["artifact_id"]),
+        owner_id=scope["owner_id"],
+        conversation_id=str(scope["conversation_id"]),
+    )
+    body = _request(
+        claim_id="claim_linked_manifest",
+        references=[reference],
+        acquisition_manifest_id=manifest_id,
+        **{
+            key: scope[key]
+            for key in ("owner_id", "conversation_id", "assistant_message_id", "request_id")
+        },
+    )
+
+    created, first = _run_create(postgres_database, body)
+    replay_created, replay = _run_create(postgres_database, body)
+
+    assert created is True
+    assert replay_created is False
+    assert replay == first
+    assert first.acquisition_manifest_id == manifest_id
+    assert len(first.validated_evidence_references) == 1
+    assert first.validated_evidence_references[0].ref_id == str(scope["artifact_id"])
+    async def load():
+        store = PostgresStore(postgres_database)
+        await store.open()
+        try:
+            one = await get_claim_record(
+                store,
+                claim_id=body.calibration_result.claim_id,
+                owner_id=scope["owner_id"],
+                conversation_id=str(scope["conversation_id"]),
+            )
+            listed = await list_claim_records(
+                store,
+                owner_id=scope["owner_id"],
+                conversation_id=str(scope["conversation_id"]),
+                assistant_message_id=None,
+                request_id=None,
+                limit=20,
+            )
+            return one, listed
+        finally:
+            await store.close()
+
+    one, listed = asyncio.run(load())
+    assert one.acquisition_manifest_id == manifest_id
+    assert listed[0].acquisition_manifest_id == manifest_id
+    serialized = one.model_dump_json()
+    assert manifest_id in serialized
+    for excluded in (
+        "sources_considered",
+        "sources_selected",
+        "source_references_returned",
+        "source_references_retained",
+        "attempts",
+        "reason_codes",
+        "source-a",
+        "source-b",
+    ):
+        assert excluded not in serialized
+
+    changed = body.model_copy(deep=True)
+    changed.acquisition_manifest_id = "evidence_manifest_ffffffffffffffffffffffffffffffff"
+    with pytest.raises(ClaimRecordError, match="claim_record_conflict"):
+        _run_create(postgres_database, changed)
+    omitted = body.model_copy(deep=True)
+    omitted.acquisition_manifest_id = None
+    with pytest.raises(ClaimRecordError, match="claim_record_conflict"):
+        _run_create(postgres_database, omitted)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        ("manifest_absent", "acquisition_manifest_not_in_trace"),
+        ("manifest_malformed", "acquisition_manifest_not_in_trace"),
+        ("manifest_id_absent", "acquisition_manifest_not_in_trace"),
+        ("manifest_id_mismatch", "acquisition_manifest_association_mismatch"),
+        ("assistant_message_mismatch", "acquisition_manifest_association_mismatch"),
+        ("response_digest_mismatch", "acquisition_manifest_association_mismatch"),
+        ("not_attempted", "acquisition_manifest_not_eligible"),
+        ("plan_unsupported", "acquisition_manifest_not_eligible"),
+        ("plan_not_compiled", "acquisition_manifest_not_eligible"),
+        ("top_insufficient", "acquisition_manifest_not_eligible"),
+        ("top_unknown", "acquisition_manifest_not_eligible"),
+        ("nested_insufficient", "acquisition_manifest_not_eligible"),
+        ("nested_unknown", "acquisition_manifest_not_eligible"),
+        ("status_disagreement", "acquisition_manifest_not_eligible"),
+        ("trace_owner", "request_trace_scope_mismatch"),
+        ("trace_conversation", "request_trace_scope_mismatch"),
+        ("trace_surface", "request_trace_scope_mismatch"),
+        ("trace_failed", "request_trace_not_eligible"),
+    ],
+)
+def test_manifest_association_failures_are_atomic(
+    postgres_database,
+    mutation,
+    expected,
+):
+    manifest_id = "evidence_manifest_11111111111111111111111111111111"
+    scope = _seed_request_scope(
+        postgres_database,
+        request_id=f"request-manifest-{mutation}",
+        acquisition_manifest_id=manifest_id,
+    )
+    body = _request(
+        claim_id=f"claim_manifest_{mutation}",
+        references=[
+            _reference(
+                ref_type="external_source",
+                ref_id="external-source-1",
+                owner_id=scope["owner_id"],
+                conversation_id=None,
+            )
+        ],
+        acquisition_manifest_id=manifest_id,
+        **{
+            key: scope[key]
+            for key in ("owner_id", "conversation_id", "assistant_message_id", "request_id")
+        },
+    )
+
+    with psycopg.connect(postgres_database) as conn:
+        prompt = deepcopy(
+            conn.execute(
+                "SELECT prompt_json FROM traces WHERE request_id = %s",
+                (scope["request_id"],),
+            ).fetchone()[0]
+        )
+        manifest = prompt["evidence_acquisition"]
+        if mutation == "manifest_absent":
+            prompt.pop("evidence_acquisition")
+        elif mutation == "manifest_malformed":
+            prompt["evidence_acquisition"] = []
+        elif mutation == "manifest_id_absent":
+            manifest.pop("manifest_id")
+        elif mutation == "manifest_id_mismatch":
+            manifest["manifest_id"] = "evidence_manifest_22222222222222222222222222222222"
+        elif mutation == "assistant_message_mismatch":
+            manifest["assistant_message_id"] = str(uuid4())
+        elif mutation == "response_digest_mismatch":
+            manifest["response_digest"] = "sha256:" + "0" * 64
+        elif mutation == "not_attempted":
+            manifest["attempted"] = False
+        elif mutation == "plan_unsupported":
+            manifest["plan"]["plan_status"] = "unsupported"
+        elif mutation == "plan_not_compiled":
+            manifest["plan"]["plan_status"] = "not_compiled"
+        elif mutation == "top_insufficient":
+            manifest["status"] = "insufficient"
+        elif mutation == "top_unknown":
+            manifest["status"] = "unknown"
+        elif mutation == "nested_insufficient":
+            manifest["sufficiency"]["status"] = "insufficient"
+        elif mutation == "nested_unknown":
+            manifest["sufficiency"]["status"] = "unknown"
+        elif mutation == "status_disagreement":
+            manifest["status"] = "sufficient_with_limitations"
+        elif mutation == "trace_owner":
+            conn.execute(
+                "UPDATE traces SET owner_id = 'other-owner' WHERE request_id = %s",
+                (scope["request_id"],),
+            )
+        elif mutation == "trace_conversation":
+            other_conversation = uuid4()
+            conn.execute(
+                "INSERT INTO conversations (id, owner_id, title) VALUES (%s, %s, 'other')",
+                (other_conversation, scope["owner_id"]),
+            )
+            conn.execute(
+                "UPDATE traces SET conversation_id = %s WHERE request_id = %s",
+                (other_conversation, scope["request_id"]),
+            )
+        elif mutation == "trace_surface":
+            conn.execute(
+                "UPDATE traces SET surface = 'other' WHERE request_id = %s",
+                (scope["request_id"],),
+            )
+        elif mutation == "trace_failed":
+            conn.execute(
+                "UPDATE traces SET status = 'failed' WHERE request_id = %s",
+                (scope["request_id"],),
+            )
+        if mutation not in {
+            "trace_owner",
+            "trace_conversation",
+            "trace_surface",
+            "trace_failed",
+        }:
+            conn.execute(
+                "UPDATE traces SET prompt_json = %s::jsonb WHERE request_id = %s",
+                (psycopg.types.json.Json(prompt), scope["request_id"]),
+            )
+        conn.commit()
+
+    with pytest.raises(ClaimRecordError, match=expected):
+        _run_create(postgres_database, body)
+    with psycopg.connect(postgres_database) as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM claim_records WHERE claim_id = %s",
+            (body.calibration_result.claim_id,),
+        ).fetchone()[0] == 0
 
 
 @pytest.mark.parametrize(

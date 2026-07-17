@@ -197,6 +197,9 @@ _CLAIM_RECORD_ERROR_STATUS = {
     "evidence_reference_not_found": 404,
     "evidence_reference_scope_mismatch": 422,
     "claim_anchor_digest_mismatch": 422,
+    "acquisition_manifest_not_in_trace": 422,
+    "acquisition_manifest_association_mismatch": 422,
+    "acquisition_manifest_not_eligible": 422,
 }
 
 

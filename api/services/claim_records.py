@@ -101,6 +101,7 @@ def _canonical_record(body: ClaimRecordCreateRequest) -> dict[str, Any]:
         "surface": body.surface,
         "runtime_session_id": body.runtime_session_id,
         "runtime_turn_id": body.runtime_turn_id,
+        "acquisition_manifest_id": body.acquisition_manifest_id,
         "claim_anchor": result.claim_anchor,
         "claim_anchor_digest": result.claim_anchor_digest,
         "claim_class": result.claim_class,
@@ -169,6 +170,47 @@ def validate_claim_record_association(
         raise ClaimRecordError("request_trace_scope_mismatch")
     if trace.get("status") not in {"ok", "degraded"}:
         raise ClaimRecordError("request_trace_not_eligible")
+
+    acquisition_manifest_id = record.get("acquisition_manifest_id")
+    if acquisition_manifest_id is not None:
+        prompt = trace.get("prompt")
+        if not isinstance(prompt, dict):
+            raise ClaimRecordError("acquisition_manifest_not_in_trace")
+        manifest = prompt.get("evidence_acquisition")
+        if not isinstance(manifest, dict):
+            raise ClaimRecordError("acquisition_manifest_not_in_trace")
+        retained_manifest_id = manifest.get("manifest_id")
+        if not isinstance(retained_manifest_id, str) or not retained_manifest_id:
+            raise ClaimRecordError("acquisition_manifest_not_in_trace")
+        if retained_manifest_id != acquisition_manifest_id:
+            raise ClaimRecordError("acquisition_manifest_association_mismatch")
+        if (
+            manifest.get("assistant_message_id") != record["assistant_message_id"]
+            or manifest.get("response_digest") != record["claim_anchor_digest"]
+        ):
+            raise ClaimRecordError("acquisition_manifest_association_mismatch")
+
+        accepted_statuses = {
+            "sufficient_for_declared_scope",
+            "sufficient_with_limitations",
+        }
+        plan = manifest.get("plan")
+        sufficiency = manifest.get("sufficiency")
+        top_level_status = manifest.get("status")
+        nested_status = (
+            sufficiency.get("status")
+            if isinstance(sufficiency, dict)
+            else None
+        )
+        if (
+            manifest.get("attempted") is not True
+            or not isinstance(plan, dict)
+            or plan.get("plan_status") not in {"ready", "ready_with_limitations"}
+            or top_level_status not in accepted_statuses
+            or nested_status not in accepted_statuses
+            or top_level_status != nested_status
+        ):
+            raise ClaimRecordError("acquisition_manifest_not_eligible")
 
     traced_identities = {
         identity

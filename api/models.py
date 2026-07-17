@@ -3,7 +3,14 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 
 Role = Literal["user", "assistant", "system", "tool"]
@@ -1587,6 +1594,7 @@ class ClaimRecordCreateRequest(BaseModel):
     surface: Annotated[str, Field(min_length=1, max_length=64)]
     runtime_session_id: ClaimRecordIdentifier
     runtime_turn_id: ClaimRecordIdentifier
+    acquisition_manifest_id: ClaimRecordIdentifier | None = None
     calibration_result: ClaimRecordCalibrationResult
 
     @model_validator(mode="after")
@@ -1614,6 +1622,7 @@ class ClaimRecord(BaseModel):
     surface: Annotated[str, Field(min_length=1, max_length=64)]
     runtime_session_id: ClaimRecordIdentifier
     runtime_turn_id: ClaimRecordIdentifier
+    acquisition_manifest_id: ClaimRecordIdentifier | None = None
     claim_anchor: Annotated[str, Field(min_length=1, max_length=500)]
     claim_anchor_digest: Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
     claim_class: ClaimClass
@@ -1627,6 +1636,13 @@ class ClaimRecord(BaseModel):
     limitation_codes: List[ClaimLimitationCode] = Field(max_length=10)
     user_safe_summary: Annotated[str, Field(min_length=1, max_length=500)]
     created_at: str
+
+    @model_serializer(mode="wrap")
+    def omit_absent_acquisition_manifest(self, serializer):
+        serialized = serializer(self)
+        if self.acquisition_manifest_id is None:
+            serialized.pop("acquisition_manifest_id", None)
+        return serialized
 
 
 class ClaimRecordCreateResponse(BaseModel):

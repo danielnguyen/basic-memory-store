@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 import os
 from pathlib import Path
 import shutil
@@ -20,6 +21,9 @@ from tools import schema_migrations
 ROOT = Path(__file__).resolve().parents[2]
 API_DIR = ROOT / "api"
 SOURCE_DB_DIR = ROOT / "db"
+PRE_MANIFEST_BASELINE_CHECKSUM = (
+    "2708ee8985b1f4bdd8d67b9eaeca99b9051e11bc4c8ca15de1069d1ec6c59ca0"
+)
 RECENT_LEGACY_MIGRATIONS = [
     SOURCE_DB_DIR / "migrations" / "legacy" / "20260531_cluster9a_r20_memory_items_additive.sql",
     SOURCE_DB_DIR / "migrations" / "legacy" / "20260601_cluster9b_r21_episodes_additive.sql",
@@ -471,6 +475,18 @@ def test_rerunning_upgrade_is_a_no_op(pg_database: str, temp_db_dir: Path) -> No
     assert second["baseline_installed"] is False
     assert second["applied_migrations"] == []
     assert ledger_rows(pg_database) == [("schema_baseline_20260620", "baseline")]
+    with psycopg.connect(pg_database) as conn:
+        recorded_checksum = conn.execute(
+            """
+            SELECT checksum_sha256
+            FROM schema_migrations
+            WHERE version = %s AND kind = 'baseline'
+            """,
+            (schema_migrations.BASELINE_VERSION,),
+        ).fetchone()[0]
+    assert recorded_checksum == schema_migrations.compute_sha256(
+        temp_db_dir / "baseline.sql"
+    )
 
 
 def test_check_passes_on_current_schema(pg_database: str, temp_db_dir: Path) -> None:
@@ -702,6 +718,34 @@ def test_managed_migration_applies_once_and_commits_with_ledger(pg_database: str
     assert second["applied_migrations"] == []
 
 
+def test_pre_acquisition_manifest_baseline_checksum_is_explicitly_compatible() -> None:
+    current_baseline = (SOURCE_DB_DIR / "baseline.sql").read_text(encoding="utf-8")
+    manifest_constraint = """  CONSTRAINT claim_records_acquisition_manifest_id_check CHECK (
+    acquisition_manifest_id IS NULL
+    OR (
+      char_length(acquisition_manifest_id) BETWEEN 1 AND 120
+      AND acquisition_manifest_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
+    )
+  ),
+"""
+    prior_baseline = current_baseline.replace(
+        "  acquisition_manifest_id TEXT,\n",
+        "",
+    ).replace(manifest_constraint, "")
+
+    assert (
+        sha256(prior_baseline.encode()).hexdigest()
+        == PRE_MANIFEST_BASELINE_CHECKSUM
+    )
+    assert (
+        PRE_MANIFEST_BASELINE_CHECKSUM
+        in schema_migrations.COMPATIBLE_BASELINE_CHECKSUMS
+    )
+    assert schema_migrations.compute_sha256(
+        SOURCE_DB_DIR / "baseline.sql"
+    ) not in schema_migrations.COMPATIBLE_BASELINE_CHECKSUMS
+
+
 def test_prior_enrolled_baseline_advances_through_claim_record_migration(
     pg_database: str,
     temp_db_dir: Path,
@@ -768,6 +812,113 @@ def test_prior_enrolled_baseline_advances_through_claim_record_migration(
         ).fetchone() == ("preserved",)
 
 
+def test_pre_acquisition_manifest_baseline_advances_through_manifest_migration(
+    pg_database: str,
+    temp_db_dir: Path,
+) -> None:
+    current_baseline = (SOURCE_DB_DIR / "baseline.sql").read_text(encoding="utf-8")
+    manifest_constraint = """  CONSTRAINT claim_records_acquisition_manifest_id_check CHECK (
+    acquisition_manifest_id IS NULL
+    OR (
+      char_length(acquisition_manifest_id) BETWEEN 1 AND 120
+      AND acquisition_manifest_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
+    )
+  ),
+"""
+    prior_baseline = current_baseline.replace(
+        "  acquisition_manifest_id TEXT,\n",
+        "",
+    ).replace(manifest_constraint, "")
+    prior_path = temp_db_dir / "pre_manifest_baseline.sql"
+    prior_path.write_text(prior_baseline, encoding="utf-8")
+    assert schema_migrations.compute_sha256(prior_path) == PRE_MANIFEST_BASELINE_CHECKSUM
+    execute_sql(pg_database, prior_baseline)
+
+    conversation_id = uuid4()
+    assistant_message_id = uuid4()
+    with psycopg.connect(pg_database) as conn:
+        schema_migrations.create_ledger_table(conn)
+        conn.execute(
+            """
+            INSERT INTO schema_migrations (version, kind, checksum_sha256, execution_ms)
+            VALUES (%s, 'baseline', %s, 1)
+            """,
+            (schema_migrations.BASELINE_VERSION, PRE_MANIFEST_BASELINE_CHECKSUM),
+        )
+        conn.execute(
+            "INSERT INTO conversations (id, owner_id, title) VALUES (%s, 'owner-upgrade', 'upgrade')",
+            (conversation_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO messages (id, conversation_id, owner_id, role, content)
+            VALUES (%s, %s, 'owner-upgrade', 'assistant', 'preserved answer')
+            """,
+            (assistant_message_id, conversation_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO claim_records (
+              claim_id, schema_version, owner_id, conversation_id, request_id,
+              assistant_message_id, surface, runtime_session_id, runtime_turn_id,
+              claim_anchor, claim_anchor_digest, claim_class, calibration_status,
+              evidence_strength, confidence, strongest_authority, freshness_summary,
+              uncertainty_disclosure_required, evidence_references_json,
+              limitation_codes_json, user_safe_summary
+            ) VALUES (
+              'claim_pre_manifest', 'claim-record.v1', 'owner-upgrade', %s,
+              'request-upgrade', %s, 'desktop_private', 'session-upgrade',
+              'turn-upgrade', 'Preserved claim.',
+              'sha256:3ff51e4385a10a03ba96350c94ff1a6f3173ec5f594cec9c0151b940f97f81a6',
+              'source_backed_fact', 'supported', 'moderate', 'medium',
+              'trusted_integration', 'current', false, '[]'::jsonb,
+              '[]'::jsonb, 'Preserved bounded summary.'
+            )
+            """,
+            (conversation_id, assistant_message_id),
+        )
+        conn.commit()
+
+    migration = (
+        SOURCE_DB_DIR
+        / "migrations"
+        / "managed"
+        / "20260717120000_claim_acquisition_manifest.sql"
+    )
+    shutil.copy2(migration, temp_db_dir / "migrations" / "managed" / migration.name)
+
+    before = run_cli_ok("status", dsn=pg_database, db_dir=temp_db_dir)
+    upgraded = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
+    repeated = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
+    status = run_cli_ok("status", dsn=pg_database, db_dir=temp_db_dir)
+    checked = run_cli_ok("check", dsn=pg_database, db_dir=temp_db_dir)
+
+    assert before["baseline_checksum_status"] == "compatible_prior"
+    assert before["pending_migrations"] == [migration.name]
+    assert upgraded["applied_migrations"] == [migration.name]
+    assert repeated["applied_migrations"] == []
+    assert status["state"] == "current"
+    assert checked["state"] == "current"
+    with psycopg.connect(pg_database) as conn:
+        preserved = conn.execute(
+            """
+            SELECT claim_id, acquisition_manifest_id
+            FROM claim_records
+            WHERE claim_id = 'claim_pre_manifest'
+            """
+        ).fetchone()
+    assert preserved == ("claim_pre_manifest", None)
+    with psycopg.connect(pg_database) as conn:
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute(
+                """
+                UPDATE claim_records
+                SET acquisition_manifest_id = 'unsafe manifest value'
+                WHERE claim_id = 'claim_pre_manifest'
+                """
+            )
+
+
 def test_clean_baseline_contains_claim_record_constraints_and_indexes(
     pg_database: str,
     temp_db_dir: Path,
@@ -809,7 +960,7 @@ def test_clean_baseline_contains_claim_record_constraints_and_indexes(
         "idx_claim_records_assistant_message",
         "idx_claim_records_owner_request",
     } <= indexes
-    assert checks >= 12
+    assert checks >= 13
     assert set(foreign_keys) == {("conversations", "c"), ("messages", "c")}
 
 
