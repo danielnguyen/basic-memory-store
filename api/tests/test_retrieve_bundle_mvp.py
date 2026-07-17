@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 import types
 import uuid
 
@@ -347,10 +348,13 @@ async def test_retrieve_bundle_shape(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_retrieve_bundle_recent_mode_with_30d_window(monkeypatch):
+    now = datetime.now(UTC)
+    inside_window = (now - timedelta(days=7)).isoformat()
+    outside_window = (now - timedelta(days=60)).isoformat()
     fake_pg = FakePG(
         message_times=[
-            "2026-06-10T00:00:00+00:00",
-            "2025-10-01T00:00:00+00:00",
+            inside_window,
+            outside_window,
         ]
     )
     fake_qdrant = FakeQdrant(message_scores=[0.77, 0.74])

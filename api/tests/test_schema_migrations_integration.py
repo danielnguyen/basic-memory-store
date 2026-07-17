@@ -1303,6 +1303,7 @@ def test_derivation_version_cleanup_migrates_only_exact_legacy_values_and_defaul
         cleanup_migration.name,
         "20260701120000_artifact_policy_metadata.sql",
         "20260714230000_claim_records.sql",
+        "20260717120000_claim_acquisition_manifest.sql",
     ]
     assert repeated["applied_migrations"] == []
     assert column_default(pg_database, "memory_items", "derivation_version") == f"'{MEMORY_ITEM_DERIVATION_VERSION}'::text"
