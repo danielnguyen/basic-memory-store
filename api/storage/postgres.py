@@ -15,7 +15,7 @@ from services.memory_lifecycle import bounded_transition_reason
 _CLAIM_RECORD_COLUMNS = """
     claim_id, schema_version, owner_id, conversation_id, request_id,
     assistant_message_id, surface, runtime_session_id, runtime_turn_id,
-    claim_anchor, claim_anchor_digest, claim_class, calibration_status,
+    acquisition_manifest_id, claim_anchor, claim_anchor_digest, claim_class, calibration_status,
     evidence_strength, confidence, strongest_authority, freshness_summary,
     uncertainty_disclosure_required, evidence_references_json,
     limitation_codes_json, user_safe_summary, created_at
@@ -33,19 +33,20 @@ def _claim_record_from_row(row: tuple[Any, ...]) -> dict[str, Any]:
         "surface": row[6],
         "runtime_session_id": row[7],
         "runtime_turn_id": row[8],
-        "claim_anchor": row[9],
-        "claim_anchor_digest": row[10],
-        "claim_class": row[11],
-        "calibration_status": row[12],
-        "evidence_strength": row[13],
-        "confidence": row[14],
-        "strongest_authority": row[15],
-        "freshness_summary": row[16],
-        "uncertainty_disclosure_required": row[17],
-        "validated_evidence_references": row[18] or [],
-        "limitation_codes": row[19] or [],
-        "user_safe_summary": row[20],
-        "created_at": str(row[21]),
+        "acquisition_manifest_id": row[9],
+        "claim_anchor": row[10],
+        "claim_anchor_digest": row[11],
+        "claim_class": row[12],
+        "calibration_status": row[13],
+        "evidence_strength": row[14],
+        "confidence": row[15],
+        "strongest_authority": row[16],
+        "freshness_summary": row[17],
+        "uncertainty_disclosure_required": row[18],
+        "validated_evidence_references": row[19] or [],
+        "limitation_codes": row[20] or [],
+        "user_safe_summary": row[21],
+        "created_at": str(row[22]),
     }
 
 
@@ -4123,7 +4124,8 @@ class PostgresStore:
 
                     await cur.execute(
                         """
-                        SELECT owner_id, conversation_id, surface, status, references_json
+                        SELECT owner_id, conversation_id, surface, status,
+                               references_json, prompt_json
                         FROM traces
                         WHERE request_id = %s
                         LIMIT 1;
@@ -4210,6 +4212,7 @@ class PostgresStore:
                                     "surface": trace[2],
                                     "status": trace[3],
                                     "references": trace[4] if isinstance(trace[4], list) else [],
+                                    "prompt": trace[5],
                                 }
                                 if trace is not None
                                 else None
@@ -4225,13 +4228,14 @@ class PostgresStore:
                         INSERT INTO claim_records (
                             claim_id, schema_version, owner_id, conversation_id, request_id,
                             assistant_message_id, surface, runtime_session_id, runtime_turn_id,
+                            acquisition_manifest_id,
                             claim_anchor, claim_anchor_digest, claim_class, calibration_status,
                             evidence_strength, confidence, strongest_authority, freshness_summary,
                             uncertainty_disclosure_required, evidence_references_json,
                             limitation_codes_json, user_safe_summary
                         ) VALUES (
                             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                         )
                         RETURNING
                         """
@@ -4246,6 +4250,7 @@ class PostgresStore:
                             record["surface"],
                             record["runtime_session_id"],
                             record["runtime_turn_id"],
+                            record["acquisition_manifest_id"],
                             record["claim_anchor"],
                             record["claim_anchor_digest"],
                             record["claim_class"],

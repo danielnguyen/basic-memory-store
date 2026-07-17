@@ -11,6 +11,32 @@ import pytest
 import main as main_module
 
 
+LEGACY_CLAIM_RECORD_KEYS = {
+    "claim_id",
+    "schema_version",
+    "owner_id",
+    "conversation_id",
+    "request_id",
+    "assistant_message_id",
+    "surface",
+    "runtime_session_id",
+    "runtime_turn_id",
+    "claim_anchor",
+    "claim_anchor_digest",
+    "claim_class",
+    "calibration_status",
+    "evidence_strength",
+    "confidence",
+    "strongest_authority",
+    "freshness_summary",
+    "uncertainty_disclosure_required",
+    "validated_evidence_references",
+    "limitation_codes",
+    "user_safe_summary",
+    "created_at",
+}
+
+
 class FakeQdrant:
     def ping(self):
         return True
@@ -165,7 +191,59 @@ def test_create_claim_record_is_strict_and_preserves_calibration(client_and_stor
     assert response.json()["created"] is True
     assert response.json()["record"]["claim_class"] == "manufacturer_guidance"
     assert response.json()["record"]["confidence"] == "medium"
+    assert set(response.json()["record"]) == LEGACY_CLAIM_RECORD_KEYS
+    assert store.create_calls[0]["acquisition_manifest_id"] is None
     assert store.create_calls[0]["user_safe_summary"] == body["calibration_result"]["user_safe_summary"]
+
+
+def test_optional_acquisition_manifest_id_round_trips(client_and_store):
+    client, store = client_and_store
+    body = _body()
+    body["acquisition_manifest_id"] = "evidence_manifest_0123456789abcdef0123456789abcdef"
+
+    created = _create(client, body)
+    one = client.get(
+        f"/v1/internal/claim-records/{body['calibration_result']['claim_id']}",
+        params={"owner_id": body["owner_id"], "conversation_id": body["conversation_id"]},
+        headers={"X-API-Key": "testkey"},
+    )
+    listed = client.get(
+        "/v1/internal/claim-records",
+        params={"owner_id": body["owner_id"], "conversation_id": body["conversation_id"]},
+        headers={"X-API-Key": "testkey"},
+    )
+
+    assert created.status_code == 200
+    assert one.status_code == 200
+    assert listed.status_code == 200
+    assert created.json()["record"]["acquisition_manifest_id"] == body["acquisition_manifest_id"]
+    assert one.json()["acquisition_manifest_id"] == body["acquisition_manifest_id"]
+    assert listed.json()["records"][0]["acquisition_manifest_id"] == body["acquisition_manifest_id"]
+    assert store.create_calls[0]["acquisition_manifest_id"] == body["acquisition_manifest_id"]
+
+
+@pytest.mark.parametrize(
+    "manifest_id",
+    [
+        "",
+        "evidence manifest",
+        "https://manifest.invalid",
+        "manifest?secret=value",
+        "x" * 121,
+    ],
+)
+def test_acquisition_manifest_id_is_strictly_bounded(
+    client_and_store,
+    manifest_id,
+):
+    client, store = client_and_store
+    body = _body()
+    body["acquisition_manifest_id"] = manifest_id
+
+    response = _create(client, body)
+
+    assert response.status_code == 422
+    assert store.create_calls == []
 
 
 @pytest.mark.parametrize(
@@ -279,6 +357,9 @@ def test_create_rejects_unbounded_anchor_identifiers_and_reference_count(client_
         ("request_trace_scope_mismatch", 422),
         ("evidence_reference_not_in_trace", 422),
         ("evidence_reference_not_found", 404),
+        ("acquisition_manifest_not_in_trace", 422),
+        ("acquisition_manifest_association_mismatch", 422),
+        ("acquisition_manifest_not_eligible", 422),
         ("claim_record_conflict", 409),
     ],
 )
@@ -310,6 +391,8 @@ def test_read_and_list_return_only_bounded_claim_record(client_and_store):
 
     assert one.status_code == 200
     assert listed.status_code == 200
+    assert set(one.json()) == LEGACY_CLAIM_RECORD_KEYS
+    assert set(listed.json()["records"][0]) == LEGACY_CLAIM_RECORD_KEYS
     encoded = str({"one": one.json(), "listed": listed.json()})
     for private_key in (
         "content",

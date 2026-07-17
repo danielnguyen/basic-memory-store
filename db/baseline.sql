@@ -161,6 +161,7 @@ CREATE TABLE IF NOT EXISTS claim_records (
     char_length(runtime_turn_id) BETWEEN 1 AND 120
     AND runtime_turn_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
   ),
+  acquisition_manifest_id TEXT,
   claim_anchor TEXT NOT NULL CHECK (char_length(claim_anchor) BETWEEN 1 AND 500),
   claim_anchor_digest TEXT NOT NULL
     CHECK (claim_anchor_digest ~ '^sha256:[0-9a-f]{64}$'),
@@ -206,6 +207,13 @@ CREATE TABLE IF NOT EXISTS claim_records (
   ),
   user_safe_summary TEXT NOT NULL CHECK (char_length(user_safe_summary) BETWEEN 1 AND 500),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT claim_records_acquisition_manifest_id_check CHECK (
+    acquisition_manifest_id IS NULL
+    OR (
+      char_length(acquisition_manifest_id) BETWEEN 1 AND 120
+      AND acquisition_manifest_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
+    )
+  ),
   CHECK (
     char_length(claim_id) BETWEEN 1 AND 120
     AND claim_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
