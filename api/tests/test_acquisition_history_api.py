@@ -698,8 +698,105 @@ def test_private_nested_manifest_keys_fail_closed(monkeypatch, private_key):
         _request(conversation_id=conversation_id, content=content),
     )
     assert response.status_code == 200
+    assert response.json()["resolution_status"] == "invalid"
     assert response.json()["reason_code"] == "manifest_privacy_boundary_invalid"
+    assert response.json()["record"] is None
     assert "PRIVATE SENTINEL" not in response.text
+
+
+@pytest.mark.parametrize(
+    "private_key",
+    [
+        "api_key",
+        "apiKey",
+        "APIKey",
+        "api-key",
+        "API Key",
+        "apikey",
+        "access_token",
+        "accessToken",
+        "Access Token",
+        "refresh-token",
+        "RefreshToken",
+        "auth_token",
+        "authorization",
+        "Authorization",
+        "authorization_header",
+        "AuthorizationHeader",
+        "bearer_token",
+        "Bearer Token",
+        "password",
+        "passwd",
+        "passphrase",
+        "client_secret",
+        "clientSecret",
+        "Client Secret",
+        "private_key",
+        "privateKey",
+        "signing_key",
+        "session_token",
+        "session_cookie",
+        "set_cookie",
+    ],
+)
+@pytest.mark.parametrize(
+    "location",
+    ["acquisition", "next_steps", "nested_acquisition"],
+)
+def test_credential_aliases_fail_closed_at_every_manifest_depth(
+    monkeypatch,
+    private_key,
+    location,
+):
+    conversation_id = str(uuid4())
+    content = "The report supports the migration."
+    candidate = _candidate(conversation_id=conversation_id, content=content)
+    manifest = candidate["trace_prompt"]["evidence_acquisition"]
+    if location == "nested_acquisition":
+        manifest["acquisition"]["bounded_metadata"] = {
+            private_key: "PRIVATE SECRET SENTINEL"
+        }
+    else:
+        manifest[location][private_key] = "PRIVATE SECRET SENTINEL"
+
+    response, _ = _post(
+        monkeypatch,
+        [candidate],
+        _request(conversation_id=conversation_id, content=content),
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["resolution_status"] == "invalid"
+    assert result["reason_code"] == "manifest_privacy_boundary_invalid"
+    assert result["record"] is None
+    assert "PRIVATE SECRET SENTINEL" not in response.text
+
+
+def test_post_next_step_manifest_structural_keys_remain_valid(monkeypatch):
+    conversation_id = str(uuid4())
+    content = "The report supports the migration."
+    candidate = _candidate(conversation_id=conversation_id, content=content)
+    manifest = candidate["trace_prompt"]["evidence_acquisition"]
+    selection = manifest["next_steps"]["selections"][0]
+    selection.update(
+        {
+            "evaluation_id": "evidence_eval_fixture",
+            "evidence_plan_id": "evidence_plan_fixture",
+            "acquisition_manifest_id": "evidence_manifest_fixture",
+        }
+    )
+
+    response, _ = _post(
+        monkeypatch,
+        [candidate],
+        _request(conversation_id=conversation_id, content=content),
+    )
+
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["resolution_status"] == "resolved"
+    assert result["record"]["acquisition_manifest"] == manifest
 
 
 @pytest.mark.parametrize("unbounded", ["oversized", "deep", "extra_top_level"])

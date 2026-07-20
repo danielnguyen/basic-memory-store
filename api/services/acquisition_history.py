@@ -74,6 +74,38 @@ _PRIVATE_KEY_PARTS = {
     "url",
     "urls",
 }
+_PRIVATE_COMPACT_KEYS = {
+    "accesstoken",
+    "apikey",
+    "authorization",
+    "authorizationheader",
+    "authtoken",
+    "bearertoken",
+    "clientsecret",
+    "passphrase",
+    "passwd",
+    "password",
+    "privatekey",
+    "refreshtoken",
+    "sessioncookie",
+    "sessiontoken",
+    "setcookie",
+    "signingkey",
+}
+_ALLOWED_STRUCTURAL_KEYS = {
+    "acquisition_manifest_id",
+    "candidate_count",
+    "context_delivery_status",
+    "dsa_error_codes",
+    "evaluation_id",
+    "evidence_plan_id",
+    "item_count",
+    "next_steps",
+    "prompt_retained_item_count",
+    "reason_codes",
+    "selected_next_step",
+    "selection_id",
+}
 _MAX_MANIFEST_BYTES = 65_536
 _MAX_MANIFEST_DEPTH = 8
 _MAX_COLLECTION_LENGTH = 64
@@ -100,9 +132,20 @@ def _bounded_identifier(value: Any) -> str | None:
     return value
 
 
+def _compact_key(value: str) -> str:
+    return "".join(
+        character for character in value.casefold() if character.isalnum()
+    )
+
+
 def _manifest_key_is_private(key: str) -> bool:
     normalized = key.casefold()
-    if normalized in _PRIVATE_KEYS:
+    if normalized in _ALLOWED_STRUCTURAL_KEYS:
+        return False
+    if (
+        normalized in _PRIVATE_KEYS
+        or _compact_key(key) in _PRIVATE_COMPACT_KEYS
+    ):
         return True
     return bool(
         _PRIVATE_KEY_PARTS
