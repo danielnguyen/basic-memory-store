@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import types
 from uuid import uuid4
 
@@ -270,3 +271,374 @@ def test_working_message_queries_are_owner_qualified_before_limit_with_postgresq
     assert [item["message_id"] for item in mandatory] == [str(owner_message_id)]
     assert mandatory[0]["policy_metadata"] == policy
     assert [item["message_id"] for item in legacy] == [str(owner_message_id)]
+
+
+def _acquisition_history_manifest(message_id: str, content: str) -> dict:
+    response_digest = "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
+    return {
+        "enabled": True,
+        "attempted": True,
+        "status": "insufficient",
+        "manifest_id": "evidence_manifest_postgres",
+        "assistant_message_id": message_id,
+        "response_digest": response_digest,
+        "shape": {
+            "derivation_status": "derived",
+            "task_shape": "targeted_lookup",
+            "candidate_count": 1,
+            "clarification_required": False,
+            "reason_codes": ["shape_derived"],
+        },
+        "inventory": {
+            "inventory_status": "complete_for_declared_scope",
+            "inventory_source_count": 1,
+        },
+        "plan": {
+            "plan_id": "evidence_plan_postgres",
+            "plan_status": "ready",
+            "completeness_expectation": "targeted_scope",
+            "contradiction_search_required": False,
+            "selected_strategies": ["targeted_retrieval"],
+            "material_requirement_count": 2,
+            "optional_requirement_count": 0,
+            "limitation_codes": [],
+        },
+        "acquisition": {
+            "strategy_attempted": "targeted_retrieval",
+            "sources_considered": [],
+            "sources_considered_count": 1,
+            "sources_selected": [],
+            "sources_selected_count": 1,
+            "sources_used": [],
+            "sources_used_count": 1,
+            "source_references_retained": [],
+            "source_references_retained_count": 0,
+            "source_identifiers_suppressed": True,
+            "item_count": 1,
+            "prompt_retained_item_count": 0,
+            "dsa_outcome": "ok",
+            "dsa_error_codes": [],
+            "context_delivery_status": "filtered",
+            "requirement_facts": [],
+        },
+        "next_steps": {
+            "selection_count": 1,
+            "selections": [
+                {
+                    "selection_id": "evidence_next_step_postgres",
+                    "selected_next_step": "withhold_unsupported_conclusion",
+                    "conclusion_disposition": "requested_conclusion_withheld",
+                    "provider_disposition": "blocked",
+                    "reacquisition_guard": "not_applicable",
+                    "clarification_target": None,
+                    "reason_codes": ["unsupported_conclusion_withheld"],
+                    "additional_acquisition_executed": False,
+                }
+            ],
+            "additional_acquisition_count": 0,
+            "initial_attempt": None,
+            "dependency_status": None,
+        },
+        "sufficiency": {
+            "evaluation_id": "evidence_eval_postgres",
+            "status": "insufficient",
+            "reason_codes": ["material_requirement_not_satisfied"],
+            "answer_constraints": ["withhold_unqualified_conclusion"],
+            "qualification_required": True,
+            "additional_acquisition_required": True,
+        },
+    }
+
+
+def test_assistant_trace_candidates_use_scoped_left_join_and_newest_order(
+    postgres_database,
+):
+    async def seed_and_read():
+        store = PostgresStore(postgres_database)
+        await store.open()
+        try:
+            conversation_id = await store.create_conversation(
+                owner_id="owner-history",
+                client_id="client-history",
+                title="Acquisition history",
+            )
+            other_conversation_id = await store.create_conversation(
+                owner_id="owner-history",
+                client_id="client-history",
+                title="Other history",
+            )
+            older_id = await store.add_message(
+                conversation_id=conversation_id,
+                owner_id="owner-history",
+                role="assistant",
+                content="Older assistant response.",
+                client_id="client-history",
+                metadata={"request_id": "history-request-old"},
+            )
+            newest_id = await store.add_message(
+                conversation_id=conversation_id,
+                owner_id="owner-history",
+                role="assistant",
+                content="Newest assistant response without a trace.",
+                client_id="client-history",
+                metadata={"request_id": "history-request-new"},
+            )
+            await store.add_message(
+                conversation_id=conversation_id,
+                owner_id="owner-history",
+                role="user",
+                content="Newer user message is not a candidate.",
+                client_id="client-history",
+                metadata={"request_id": "history-request-user"},
+            )
+            await store.add_message(
+                conversation_id=conversation_id,
+                owner_id="other-owner",
+                role="assistant",
+                content="Cross-owner assistant response.",
+                client_id="client-history",
+                metadata={"request_id": "history-request-cross-owner"},
+            )
+            await store.add_message(
+                conversation_id=other_conversation_id,
+                owner_id="owner-history",
+                role="assistant",
+                content="Other-conversation assistant response.",
+                client_id="client-history",
+                metadata={"request_id": "history-request-other-conversation"},
+            )
+            await store.create_trace(
+                {
+                    "request_id": "history-request-old",
+                    "conversation_id": conversation_id,
+                    "owner_id": "owner-history",
+                    "surface": "web",
+                    "status": "ok",
+                    "prompt": {},
+                }
+            )
+            with psycopg.connect(postgres_database) as conn:
+                conn.execute(
+                    """
+                    UPDATE messages
+                    SET created_at = CASE
+                      WHEN id = %s THEN now() - interval '1 minute'
+                      WHEN id = %s THEN now()
+                      ELSE created_at
+                    END
+                    WHERE id = ANY(%s)
+                    """,
+                    (older_id, newest_id, [older_id, newest_id]),
+                )
+                conn.commit()
+            candidates = await store.list_assistant_trace_candidates(
+                owner_id="owner-history",
+                conversation_id=conversation_id,
+                limit=50,
+            )
+        finally:
+            await store.close()
+        return str(newest_id), str(older_id), candidates
+
+    newest_id, older_id, candidates = asyncio.run(seed_and_read())
+
+    assert [item["message_id"] for item in candidates] == [newest_id, older_id]
+    assert candidates[0]["trace_id"] is None
+    assert candidates[0]["trace_request_id"] is None
+    assert candidates[0]["message_request_id"] == "history-request-new"
+    assert candidates[1]["trace_request_id"] == "history-request-old"
+    assert candidates[1]["message_request_id"] == "history-request-old"
+    assert candidates[1]["trace_prompt"] == {}
+
+
+def test_assistant_trace_candidates_use_message_id_as_deterministic_tiebreaker(
+    postgres_database,
+):
+    conversation_id = uuid4()
+    first_id = uuid4()
+    second_id = uuid4()
+    with psycopg.connect(postgres_database) as conn:
+        conn.execute(
+            """
+            INSERT INTO conversations (id, owner_id, client_id, title)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (conversation_id, "owner-history-tie", "client-history", "Tie order"),
+        )
+        conn.execute(
+            """
+            INSERT INTO messages (
+                id, conversation_id, owner_id, client_id, role, content,
+                metadata, created_at
+            ) VALUES
+              (%s, %s, %s, %s, 'assistant', %s, %s::jsonb, %s),
+              (%s, %s, %s, %s, 'assistant', %s, %s::jsonb, %s)
+            """,
+            (
+                first_id,
+                conversation_id,
+                "owner-history-tie",
+                "client-history",
+                "First tie response.",
+                '{"request_id":"history-tie-first"}',
+                "2026-07-20T00:00:00+00:00",
+                second_id,
+                conversation_id,
+                "owner-history-tie",
+                "client-history",
+                "Second tie response.",
+                '{"request_id":"history-tie-second"}',
+                "2026-07-20T00:00:00+00:00",
+            ),
+        )
+        conn.commit()
+
+    async def read():
+        store = PostgresStore(postgres_database)
+        await store.open()
+        try:
+            return await store.list_assistant_trace_candidates(
+                owner_id="owner-history-tie",
+                conversation_id=conversation_id,
+                limit=50,
+            )
+        finally:
+            await store.close()
+
+    candidates = asyncio.run(read())
+    assert [item["message_id"] for item in candidates] == sorted(
+        [str(first_id), str(second_id)],
+        reverse=True,
+    )
+    assert all(item["trace_id"] is None for item in candidates)
+
+
+def test_acquisition_history_resolves_without_claim_and_performs_no_writes(
+    monkeypatch,
+    postgres_database,
+):
+    conversation_id = uuid4()
+    message_id = uuid4()
+    content = (
+        "The available evidence remains incomplete.\n\n"
+        "I’m withholding the requested conclusion."
+    )
+    manifest = _acquisition_history_manifest(str(message_id), content)
+    with psycopg.connect(postgres_database) as conn:
+        conn.execute(
+            """
+            INSERT INTO conversations (id, owner_id, client_id, title)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (conversation_id, "owner-history", "client-history", "History API"),
+        )
+        conn.execute(
+            """
+            INSERT INTO messages (
+                id, conversation_id, owner_id, client_id, role, content, metadata
+            ) VALUES (%s, %s, %s, %s, 'assistant', %s, %s::jsonb)
+            """,
+            (
+                message_id,
+                conversation_id,
+                "owner-history",
+                "client-history",
+                content,
+                '{"request_id":"history-request-api"}',
+            ),
+        )
+        conn.commit()
+
+    async def seed_trace():
+        store = PostgresStore(postgres_database)
+        await store.open()
+        try:
+            await store.create_trace(
+                {
+                    "request_id": "history-request-api",
+                    "conversation_id": conversation_id,
+                    "owner_id": "owner-history",
+                    "surface": "web",
+                    "status": "ok",
+                    "prompt": {
+                        "evidence_acquisition": manifest,
+                        "unrelated": {"safe_count": 3},
+                    },
+                    "profile": {"private": "PROFILE SENTINEL"},
+                    "retrieval": {"private": "RETRIEVAL SENTINEL"},
+                    "router_decision": {"private": "ROUTER SENTINEL"},
+                    "model_call": {"private": "MODEL SENTINEL"},
+                    "fallback": {"private": "FALLBACK SENTINEL"},
+                    "cost": {"private": "COST SENTINEL"},
+                }
+            )
+        finally:
+            await store.close()
+
+    asyncio.run(seed_trace())
+    store = PostgresStore(postgres_database)
+    monkeypatch.setattr(main_module, "settings", _settings(), raising=True)
+    monkeypatch.setattr(main_module, "pg", store, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", FakeQdrant(), raising=True)
+
+    with psycopg.connect(postgres_database) as conn:
+        before = conn.execute(
+            """
+            SELECT
+              (SELECT count(*) FROM messages),
+              (SELECT count(*) FROM traces),
+              (SELECT count(*) FROM claim_records)
+            """
+        ).fetchone()
+
+    with TestClient(main_module.app) as client:
+        response = client.post(
+            "/v1/internal/acquisition-history/resolve",
+            headers={
+                "X-API-Key": "testkey",
+                "X-Request-ID": "history-lookup-api",
+            },
+            json={
+                "schema_version": "acquisition-history-resolution.v1",
+                "request_id": "history-lookup-api",
+                "owner_id": "owner-history",
+                "conversation_id": str(conversation_id),
+                "surface": "web",
+                "target_mode": "immediate_previous",
+                "response_digest": "sha256:"
+                + hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                "normalized_first_paragraph": (
+                    "The available evidence remains incomplete."
+                ),
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["resolution_status"] == "resolved"
+    assert body["record"]["acquisition_manifest"] == manifest
+    assert body["record"]["normalized_first_paragraph"] == (
+        "The available evidence remains incomplete."
+    )
+    serialized = response.text
+    assert "I’m withholding the requested conclusion." not in serialized
+    for sentinel in (
+        "PROFILE SENTINEL",
+        "RETRIEVAL SENTINEL",
+        "ROUTER SENTINEL",
+        "MODEL SENTINEL",
+        "FALLBACK SENTINEL",
+        "COST SENTINEL",
+    ):
+        assert sentinel not in serialized
+
+    with psycopg.connect(postgres_database) as conn:
+        after = conn.execute(
+            """
+            SELECT
+              (SELECT count(*) FROM messages),
+              (SELECT count(*) FROM traces),
+              (SELECT count(*) FROM claim_records)
+            """
+        ).fetchone()
+    assert before == after

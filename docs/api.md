@@ -80,6 +80,91 @@ The service also exposes scoped internal diagnostic routes alongside memory,
 episode, derived-data, and recall operations. These routes return bounded
 diagnostics rather than raw model prompts or unrestricted dependency output.
 
+## Internal acquisition-history resolution
+
+Authenticated internal callers can resolve one retained assistant response to
+its acquisition manifest through:
+
+```text
+POST /v1/internal/acquisition-history/resolve
+```
+
+The resolver starts from assistant messages in the exact owner and conversation
+and associates a message with its request trace through the bounded
+`metadata.request_id` value already stored on the message. It does not query or
+require a claim record. It performs no retrieval, acquisition, verification,
+model call, or write.
+
+An immediate-response lookup supplies the SHA-256 digest of the exact complete
+assistant response and its normalized first paragraph:
+
+```json
+{
+  "schema_version": "acquisition-history-resolution.v1",
+  "request_id": "lookup_request_1",
+  "owner_id": "owner_123",
+  "conversation_id": "550e8400-e29b-41d4-a716-446655440000",
+  "surface": "web",
+  "target_mode": "immediate_previous",
+  "response_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "normalized_first_paragraph": "The exact first response paragraph."
+}
+```
+
+Only the newest assistant message is inspected. A mismatch, absent trace,
+absent manifest, or invalid association does not cause the resolver to scan
+backward to an older response.
+
+A quoted lookup uses `quoted_first_paragraph` and omits `response_digest`. It
+searches at most 50 recent assistant messages using exact, case-sensitive
+normalized first-paragraph equality. Zero matches return `no_record`; one match
+is association-validated; multiple exact matches return `ambiguous` rather than
+selecting the newest match.
+
+A successful response has this bounded form:
+
+```json
+{
+  "schema_version": "acquisition-history-resolution.v1",
+  "request_id": "lookup_request_1",
+  "owner_id": "owner_123",
+  "conversation_id": "550e8400-e29b-41d4-a716-446655440000",
+  "surface": "web",
+  "target_mode": "immediate_previous",
+  "resolution_status": "resolved",
+  "match_count": 1,
+  "reason_code": "immediate_response_resolved",
+  "record": {
+    "original_request_id": "original_chat_request_1",
+    "assistant_message_id": "550e8400-e29b-41d4-a716-446655440001",
+    "surface": "web",
+    "trace_status": "ok",
+    "response_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "normalized_first_paragraph": "The exact first response paragraph.",
+    "acquisition_manifest": {}
+  }
+}
+```
+
+Resolution validates the message owner, conversation, assistant role, message
+request ID, trace request and scope, trace status, attempted manifest,
+assistant-message association, exact full-response digest, and normalized first
+paragraph. The response projects only the retained
+`prompt.evidence_acquisition` manifest. It never returns the complete assistant
+response, surrounding trace, profile, retrieval, router, model, fallback, cost,
+or unrelated prompt fields.
+
+The manifest privacy boundary accepts the bounded current manifest, including
+optional `next_steps`, and remains compatible with older manifests where
+`next_steps` is absent. It rejects unexpected top-level fields, excessive size
+or nesting, unbounded collections or strings, and nested raw/private payload
+keys. It does not reconstruct identifiers removed by privacy suppression.
+Targeted, exact-fetch, hybrid, bounded-exhaustive, limited, insufficient,
+unknown, deterministic provider-free, and other no-claim responses can resolve
+when their stored association is valid. Resolution describes retained history;
+Chat Orchestrator remains responsible for user-facing wording and for labeling
+any later acquisition as new verification.
+
 ## Internal claim records
 
 Authenticated internal callers can persist and retrieve bounded claim-calibration
@@ -116,8 +201,9 @@ references remain only the evidence actually used to support this specific
 claim. Basic Memory Store does not infer that every considered, returned, or
 prompt-delivered acquisition item supports the claim, and it does not copy
 manifest contents into the claim record. This contract adds no manifest
-retrieval endpoint or public response field. Claim support remains a strict
-subset of acquired evidence.
+payload to claim-record responses or public response field. The separate
+internal acquisition-history resolver does not change claim support, which
+remains a strict subset of acquired evidence.
 
 The list endpoint can be filtered by `assistant_message_id` or `request_id` and
 returns records in deterministic assistant-response order for later orchestration.

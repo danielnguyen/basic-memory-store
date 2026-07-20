@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional
+from uuid import UUID
 
 from pydantic import (
     BaseModel,
@@ -1709,6 +1710,114 @@ class TraceResponse(BaseModel):
     status: str
     error: Optional[str] = None
     created_at: str
+
+
+# ---- Acquisition history resolution ----
+
+AcquisitionHistoryIdentifier = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=120,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    ),
+]
+AcquisitionHistoryDigest = Annotated[
+    str,
+    Field(pattern=r"^sha256:[0-9a-f]{64}$", min_length=71, max_length=71),
+]
+AcquisitionHistoryTargetMode = Literal[
+    "immediate_previous",
+    "quoted_first_paragraph",
+]
+AcquisitionHistoryResolutionStatus = Literal[
+    "resolved",
+    "no_record",
+    "ambiguous",
+    "invalid",
+]
+AcquisitionHistoryReasonCode = Literal[
+    "immediate_response_resolved",
+    "immediate_response_mismatch",
+    "immediate_response_trace_absent",
+    "immediate_response_manifest_absent",
+    "quoted_response_resolved",
+    "quoted_response_not_found",
+    "quoted_response_ambiguous",
+    "quoted_response_trace_absent",
+    "quoted_response_manifest_absent",
+    "trace_scope_mismatch",
+    "assistant_message_request_mismatch",
+    "manifest_association_invalid",
+    "manifest_privacy_boundary_invalid",
+]
+
+
+class AcquisitionHistoryResolveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["acquisition-history-resolution.v1"]
+    request_id: AcquisitionHistoryIdentifier
+    owner_id: AcquisitionHistoryIdentifier
+    conversation_id: UUID
+    surface: Annotated[str, Field(min_length=1, max_length=64)]
+    target_mode: AcquisitionHistoryTargetMode
+    response_digest: AcquisitionHistoryDigest | None = None
+    normalized_first_paragraph: Annotated[str, Field(min_length=1, max_length=500)]
+
+    @field_validator("normalized_first_paragraph", mode="before")
+    @classmethod
+    def normalize_first_paragraph(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        return " ".join(value.split())
+
+    @model_validator(mode="after")
+    def validate_target_fields(self):
+        if self.target_mode == "immediate_previous":
+            if self.response_digest is None:
+                raise ValueError("immediate_response_digest_required")
+        elif self.response_digest is not None:
+            raise ValueError("quoted_response_digest_not_allowed")
+        return self
+
+
+class AcquisitionHistoryRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    original_request_id: AcquisitionHistoryIdentifier
+    assistant_message_id: AcquisitionHistoryIdentifier
+    surface: Annotated[str, Field(min_length=1, max_length=64)]
+    trace_status: Literal["ok", "degraded"]
+    response_digest: AcquisitionHistoryDigest
+    normalized_first_paragraph: Annotated[str, Field(min_length=1, max_length=500)]
+    acquisition_manifest: Dict[str, Any]
+
+
+class AcquisitionHistoryResolveResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["acquisition-history-resolution.v1"]
+    request_id: AcquisitionHistoryIdentifier
+    owner_id: AcquisitionHistoryIdentifier
+    conversation_id: UUID
+    surface: Annotated[str, Field(min_length=1, max_length=64)]
+    target_mode: AcquisitionHistoryTargetMode
+    resolution_status: AcquisitionHistoryResolutionStatus
+    match_count: Annotated[int, Field(ge=0, le=50)]
+    reason_code: AcquisitionHistoryReasonCode
+    record: AcquisitionHistoryRecord | None = None
+
+    @model_validator(mode="after")
+    def validate_resolution_shape(self):
+        if self.resolution_status == "resolved":
+            if self.record is None or self.match_count != 1:
+                raise ValueError("resolved_record_required")
+        elif self.record is not None:
+            raise ValueError("unresolved_record_not_allowed")
+        if self.resolution_status == "ambiguous" and self.match_count < 2:
+            raise ValueError("ambiguous_match_count_invalid")
+        return self
 
 
 # ---- Chat ----
