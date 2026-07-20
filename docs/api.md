@@ -99,9 +99,16 @@ but Basic Memory Store does not claim to dereference or independently verify the
 The optional `acquisition_manifest_id` links a claim to the bounded acquisition
 process retained under `prompt.evidence_acquisition` in the same request trace.
 When supplied, Basic Memory Store verifies the exact request trace, assistant
-message, response digest, attempted acquisition, ready plan, and matching
-sufficient status before storing the link. The field is omitted from responses
-when it is absent, preserving the legacy create, get, and list response shapes.
+message, attempted acquisition, ready plan, and matching sufficient status
+before storing the link. The calibrated claim remains identified by
+`claim_anchor_digest`, which hashes only the normalized `claim_anchor`. The
+manifest's `response_digest` independently hashes the exact complete persisted
+assistant message. Basic Memory Store requires the normalized first response
+paragraph to equal the claim anchor and verifies the manifest digest against the
+full message bytes. Later policy-owned qualification paragraphs are therefore
+associated with the response without being copied into the claim record. The
+field is omitted from responses when it is absent, preserving the legacy
+create, get, and list response shapes.
 
 The manifest link and `validated_evidence_references` serve different purposes.
 The link records which acquisition process preceded the answer; the validated
@@ -109,7 +116,8 @@ references remain only the evidence actually used to support this specific
 claim. Basic Memory Store does not infer that every considered, returned, or
 prompt-delivered acquisition item supports the claim, and it does not copy
 manifest contents into the claim record. This contract adds no manifest
-retrieval endpoint.
+retrieval endpoint or public response field. Claim support remains a strict
+subset of acquired evidence.
 
 The list endpoint can be filtered by `assistant_message_id` or `request_id` and
 returns records in deterministic assistant-response order for later orchestration.

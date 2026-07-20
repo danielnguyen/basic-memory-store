@@ -29,6 +29,14 @@ PRIVATE_ANSWER = "PRIVATE_ASSISTANT_ANSWER_SENTINEL"
 PRIVATE_TRACE = "PRIVATE_TRACE_INTERNAL_SENTINEL"
 DEFAULT_ANCHOR = "The selected setting changed."
 DEFAULT_ANCHOR_DIGEST = "sha256:" + sha256(DEFAULT_ANCHOR.encode()).hexdigest()
+POLICY_BOUNDARY = (
+    "This reflects only the targeted sources checked, not a complete search of "
+    "every possible source."
+)
+
+
+def _response_digest(content: str) -> str:
+    return "sha256:" + sha256(content.encode("utf-8")).hexdigest()
 
 
 def _calibration(
@@ -107,6 +115,8 @@ def _seed_request_scope(
     surface: str = "desktop_private",
     trace_status: str = "ok",
     acquisition_manifest_id: str | None = None,
+    assistant_content: str | None = None,
+    manifest_response_digest: str | None = None,
 ) -> dict:
     conversation_id = uuid4()
     assistant_message_id = uuid4()
@@ -114,6 +124,14 @@ def _seed_request_scope(
     evidence_message_id = uuid4()
     artifact_id = uuid4()
     derived_text_id = uuid4()
+    if assistant_content is None:
+        assistant_content = (
+            DEFAULT_ANCHOR
+            if acquisition_manifest_id is not None
+            else PRIVATE_ANSWER
+        )
+    if manifest_response_digest is None:
+        manifest_response_digest = _response_digest(assistant_content)
     with psycopg.connect(dsn) as conn:
         prompt = {"private": PRIVATE_TRACE}
         if acquisition_manifest_id is not None:
@@ -123,7 +141,7 @@ def _seed_request_scope(
                 "status": "sufficient_for_declared_scope",
                 "manifest_id": acquisition_manifest_id,
                 "assistant_message_id": str(assistant_message_id),
-                "response_digest": DEFAULT_ANCHOR_DIGEST,
+                "response_digest": manifest_response_digest,
                 "inventory": {
                     "source_count": 3,
                 },
@@ -161,7 +179,7 @@ def _seed_request_scope(
                 assistant_message_id,
                 conversation_id,
                 owner_id,
-                PRIVATE_ANSWER,
+                assistant_content,
                 psycopg.types.json.Json({"request_id": request_id}),
                 user_message_id,
                 conversation_id,
@@ -244,6 +262,8 @@ def _pure_manifest_record_and_association(
     *,
     sufficiency_status: str = "sufficient_for_declared_scope",
     plan_status: str = "ready",
+    assistant_content: object = DEFAULT_ANCHOR,
+    response_digest: str | None = None,
 ) -> tuple[dict, dict]:
     conversation_id = str(uuid4())
     assistant_message_id = str(uuid4())
@@ -265,6 +285,11 @@ def _pure_manifest_record_and_association(
         acquisition_manifest_id=manifest_id,
     )
     record = _canonical_record(body)
+    retained_response_digest = (
+        _response_digest(assistant_content)
+        if isinstance(assistant_content, str) and response_digest is None
+        else response_digest
+    )
     association = {
         "existing": None,
         "conversation": {"owner_id": body.owner_id},
@@ -273,6 +298,7 @@ def _pure_manifest_record_and_association(
             "conversation_id": conversation_id,
             "role": "assistant",
             "metadata": {"request_id": body.request_id},
+            "content": assistant_content,
         },
         "trace": {
             "owner_id": body.owner_id,
@@ -288,7 +314,7 @@ def _pure_manifest_record_and_association(
                     "status": sufficiency_status,
                     "manifest_id": manifest_id,
                     "assistant_message_id": assistant_message_id,
-                    "response_digest": DEFAULT_ANCHOR_DIGEST,
+                    "response_digest": retained_response_digest,
                     "plan": {"plan_status": plan_status},
                     "sufficiency": {
                         "status": sufficiency_status,
@@ -337,6 +363,94 @@ def test_manifest_association_and_legacy_serialization_are_bounded(
     assert "acquisition_manifest_id" not in legacy_response["record"]
 
 
+def test_manifest_association_accepts_distinct_claim_and_full_response_digests():
+    assistant_content = f"{DEFAULT_ANCHOR}\n\n{POLICY_BOUNDARY}"
+    record, association = _pure_manifest_record_and_association(
+        assistant_content=assistant_content,
+    )
+    response_digest = association["trace"]["prompt"]["evidence_acquisition"][
+        "response_digest"
+    ]
+
+    assert response_digest == _response_digest(assistant_content)
+    assert response_digest != record["claim_anchor_digest"]
+    assert validate_claim_record_association(record, association) is None
+
+
+def test_manifest_association_normalizes_whitespace_within_first_paragraph():
+    assistant_content = (
+        "The selected   setting\nchanged."
+        f"\n\n{POLICY_BOUNDARY}"
+    )
+    record, association = _pure_manifest_record_and_association(
+        assistant_content=assistant_content,
+    )
+
+    assert validate_claim_record_association(record, association) is None
+
+
+@pytest.mark.parametrize(
+    ("assistant_content", "response_digest"),
+    [
+        (
+            f"{DEFAULT_ANCHOR}\n\n{POLICY_BOUNDARY}",
+            DEFAULT_ANCHOR_DIGEST,
+        ),
+        (
+            f"{DEFAULT_ANCHOR}\n\n{POLICY_BOUNDARY}",
+            _response_digest(f"{DEFAULT_ANCHOR}\n {POLICY_BOUNDARY}"),
+        ),
+        (None, DEFAULT_ANCHOR_DIGEST),
+        ({"answer": DEFAULT_ANCHOR}, DEFAULT_ANCHOR_DIGEST),
+        ("", _response_digest("")),
+        (
+            f"This answer is limited.\n\n{DEFAULT_ANCHOR}",
+            _response_digest(f"This answer is limited.\n\n{DEFAULT_ANCHOR}"),
+        ),
+        (
+            f"The report includes this claim: {DEFAULT_ANCHOR}",
+            _response_digest(f"The report includes this claim: {DEFAULT_ANCHOR}"),
+        ),
+        (
+            "The selected setting was changed.",
+            _response_digest("The selected setting was changed."),
+        ),
+        (
+            f"# Result\n\n{DEFAULT_ANCHOR}",
+            _response_digest(f"# Result\n\n{DEFAULT_ANCHOR}"),
+        ),
+        (
+            f"- Summary\n\n{DEFAULT_ANCHOR}",
+            _response_digest(f"- Summary\n\n{DEFAULT_ANCHOR}"),
+        ),
+        (
+            f"\n\n{DEFAULT_ANCHOR}",
+            _response_digest(f"\n\n{DEFAULT_ANCHOR}"),
+        ),
+    ],
+)
+def test_manifest_association_rejects_non_exact_response_relationships(
+    assistant_content,
+    response_digest,
+):
+    record, association = _pure_manifest_record_and_association(
+        assistant_content=assistant_content,
+        response_digest=response_digest,
+    )
+
+    with pytest.raises(
+        ClaimRecordError,
+        match="acquisition_manifest_association_mismatch",
+    ) as exc_info:
+        validate_claim_record_association(record, association)
+
+    encoded_error = str(exc_info.value)
+    assert PRIVATE_ANSWER not in encoded_error
+    assert PRIVATE_TRACE not in encoded_error
+    assert DEFAULT_ANCHOR not in encoded_error
+    assert POLICY_BOUNDARY not in encoded_error
+
+
 @pytest.mark.parametrize(
     ("mutation", "expected"),
     [
@@ -346,6 +460,7 @@ def test_manifest_association_and_legacy_serialization_are_bounded(
         ("manifest_id_missing", "acquisition_manifest_not_in_trace"),
         ("manifest_id_mismatch", "acquisition_manifest_association_mismatch"),
         ("assistant_mismatch", "acquisition_manifest_association_mismatch"),
+        ("assistant_content_missing", "acquisition_manifest_association_mismatch"),
         ("digest_mismatch", "acquisition_manifest_association_mismatch"),
         ("not_attempted", "acquisition_manifest_not_eligible"),
         ("plan_missing", "acquisition_manifest_not_eligible"),
@@ -375,6 +490,8 @@ def test_manifest_association_errors_are_bounded_without_trace_disclosure(
         manifest["manifest_id"] = "evidence_manifest_44444444444444444444444444444444"
     elif mutation == "assistant_mismatch":
         manifest["assistant_message_id"] = str(uuid4())
+    elif mutation == "assistant_content_missing":
+        association["assistant_message"].pop("content")
     elif mutation == "digest_mismatch":
         manifest["response_digest"] = "sha256:" + "0" * 64
     elif mutation == "not_attempted":
@@ -521,10 +638,12 @@ def test_manifest_link_round_trips_without_copying_acquisition_scope(
     postgres_database,
 ):
     manifest_id = "evidence_manifest_0123456789abcdef0123456789abcdef"
+    assistant_content = f"{DEFAULT_ANCHOR}\n\n{POLICY_BOUNDARY}"
     scope = _seed_request_scope(
         postgres_database,
         request_id="request-linked-manifest",
         acquisition_manifest_id=manifest_id,
+        assistant_content=assistant_content,
     )
     reference = _reference(
         ref_type="artifact",
@@ -551,6 +670,8 @@ def test_manifest_link_round_trips_without_copying_acquisition_scope(
     assert first.acquisition_manifest_id == manifest_id
     assert len(first.validated_evidence_references) == 1
     assert first.validated_evidence_references[0].ref_id == str(scope["artifact_id"])
+    assert first.claim_anchor_digest == DEFAULT_ANCHOR_DIGEST
+    assert first.claim_anchor_digest != _response_digest(assistant_content)
     async def load():
         store = PostgresStore(postgres_database)
         await store.open()
@@ -579,6 +700,9 @@ def test_manifest_link_round_trips_without_copying_acquisition_scope(
     serialized = one.model_dump_json()
     assert manifest_id in serialized
     for excluded in (
+        assistant_content,
+        POLICY_BOUNDARY,
+        _response_digest(assistant_content),
         "sources_considered",
         "sources_selected",
         "source_references_returned",
@@ -598,6 +722,64 @@ def test_manifest_link_round_trips_without_copying_acquisition_scope(
     omitted.acquisition_manifest_id = None
     with pytest.raises(ClaimRecordError, match="claim_record_conflict"):
         _run_create(postgres_database, omitted)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["digest_only_covers_claim", "first_paragraph_mismatch"],
+)
+def test_manifest_link_rejects_mismatched_full_response_association(
+    postgres_database,
+    mutation,
+):
+    manifest_id = "evidence_manifest_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    assistant_content = f"{DEFAULT_ANCHOR}\n\n{POLICY_BOUNDARY}"
+    if mutation == "first_paragraph_mismatch":
+        assistant_content = f"The report was reviewed.\n\n{DEFAULT_ANCHOR}"
+    scope = _seed_request_scope(
+        postgres_database,
+        request_id=f"request-response-{mutation}",
+        acquisition_manifest_id=manifest_id,
+        assistant_content=assistant_content,
+        manifest_response_digest=(
+            DEFAULT_ANCHOR_DIGEST
+            if mutation == "digest_only_covers_claim"
+            else _response_digest(assistant_content)
+        ),
+    )
+    body = _request(
+        claim_id=f"claim_response_{mutation}",
+        references=[
+            _reference(
+                ref_type="external_source",
+                ref_id="external-source-1",
+                owner_id=scope["owner_id"],
+                conversation_id=None,
+            )
+        ],
+        acquisition_manifest_id=manifest_id,
+        **{
+            key: scope[key]
+            for key in (
+                "owner_id",
+                "conversation_id",
+                "assistant_message_id",
+                "request_id",
+            )
+        },
+    )
+
+    with pytest.raises(
+        ClaimRecordError,
+        match="acquisition_manifest_association_mismatch",
+    ):
+        _run_create(postgres_database, body)
+
+    with psycopg.connect(postgres_database) as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM claim_records WHERE claim_id = %s",
+            (body.calibration_result.claim_id,),
+        ).fetchone()[0] == 0
 
 
 @pytest.mark.parametrize(
