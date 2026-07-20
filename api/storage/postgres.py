@@ -4113,7 +4113,7 @@ class PostgresStore:
 
                     await cur.execute(
                         """
-                        SELECT owner_id, conversation_id, role, metadata
+                        SELECT owner_id, conversation_id, role, metadata, content
                         FROM messages
                         WHERE id = %s
                         LIMIT 1;
@@ -4201,6 +4201,7 @@ class PostgresStore:
                                     "conversation_id": str(message[1]),
                                     "role": message[2],
                                     "metadata": message[3],
+                                    "content": message[4],
                                 }
                                 if message is not None
                                 else None

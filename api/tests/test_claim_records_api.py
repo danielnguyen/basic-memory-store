@@ -47,6 +47,7 @@ class FakePG:
         self.create_calls = []
         self.error_code: str | None = None
         self.records: list[dict] = []
+        self.association: dict | None = None
 
     async def open(self):
         return None
@@ -63,6 +64,8 @@ class FakePG:
         self.create_calls.append(record)
         if self.error_code:
             raise main_module.ClaimRecordError(self.error_code)
+        if self.association is not None:
+            validate_association(record, self.association)
         stored = {**record, "created_at": "2026-07-14T23:00:00+00:00"}
         self.records = [stored]
         return {"created": True, "record": stored}
@@ -164,6 +167,50 @@ def _body() -> dict:
     }
 
 
+def _manifest_association(body: dict, assistant_content: str) -> dict:
+    manifest_id = body["acquisition_manifest_id"]
+    return {
+        "existing": None,
+        "conversation": {"owner_id": body["owner_id"]},
+        "assistant_message": {
+            "owner_id": body["owner_id"],
+            "conversation_id": body["conversation_id"],
+            "role": "assistant",
+            "metadata": {"request_id": body["request_id"]},
+            "content": assistant_content,
+        },
+        "trace": {
+            "owner_id": body["owner_id"],
+            "conversation_id": body["conversation_id"],
+            "surface": body["surface"],
+            "status": "ok",
+            "references": [
+                {
+                    "ref_type": "external_source",
+                    "ref_id": "source-manufacturer-1",
+                }
+            ],
+            "prompt": {
+                "evidence_acquisition": {
+                    "attempted": True,
+                    "status": "sufficient_for_declared_scope",
+                    "manifest_id": manifest_id,
+                    "assistant_message_id": body["assistant_message_id"],
+                    "response_digest": (
+                        "sha256:"
+                        + sha256(assistant_content.encode("utf-8")).hexdigest()
+                    ),
+                    "plan": {"plan_status": "ready"},
+                    "sufficiency": {
+                        "status": "sufficient_for_declared_scope",
+                    },
+                }
+            },
+        },
+        "local_references": {},
+    }
+
+
 @pytest.fixture
 def client_and_store(monkeypatch):
     store = FakePG()
@@ -220,6 +267,38 @@ def test_optional_acquisition_manifest_id_round_trips(client_and_store):
     assert one.json()["acquisition_manifest_id"] == body["acquisition_manifest_id"]
     assert listed.json()["records"][0]["acquisition_manifest_id"] == body["acquisition_manifest_id"]
     assert store.create_calls[0]["acquisition_manifest_id"] == body["acquisition_manifest_id"]
+
+
+def test_create_accepts_bounded_response_manifest_without_exposing_response(
+    client_and_store,
+):
+    client, store = client_and_store
+    body = _body()
+    body["acquisition_manifest_id"] = (
+        "evidence_manifest_0123456789abcdef0123456789abcdef"
+    )
+    claim_anchor = body["calibration_result"]["claim_anchor"]
+    assistant_content = (
+        f"{claim_anchor}\n\n"
+        "This reflects only the targeted sources checked, not a complete search "
+        "of every possible source."
+    )
+    store.association = _manifest_association(body, assistant_content)
+
+    response = _create(client, body)
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["record"]["claim_anchor"] == claim_anchor
+    assert payload["record"]["acquisition_manifest_id"] == (
+        body["acquisition_manifest_id"]
+    )
+    encoded = str(payload)
+    assert assistant_content not in encoded
+    assert "response_digest" not in encoded
+    assert set(payload["record"]) == (
+        LEGACY_CLAIM_RECORD_KEYS | {"acquisition_manifest_id"}
+    )
 
 
 @pytest.mark.parametrize(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from hashlib import sha256
 from typing import Any, Callable, Protocol
 from uuid import UUID
@@ -41,6 +42,21 @@ class ClaimRecordStore(Protocol):
         request_id: str | None,
         limit: int,
     ) -> list[dict[str, Any]]: ...
+
+
+_PARAGRAPH_SEPARATOR = re.compile(r"\r?\n[ \t]*\r?\n")
+
+
+def _assistant_response_digest(content: str) -> str:
+    return "sha256:" + sha256(content.encode("utf-8")).hexdigest()
+
+
+def _normalized_first_response_paragraph(content: Any) -> str | None:
+    if not isinstance(content, str) or not content:
+        return None
+    first_paragraph = _PARAGRAPH_SEPARATOR.split(content, maxsplit=1)[0]
+    normalized = " ".join(first_paragraph.split())
+    return normalized or None
 
 
 def normalize_trace_reference_identity(value: Any) -> tuple[str, str] | None:
@@ -184,9 +200,15 @@ def validate_claim_record_association(
             raise ClaimRecordError("acquisition_manifest_not_in_trace")
         if retained_manifest_id != acquisition_manifest_id:
             raise ClaimRecordError("acquisition_manifest_association_mismatch")
+        message_content = message.get("content")
+        normalized_claim_anchor = " ".join(record["claim_anchor"].split())
         if (
             manifest.get("assistant_message_id") != record["assistant_message_id"]
-            or manifest.get("response_digest") != record["claim_anchor_digest"]
+            or not isinstance(message_content, str)
+            or manifest.get("response_digest")
+            != _assistant_response_digest(message_content)
+            or _normalized_first_response_paragraph(message_content)
+            != normalized_claim_anchor
         ):
             raise ClaimRecordError("acquisition_manifest_association_mismatch")
 
