@@ -4329,6 +4329,60 @@ class PostgresStore:
                 rows = await cur.fetchall()
         return [_claim_record_from_row(row) for row in rows]
 
+    async def list_assistant_trace_candidates(
+        self,
+        *,
+        owner_id: str,
+        conversation_id: UUID,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        bounded_limit = min(max(int(limit), 1), 50)
+        query = """
+        SELECT m.id, m.owner_id, m.conversation_id, m.role, m.content,
+               m.metadata->'request_id', m.created_at,
+               t.id, t.request_id, t.owner_id, t.conversation_id, t.surface,
+               t.status, t.prompt_json, t.created_at
+        FROM messages m
+        LEFT JOIN traces t
+          ON t.request_id = m.metadata->>'request_id'
+        WHERE m.owner_id = %s
+          AND m.conversation_id = %s
+          AND m.role = 'assistant'
+        ORDER BY m.created_at DESC, m.id DESC
+        LIMIT %s;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    query,
+                    (owner_id, conversation_id, bounded_limit),
+                )
+                rows = await cur.fetchall()
+        return [
+            {
+                "message_id": str(row[0]),
+                "message_owner_id": row[1],
+                "message_conversation_id": str(row[2]),
+                "message_role": row[3],
+                "message_content": row[4],
+                "message_request_id": row[5],
+                "message_created_at": str(row[6]),
+                "trace_id": str(row[7]) if row[7] is not None else None,
+                "trace_request_id": row[8],
+                "trace_owner_id": row[9],
+                "trace_conversation_id": (
+                    str(row[10]) if row[10] is not None else None
+                ),
+                "trace_surface": row[11],
+                "trace_status": row[12],
+                "trace_prompt": row[13],
+                "trace_created_at": (
+                    str(row[14]) if row[14] is not None else None
+                ),
+            }
+            for row in rows
+        ]
+
     async def create_trace(self, trace: dict[str, Any]) -> UUID:
         q = """
         INSERT INTO traces (

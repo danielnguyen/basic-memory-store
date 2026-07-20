@@ -52,6 +52,9 @@ from services.claim_records import (
     get_claim_record as load_claim_record,
     list_claim_records as load_claim_records,
 )
+from services.acquisition_history import (
+    resolve_acquisition_history as load_acquisition_history,
+)
 
 from models import (
     ArtifactCompleteRequest,
@@ -150,6 +153,8 @@ from models import (
     ClaimRecordCreateRequest,
     ClaimRecordCreateResponse,
     ClaimRecordListResponse,
+    AcquisitionHistoryResolveRequest,
+    AcquisitionHistoryResolveResponse,
     TraceCreateRequest,
     TraceCreateResponse,
     TraceResponse,
@@ -2755,6 +2760,21 @@ async def get_claim_record(claim_id: str, owner_id: str, conversation_id: str):
         )
     except ClaimRecordError as exc:
         raise _claim_record_http_error(exc) from exc
+
+
+@app.post(
+    "/v1/internal/acquisition-history/resolve",
+    response_model=AcquisitionHistoryResolveResponse,
+    tags=["traces"],
+    dependencies=[Depends(require_api_key)],
+    summary="Resolve one assistant response to its retained acquisition manifest",
+)
+async def resolve_acquisition_history(
+    body: AcquisitionHistoryResolveRequest,
+    request: Request,
+):
+    _require_matching_request_id(request, body.request_id)
+    return await load_acquisition_history(pg, body)
 
 
 @app.post(
