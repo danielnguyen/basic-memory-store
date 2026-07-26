@@ -20,13 +20,10 @@ SURFACE = "web"
 
 
 class FakePG:
-    def __init__(self, candidates, claim_records=None):
+    def __init__(self, candidates):
         self.candidates = candidates
         self.calls = []
-        self.claim_records = claim_records or []
-        self.claim_calls = []
         self.candidate_error = False
-        self.claim_error = False
 
     async def open(self):
         return None
@@ -39,6 +36,14 @@ class FakePG:
             raise RuntimeError("candidate store unavailable")
         self.calls.append(kwargs)
         return copy.deepcopy(self.candidates)
+
+
+class ImmediateHistoryFakePG(FakePG):
+    def __init__(self, candidates, claim_records=None):
+        super().__init__(candidates)
+        self.claim_records = claim_records or []
+        self.claim_calls = []
+        self.claim_error = False
 
     async def list_claim_records(self, **kwargs):
         if self.claim_error:
@@ -311,7 +316,7 @@ def _post_immediate(monkeypatch, store, body, *, authenticated=True):
 
 def test_immediate_history_resolver_requires_internal_authentication(monkeypatch):
     conversation_id = str(uuid4())
-    store = FakePG([_candidate(conversation_id=conversation_id)])
+    store = ImmediateHistoryFakePG([_candidate(conversation_id=conversation_id)])
 
     response = _post_immediate(
         monkeypatch,
@@ -347,7 +352,7 @@ def test_immediate_support_resolves_exact_newest_assistant_claim(monkeypatch):
         message_id=newest["message_id"],
         request_id=newest["message_request_id"],
     )
-    store = FakePG([newest, older], [claim])
+    store = ImmediateHistoryFakePG([newest, older], [claim])
 
     response = _post_immediate(
         monkeypatch,
@@ -389,7 +394,7 @@ def test_immediate_support_resolves_exact_newest_assistant_claim(monkeypatch):
 def test_immediate_acquisition_resolves_without_client_history_hints(monkeypatch):
     conversation_id = str(uuid4())
     candidate = _candidate(conversation_id=conversation_id)
-    store = FakePG([candidate])
+    store = ImmediateHistoryFakePG([candidate])
 
     response = _post_immediate(
         monkeypatch,
@@ -426,7 +431,7 @@ def test_immediate_support_missing_on_newest_never_scans_backward(monkeypatch):
         message_id=older["message_id"],
         request_id=older["message_request_id"],
     )
-    store = FakePG([newest, older], [older_claim])
+    store = ImmediateHistoryFakePG([newest, older], [older_claim])
 
     response = _post_immediate(
         monkeypatch,
@@ -453,7 +458,7 @@ def test_immediate_acquisition_missing_on_newest_never_scans_backward(monkeypatc
         trace=False,
     )
     older = _candidate(conversation_id=conversation_id)
-    store = FakePG([newest, older])
+    store = ImmediateHistoryFakePG([newest, older])
 
     response = _post_immediate(
         monkeypatch,
@@ -481,7 +486,7 @@ def test_immediate_support_multiple_records_is_bounded_ambiguous(monkeypatch):
     )
     second_claim = copy.deepcopy(claim)
     second_claim["claim_id"] = "claim_fixture_2"
-    store = FakePG([candidate], [claim, second_claim])
+    store = ImmediateHistoryFakePG([candidate], [claim, second_claim])
 
     response = _post_immediate(
         monkeypatch,
@@ -506,7 +511,7 @@ def test_immediate_acquisition_privacy_failure_returns_no_record_data(monkeypatc
     candidate["trace_prompt"]["evidence_acquisition"]["acquisition"][
         "raw_payload"
     ] = "PRIVATE ACQUISITION SENTINEL"
-    store = FakePG([candidate])
+    store = ImmediateHistoryFakePG([candidate])
 
     response = _post_immediate(
         monkeypatch,
@@ -528,7 +533,7 @@ def test_immediate_acquisition_surface_mismatch_fails_closed(monkeypatch):
     conversation_id = str(uuid4())
     candidate = _candidate(conversation_id=conversation_id)
     candidate["trace_surface"] = "other-surface"
-    store = FakePG([candidate])
+    store = ImmediateHistoryFakePG([candidate])
 
     response = _post_immediate(
         monkeypatch,
@@ -565,7 +570,7 @@ def test_immediate_newest_message_scope_or_shape_mismatch_fails_closed(
         candidate["message_content"] = None
     else:
         candidate["message_request_id"] = None
-    store = FakePG([candidate])
+    store = ImmediateHistoryFakePG([candidate])
 
     response = _post_immediate(
         monkeypatch,
@@ -620,7 +625,7 @@ def test_immediate_support_record_scope_mismatch_fails_closed(monkeypatch, mutat
         claim["claim_anchor_digest"] = "sha256:" + ("f" * 64)
     else:
         claim["validated_evidence_references"][0]["owner_id"] = "other-owner"
-    store = FakePG([candidate])
+    store = ImmediateHistoryFakePG([candidate])
 
     async def return_unscoped_record(**kwargs):
         store.claim_calls.append(kwargs)
@@ -646,7 +651,7 @@ def test_immediate_support_record_scope_mismatch_fails_closed(monkeypatch, mutat
 def test_immediate_history_store_failure_is_bounded_unavailable(monkeypatch, failure):
     conversation_id = str(uuid4())
     candidate = _candidate(conversation_id=conversation_id)
-    store = FakePG([candidate])
+    store = ImmediateHistoryFakePG([candidate])
     if failure == "candidate":
         store.candidate_error = True
     else:
@@ -689,7 +694,7 @@ def test_immediate_request_rejects_client_owned_history_hints(
         explanation_kind="support",
     )
     body[extra_field] = "client-supplied-history"
-    store = FakePG([_candidate(conversation_id=conversation_id)])
+    store = ImmediateHistoryFakePG([_candidate(conversation_id=conversation_id)])
 
     response = _post_immediate(monkeypatch, store, body)
 

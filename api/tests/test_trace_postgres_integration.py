@@ -732,7 +732,7 @@ def test_immediate_history_resolves_newest_support_and_acquisition_without_write
                     "surface": surface,
                     "runtime_session_id": "runtime-session-postgres",
                     "runtime_turn_id": "runtime-turn-postgres",
-                    "acquisition_manifest_id": manifest["manifest_id"],
+                    "acquisition_manifest_id": None,
                     "claim_anchor": anchor,
                     "claim_anchor_digest": "sha256:"
                     + hashlib.sha256(anchor.encode("utf-8")).hexdigest(),
