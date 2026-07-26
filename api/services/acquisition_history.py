@@ -12,6 +12,10 @@ from models import (
     AcquisitionHistoryRecord,
     AcquisitionHistoryResolveRequest,
     AcquisitionHistoryResolveResponse,
+    ClaimRecord,
+    ImmediateHistoryRecord,
+    ImmediateHistoryResolveRequest,
+    ImmediateHistoryResolveResponse,
 )
 
 
@@ -21,6 +25,16 @@ class AcquisitionHistoryStore(Protocol):
         *,
         owner_id: str,
         conversation_id: UUID,
+        limit: int,
+    ) -> list[dict[str, Any]]: ...
+
+    async def list_claim_records(
+        self,
+        *,
+        owner_id: str,
+        conversation_id: str,
+        assistant_message_id: str | None,
+        request_id: str | None,
         limit: int,
     ) -> list[dict[str, Any]]: ...
 
@@ -454,3 +468,271 @@ async def resolve_acquisition_history(
             reason_code="quoted_response_ambiguous",
         )
     return _resolve_candidate(body, matches[0])
+
+
+def _immediate_response(
+    body: ImmediateHistoryResolveRequest,
+    *,
+    resolution_status: str,
+    match_count: int,
+    reason_code: str,
+    record: ImmediateHistoryRecord | None = None,
+) -> ImmediateHistoryResolveResponse:
+    return ImmediateHistoryResolveResponse(
+        schema_version=body.schema_version,
+        request_id=body.request_id,
+        owner_id=body.owner_id,
+        conversation_id=body.conversation_id,
+        surface=body.surface,
+        explanation_kind=body.explanation_kind,
+        resolution_status=resolution_status,
+        match_count=match_count,
+        reason_code=reason_code,
+        record=record,
+    )
+
+
+def _immediate_candidate_identity(
+    body: ImmediateHistoryResolveRequest,
+    candidate: Any,
+) -> tuple[str, str] | None:
+    if not isinstance(candidate, dict):
+        return None
+    message_id = _bounded_identifier(candidate.get("message_id"))
+    original_request_id = _bounded_identifier(candidate.get("message_request_id"))
+    if (
+        message_id is None
+        or original_request_id is None
+        or candidate.get("message_owner_id") != body.owner_id
+        or str(candidate.get("message_conversation_id"))
+        != str(body.conversation_id)
+        or candidate.get("message_role") != "assistant"
+        or not isinstance(candidate.get("message_content"), str)
+        or not candidate["message_content"]
+    ):
+        return None
+    return message_id, original_request_id
+
+
+def _support_record_matches(
+    body: ImmediateHistoryResolveRequest,
+    record: ClaimRecord,
+    *,
+    message_id: str,
+    original_request_id: str,
+    message_content: str,
+) -> bool:
+    expected_anchor = _normalized_first_paragraph(message_content)
+    if (
+        expected_anchor is None
+        or record.owner_id != body.owner_id
+        or record.conversation_id != str(body.conversation_id)
+        or record.assistant_message_id != message_id
+        or record.request_id != original_request_id
+        or record.surface != body.surface
+        or record.claim_anchor != expected_anchor
+        or record.claim_anchor_digest != _response_digest(expected_anchor)
+    ):
+        return False
+    return all(
+        reference.owner_id == body.owner_id
+        and (
+            reference.conversation_id is None
+            or reference.conversation_id == str(body.conversation_id)
+        )
+        for reference in record.validated_evidence_references
+    )
+
+
+async def _resolve_immediate_support(
+    store: AcquisitionHistoryStore,
+    body: ImmediateHistoryResolveRequest,
+    *,
+    message_id: str,
+    original_request_id: str,
+    message_content: str,
+) -> ImmediateHistoryResolveResponse:
+    try:
+        records = await store.list_claim_records(
+            owner_id=body.owner_id,
+            conversation_id=str(body.conversation_id),
+            assistant_message_id=message_id,
+            request_id=original_request_id,
+            limit=2,
+        )
+    except Exception:
+        return _immediate_response(
+            body,
+            resolution_status="unavailable",
+            match_count=0,
+            reason_code="history_store_unavailable",
+        )
+    if not isinstance(records, list):
+        return _immediate_response(
+            body,
+            resolution_status="invalid",
+            match_count=0,
+            reason_code="support_record_invalid",
+        )
+    records = records[:2]
+    if not records:
+        return _immediate_response(
+            body,
+            resolution_status="no_record",
+            match_count=0,
+            reason_code="support_record_not_found",
+        )
+    if len(records) > 1:
+        return _immediate_response(
+            body,
+            resolution_status="ambiguous",
+            match_count=2,
+            reason_code="support_record_ambiguous",
+        )
+    try:
+        record = ClaimRecord.model_validate(records[0])
+    except Exception:
+        return _immediate_response(
+            body,
+            resolution_status="invalid",
+            match_count=1,
+            reason_code="support_record_invalid",
+        )
+    if not _support_record_matches(
+        body,
+        record,
+        message_id=message_id,
+        original_request_id=original_request_id,
+        message_content=message_content,
+    ):
+        return _immediate_response(
+            body,
+            resolution_status="invalid",
+            match_count=1,
+            reason_code="support_record_invalid",
+        )
+    return _immediate_response(
+        body,
+        resolution_status="resolved",
+        match_count=1,
+        reason_code="support_record_resolved",
+        record=ImmediateHistoryRecord(
+            record_kind="support",
+            assistant_message_id=message_id,
+            original_request_id=original_request_id,
+            support_record=record,
+        ),
+    )
+
+
+def _resolve_immediate_acquisition(
+    body: ImmediateHistoryResolveRequest,
+    candidate: dict[str, Any],
+    *,
+    message_id: str,
+    original_request_id: str,
+) -> ImmediateHistoryResolveResponse:
+    content = candidate["message_content"]
+    normalized_paragraph = _normalized_first_paragraph(content)
+    if normalized_paragraph is None:
+        return _immediate_response(
+            body,
+            resolution_status="invalid",
+            match_count=1,
+            reason_code="acquisition_record_invalid",
+        )
+    legacy_body = AcquisitionHistoryResolveRequest(
+        schema_version="acquisition-history-resolution.v1",
+        request_id=body.request_id,
+        owner_id=body.owner_id,
+        conversation_id=body.conversation_id,
+        surface=body.surface,
+        target_mode="immediate_previous",
+        response_digest=_response_digest(content),
+        normalized_first_paragraph=normalized_paragraph,
+    )
+    resolved = _resolve_candidate(legacy_body, candidate)
+    if resolved.resolution_status == "resolved" and resolved.record is not None:
+        return _immediate_response(
+            body,
+            resolution_status="resolved",
+            match_count=1,
+            reason_code="acquisition_record_resolved",
+            record=ImmediateHistoryRecord(
+                record_kind="acquisition",
+                assistant_message_id=message_id,
+                original_request_id=original_request_id,
+                acquisition_record=resolved.record,
+            ),
+        )
+    if resolved.resolution_status == "no_record":
+        return _immediate_response(
+            body,
+            resolution_status="no_record",
+            match_count=1,
+            reason_code="acquisition_record_not_found",
+        )
+    return _immediate_response(
+        body,
+        resolution_status="invalid",
+        match_count=1,
+        reason_code="acquisition_record_invalid",
+    )
+
+
+async def resolve_immediate_history(
+    store: AcquisitionHistoryStore,
+    body: ImmediateHistoryResolveRequest,
+) -> ImmediateHistoryResolveResponse:
+    try:
+        candidates = await store.list_assistant_trace_candidates(
+            owner_id=body.owner_id,
+            conversation_id=body.conversation_id,
+            limit=1,
+        )
+    except Exception:
+        return _immediate_response(
+            body,
+            resolution_status="unavailable",
+            match_count=0,
+            reason_code="history_store_unavailable",
+        )
+    if not isinstance(candidates, list):
+        return _immediate_response(
+            body,
+            resolution_status="invalid",
+            match_count=0,
+            reason_code="immediate_response_invalid",
+        )
+    candidates = candidates[:1]
+    if not candidates:
+        return _immediate_response(
+            body,
+            resolution_status="no_record",
+            match_count=0,
+            reason_code="immediate_response_not_found",
+        )
+    candidate = candidates[0]
+    identity = _immediate_candidate_identity(body, candidate)
+    if identity is None:
+        return _immediate_response(
+            body,
+            resolution_status="invalid",
+            match_count=1,
+            reason_code="immediate_response_invalid",
+        )
+    message_id, original_request_id = identity
+    if body.explanation_kind == "support":
+        return await _resolve_immediate_support(
+            store,
+            body,
+            message_id=message_id,
+            original_request_id=original_request_id,
+            message_content=candidate["message_content"],
+        )
+    return _resolve_immediate_acquisition(
+        body,
+        candidate,
+        message_id=message_id,
+        original_request_id=original_request_id,
+    )

@@ -6,9 +6,11 @@ import types
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
+import httpx
 import psycopg
 
 import main as main_module
+from services.claim_records import validate_claim_record_association
 from storage.postgres import PostgresStore
 from storage.qdrant import _policy_payload
 
@@ -631,6 +633,200 @@ def test_acquisition_history_resolves_without_claim_and_performs_no_writes(
         "COST SENTINEL",
     ):
         assert sentinel not in serialized
+
+    with psycopg.connect(postgres_database) as conn:
+        after = conn.execute(
+            """
+            SELECT
+              (SELECT count(*) FROM messages),
+              (SELECT count(*) FROM traces),
+              (SELECT count(*) FROM claim_records)
+            """
+        ).fetchone()
+    assert before == after
+
+
+def test_immediate_history_resolves_newest_support_and_acquisition_without_writes(
+    monkeypatch,
+    postgres_database,
+):
+    owner_id = "owner-immediate-history"
+    surface = "telegram"
+    conversation_id = uuid4()
+    older_message_id = uuid4()
+    newest_message_id = uuid4()
+    older_request_id = "immediate-history-older"
+    newest_request_id = "immediate-history-newest"
+    older_content = "An older response has a retained record."
+    newest_content = (
+        "The retained record supports the newest response.\n\n"
+        "This full response remains server-owned."
+    )
+    manifest = _acquisition_history_manifest(str(newest_message_id), newest_content)
+
+    with psycopg.connect(postgres_database) as conn:
+        conn.execute(
+            """
+            INSERT INTO conversations (id, owner_id, client_id, title)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (conversation_id, owner_id, "telegram:fixture", "Immediate history"),
+        )
+        conn.execute(
+            """
+            INSERT INTO messages (
+                id, conversation_id, owner_id, client_id, role, content,
+                metadata, created_at
+            ) VALUES
+              (%s, %s, %s, %s, 'assistant', %s, %s::jsonb, %s),
+              (%s, %s, %s, %s, 'assistant', %s, %s::jsonb, %s)
+            """,
+            (
+                older_message_id,
+                conversation_id,
+                owner_id,
+                "telegram:fixture",
+                older_content,
+                '{"request_id":"immediate-history-older"}',
+                "2026-07-20T00:00:00+00:00",
+                newest_message_id,
+                conversation_id,
+                owner_id,
+                "telegram:fixture",
+                newest_content,
+                '{"request_id":"immediate-history-newest"}',
+                "2026-07-20T00:01:00+00:00",
+            ),
+        )
+        conn.commit()
+
+    async def seed_records():
+        store = PostgresStore(postgres_database)
+        await store.open()
+        try:
+            await store.create_trace(
+                {
+                    "request_id": newest_request_id,
+                    "conversation_id": conversation_id,
+                    "owner_id": owner_id,
+                    "surface": surface,
+                    "status": "ok",
+                    "prompt": {"evidence_acquisition": manifest},
+                    "references": [
+                        {
+                            "ref_type": "integration_event",
+                            "ref_id": "retained-event-postgres",
+                        }
+                    ],
+                }
+            )
+            anchor = "The retained record supports the newest response."
+            await store.create_claim_record(
+                record={
+                    "claim_id": "claim_immediate_history_postgres",
+                    "schema_version": "claim-record.v1",
+                    "owner_id": owner_id,
+                    "conversation_id": str(conversation_id),
+                    "request_id": newest_request_id,
+                    "assistant_message_id": str(newest_message_id),
+                    "surface": surface,
+                    "runtime_session_id": "runtime-session-postgres",
+                    "runtime_turn_id": "runtime-turn-postgres",
+                    "acquisition_manifest_id": manifest["manifest_id"],
+                    "claim_anchor": anchor,
+                    "claim_anchor_digest": "sha256:"
+                    + hashlib.sha256(anchor.encode("utf-8")).hexdigest(),
+                    "claim_class": "source_backed_fact",
+                    "calibration_status": "supported",
+                    "evidence_strength": "strong",
+                    "confidence": "high",
+                    "strongest_authority": "trusted_integration",
+                    "freshness_summary": "current",
+                    "uncertainty_disclosure_required": False,
+                    "validated_evidence_references": [
+                        {
+                            "ref_type": "integration_event",
+                            "ref_id": "retained-event-postgres",
+                            "owner_id": owner_id,
+                            "conversation_id": str(conversation_id),
+                            "support_kind": "direct",
+                            "authority": "trusted_integration",
+                            "freshness_state": "active",
+                        }
+                    ],
+                    "limitation_codes": [],
+                    "user_safe_summary": "One retained event directly supports it.",
+                },
+                validate_association=validate_claim_record_association,
+            )
+        finally:
+            await store.close()
+
+    asyncio.run(seed_records())
+
+    with psycopg.connect(postgres_database) as conn:
+        before = conn.execute(
+            """
+            SELECT
+              (SELECT count(*) FROM messages),
+              (SELECT count(*) FROM traces),
+              (SELECT count(*) FROM claim_records)
+            """
+        ).fetchone()
+
+    monkeypatch.setattr(main_module, "settings", _settings(), raising=True)
+    monkeypatch.setattr(main_module, "qdrant", FakeQdrant(), raising=True)
+
+    async def resolve(explanation_kind: str):
+        store = PostgresStore(postgres_database)
+        monkeypatch.setattr(main_module, "pg", store, raising=True)
+        await store.open()
+        try:
+            transport = httpx.ASGITransport(app=main_module.app)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://testserver",
+            ) as client:
+                request_id = f"immediate-history-{explanation_kind}-lookup"
+                return await client.post(
+                    "/v1/internal/immediate-history/resolve",
+                    headers={
+                        "X-API-Key": "testkey",
+                        "X-Request-ID": request_id,
+                    },
+                    json={
+                        "schema_version": "immediate-history-resolution.v1",
+                        "request_id": request_id,
+                        "owner_id": owner_id,
+                        "conversation_id": str(conversation_id),
+                        "surface": surface,
+                        "explanation_kind": explanation_kind,
+                    },
+                )
+        finally:
+            await store.close()
+
+    support_response = asyncio.run(resolve("support"))
+    acquisition_response = asyncio.run(resolve("acquisition"))
+
+    assert support_response.status_code == 200, support_response.text
+    support = support_response.json()
+    assert support["reason_code"] == "support_record_resolved"
+    assert support["record"]["assistant_message_id"] == str(newest_message_id)
+    assert support["record"]["original_request_id"] == newest_request_id
+    assert support["record"]["support_record"]["claim_id"] == (
+        "claim_immediate_history_postgres"
+    )
+    assert older_request_id not in support_response.text
+    assert "This full response remains server-owned." not in support_response.text
+
+    assert acquisition_response.status_code == 200, acquisition_response.text
+    acquisition = acquisition_response.json()
+    assert acquisition["reason_code"] == "acquisition_record_resolved"
+    assert acquisition["record"]["assistant_message_id"] == str(newest_message_id)
+    assert acquisition["record"]["acquisition_record"]["acquisition_manifest"] == manifest
+    assert older_request_id not in acquisition_response.text
+    assert "This full response remains server-owned." not in acquisition_response.text
 
     with psycopg.connect(postgres_database) as conn:
         after = conn.execute(

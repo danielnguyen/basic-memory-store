@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import json
@@ -7,6 +8,7 @@ import types
 from uuid import UUID, uuid4
 
 import pytest
+import httpx
 from fastapi.testclient import TestClient
 
 import main as main_module
@@ -18,9 +20,13 @@ SURFACE = "web"
 
 
 class FakePG:
-    def __init__(self, candidates):
+    def __init__(self, candidates, claim_records=None):
         self.candidates = candidates
         self.calls = []
+        self.claim_records = claim_records or []
+        self.claim_calls = []
+        self.candidate_error = False
+        self.claim_error = False
 
     async def open(self):
         return None
@@ -29,8 +35,23 @@ class FakePG:
         return None
 
     async def list_assistant_trace_candidates(self, **kwargs):
+        if self.candidate_error:
+            raise RuntimeError("candidate store unavailable")
         self.calls.append(kwargs)
         return copy.deepcopy(self.candidates)
+
+    async def list_claim_records(self, **kwargs):
+        if self.claim_error:
+            raise RuntimeError("claim store unavailable")
+        self.claim_calls.append(kwargs)
+        return [
+            copy.deepcopy(record)
+            for record in self.claim_records
+            if record["owner_id"] == kwargs["owner_id"]
+            and record["conversation_id"] == kwargs["conversation_id"]
+            and record["assistant_message_id"] == kwargs["assistant_message_id"]
+            and record["request_id"] == kwargs["request_id"]
+        ][: kwargs["limit"]]
 
 
 class FakeQdrant:
@@ -215,6 +236,466 @@ def _post(monkeypatch, candidates, body):
             json=body,
         )
     return response, store
+
+
+def _claim_record(*, conversation_id: str, message_id: str, request_id: str):
+    anchor = "The report supports the migration."
+    return {
+        "claim_id": "claim_fixture_1",
+        "schema_version": "claim-record.v1",
+        "owner_id": OWNER_ID,
+        "conversation_id": conversation_id,
+        "request_id": request_id,
+        "assistant_message_id": message_id,
+        "surface": SURFACE,
+        "runtime_session_id": "runtime-session-1",
+        "runtime_turn_id": "runtime-turn-1",
+        "claim_anchor": anchor,
+        "claim_anchor_digest": _digest(anchor),
+        "claim_class": "source_backed_fact",
+        "calibration_status": "supported",
+        "evidence_strength": "strong",
+        "confidence": "high",
+        "strongest_authority": "trusted_integration",
+        "freshness_summary": "current",
+        "uncertainty_disclosure_required": False,
+        "validated_evidence_references": [
+            {
+                "ref_type": "integration_event",
+                "ref_id": "retained-event-1",
+                "owner_id": OWNER_ID,
+                "conversation_id": conversation_id,
+                "support_kind": "direct",
+                "authority": "trusted_integration",
+                "freshness_state": "active",
+            }
+        ],
+        "limitation_codes": [],
+        "user_safe_summary": "A retained integration record directly supports it.",
+        "created_at": "2026-07-20T00:00:02+00:00",
+    }
+
+
+def _immediate_request(*, conversation_id: str, explanation_kind: str):
+    return {
+        "schema_version": "immediate-history-resolution.v1",
+        "request_id": "immediate-lookup-1",
+        "owner_id": OWNER_ID,
+        "conversation_id": conversation_id,
+        "surface": SURFACE,
+        "explanation_kind": explanation_kind,
+    }
+
+
+def _post_immediate(monkeypatch, store, body, *, authenticated=True):
+    monkeypatch.setattr(main_module, "settings", _settings(), raising=True)
+    monkeypatch.setattr(main_module, "pg", store, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", FakeQdrant(), raising=True)
+    headers = {"X-Request-ID": body["request_id"]}
+    if authenticated:
+        headers["X-API-Key"] = API_KEY
+    async def post():
+        transport = httpx.ASGITransport(app=main_module.app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.post(
+                "/v1/internal/immediate-history/resolve",
+                headers=headers,
+                json=body,
+            )
+
+    return asyncio.run(post())
+
+
+def test_immediate_history_resolver_requires_internal_authentication(monkeypatch):
+    conversation_id = str(uuid4())
+    store = FakePG([_candidate(conversation_id=conversation_id)])
+
+    response = _post_immediate(
+        monkeypatch,
+        store,
+        _immediate_request(
+            conversation_id=conversation_id,
+            explanation_kind="support",
+        ),
+        authenticated=False,
+    )
+
+    assert response.status_code == 401
+    assert store.calls == []
+    assert store.claim_calls == []
+
+
+def test_immediate_support_resolves_exact_newest_assistant_claim(monkeypatch):
+    conversation_id = str(uuid4())
+    newest = _candidate(
+        conversation_id=conversation_id,
+        content=(
+            "The report supports the migration.\n\n"
+            "PRIVATE ASSISTANT RESPONSE TAIL"
+        ),
+    )
+    older = _candidate(
+        conversation_id=conversation_id,
+        content="An older supported response.",
+        request_id="original-request-old",
+    )
+    claim = _claim_record(
+        conversation_id=conversation_id,
+        message_id=newest["message_id"],
+        request_id=newest["message_request_id"],
+    )
+    store = FakePG([newest, older], [claim])
+
+    response = _post_immediate(
+        monkeypatch,
+        store,
+        _immediate_request(
+            conversation_id=conversation_id,
+            explanation_kind="support",
+        ),
+    )
+
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["resolution_status"] == "resolved"
+    assert result["reason_code"] == "support_record_resolved"
+    assert result["record"]["record_kind"] == "support"
+    assert result["record"]["assistant_message_id"] == newest["message_id"]
+    assert result["record"]["original_request_id"] == newest["message_request_id"]
+    assert result["record"]["support_record"] == claim
+    assert result["record"]["acquisition_record"] is None
+    assert "PRIVATE ASSISTANT RESPONSE TAIL" not in response.text
+    assert store.calls == [
+        {
+            "owner_id": OWNER_ID,
+            "conversation_id": UUID(conversation_id),
+            "limit": 1,
+        }
+    ]
+    assert store.claim_calls == [
+        {
+            "owner_id": OWNER_ID,
+            "conversation_id": conversation_id,
+            "assistant_message_id": newest["message_id"],
+            "request_id": newest["message_request_id"],
+            "limit": 2,
+        }
+    ]
+
+
+def test_immediate_acquisition_resolves_without_client_history_hints(monkeypatch):
+    conversation_id = str(uuid4())
+    candidate = _candidate(conversation_id=conversation_id)
+    store = FakePG([candidate])
+
+    response = _post_immediate(
+        monkeypatch,
+        store,
+        _immediate_request(
+            conversation_id=conversation_id,
+            explanation_kind="acquisition",
+        ),
+    )
+
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["resolution_status"] == "resolved"
+    assert result["reason_code"] == "acquisition_record_resolved"
+    assert result["record"]["record_kind"] == "acquisition"
+    assert result["record"]["support_record"] is None
+    assert result["record"]["acquisition_record"]["acquisition_manifest"] == (
+        candidate["trace_prompt"]["evidence_acquisition"]
+    )
+    assert store.calls[0]["limit"] == 1
+    assert store.claim_calls == []
+
+
+def test_immediate_support_missing_on_newest_never_scans_backward(monkeypatch):
+    conversation_id = str(uuid4())
+    newest = _candidate(
+        conversation_id=conversation_id,
+        content="Newest response without retained support.",
+        request_id="original-request-newest",
+    )
+    older = _candidate(conversation_id=conversation_id)
+    older_claim = _claim_record(
+        conversation_id=conversation_id,
+        message_id=older["message_id"],
+        request_id=older["message_request_id"],
+    )
+    store = FakePG([newest, older], [older_claim])
+
+    response = _post_immediate(
+        monkeypatch,
+        store,
+        _immediate_request(
+            conversation_id=conversation_id,
+            explanation_kind="support",
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["resolution_status"] == "no_record"
+    assert response.json()["reason_code"] == "support_record_not_found"
+    assert response.json()["record"] is None
+    assert store.calls[0]["limit"] == 1
+    assert store.claim_calls[0]["assistant_message_id"] == newest["message_id"]
+
+
+def test_immediate_acquisition_missing_on_newest_never_scans_backward(monkeypatch):
+    conversation_id = str(uuid4())
+    newest = _candidate(
+        conversation_id=conversation_id,
+        content="Newest response without a trace.",
+        trace=False,
+    )
+    older = _candidate(conversation_id=conversation_id)
+    store = FakePG([newest, older])
+
+    response = _post_immediate(
+        monkeypatch,
+        store,
+        _immediate_request(
+            conversation_id=conversation_id,
+            explanation_kind="acquisition",
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["resolution_status"] == "no_record"
+    assert response.json()["reason_code"] == "acquisition_record_not_found"
+    assert response.json()["record"] is None
+    assert store.calls[0]["limit"] == 1
+
+
+def test_immediate_support_multiple_records_is_bounded_ambiguous(monkeypatch):
+    conversation_id = str(uuid4())
+    candidate = _candidate(conversation_id=conversation_id)
+    claim = _claim_record(
+        conversation_id=conversation_id,
+        message_id=candidate["message_id"],
+        request_id=candidate["message_request_id"],
+    )
+    second_claim = copy.deepcopy(claim)
+    second_claim["claim_id"] = "claim_fixture_2"
+    store = FakePG([candidate], [claim, second_claim])
+
+    response = _post_immediate(
+        monkeypatch,
+        store,
+        _immediate_request(
+            conversation_id=conversation_id,
+            explanation_kind="support",
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["resolution_status"] == "ambiguous"
+    assert response.json()["match_count"] == 2
+    assert response.json()["reason_code"] == "support_record_ambiguous"
+    assert response.json()["record"] is None
+    assert store.claim_calls[0]["limit"] == 2
+
+
+def test_immediate_acquisition_privacy_failure_returns_no_record_data(monkeypatch):
+    conversation_id = str(uuid4())
+    candidate = _candidate(conversation_id=conversation_id)
+    candidate["trace_prompt"]["evidence_acquisition"]["acquisition"][
+        "raw_payload"
+    ] = "PRIVATE ACQUISITION SENTINEL"
+    store = FakePG([candidate])
+
+    response = _post_immediate(
+        monkeypatch,
+        store,
+        _immediate_request(
+            conversation_id=conversation_id,
+            explanation_kind="acquisition",
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["resolution_status"] == "invalid"
+    assert response.json()["reason_code"] == "acquisition_record_invalid"
+    assert response.json()["record"] is None
+    assert "PRIVATE ACQUISITION SENTINEL" not in response.text
+
+
+def test_immediate_acquisition_surface_mismatch_fails_closed(monkeypatch):
+    conversation_id = str(uuid4())
+    candidate = _candidate(conversation_id=conversation_id)
+    candidate["trace_surface"] = "other-surface"
+    store = FakePG([candidate])
+
+    response = _post_immediate(
+        monkeypatch,
+        store,
+        _immediate_request(
+            conversation_id=conversation_id,
+            explanation_kind="acquisition",
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["resolution_status"] == "invalid"
+    assert response.json()["reason_code"] == "acquisition_record_invalid"
+    assert response.json()["record"] is None
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["owner", "conversation", "role", "content", "request_id"],
+)
+def test_immediate_newest_message_scope_or_shape_mismatch_fails_closed(
+    monkeypatch,
+    mutation,
+):
+    conversation_id = str(uuid4())
+    candidate = _candidate(conversation_id=conversation_id)
+    if mutation == "owner":
+        candidate["message_owner_id"] = "other-owner"
+    elif mutation == "conversation":
+        candidate["message_conversation_id"] = str(uuid4())
+    elif mutation == "role":
+        candidate["message_role"] = "user"
+    elif mutation == "content":
+        candidate["message_content"] = None
+    else:
+        candidate["message_request_id"] = None
+    store = FakePG([candidate])
+
+    response = _post_immediate(
+        monkeypatch,
+        store,
+        _immediate_request(
+            conversation_id=conversation_id,
+            explanation_kind="support",
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["resolution_status"] == "invalid"
+    assert response.json()["reason_code"] == "immediate_response_invalid"
+    assert response.json()["record"] is None
+    assert store.claim_calls == []
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "owner",
+        "conversation",
+        "message",
+        "request",
+        "surface",
+        "anchor",
+        "digest",
+        "evidence_owner",
+    ],
+)
+def test_immediate_support_record_scope_mismatch_fails_closed(monkeypatch, mutation):
+    conversation_id = str(uuid4())
+    candidate = _candidate(conversation_id=conversation_id)
+    claim = _claim_record(
+        conversation_id=conversation_id,
+        message_id=candidate["message_id"],
+        request_id=candidate["message_request_id"],
+    )
+    if mutation == "owner":
+        claim["owner_id"] = "other-owner"
+    elif mutation == "conversation":
+        claim["conversation_id"] = str(uuid4())
+    elif mutation == "message":
+        claim["assistant_message_id"] = str(uuid4())
+    elif mutation == "request":
+        claim["request_id"] = "other-request"
+    elif mutation == "surface":
+        claim["surface"] = "other-surface"
+    elif mutation == "anchor":
+        claim["claim_anchor"] = "A different assistant response."
+    elif mutation == "digest":
+        claim["claim_anchor_digest"] = "sha256:" + ("f" * 64)
+    else:
+        claim["validated_evidence_references"][0]["owner_id"] = "other-owner"
+    store = FakePG([candidate])
+
+    async def return_unscoped_record(**kwargs):
+        store.claim_calls.append(kwargs)
+        return [copy.deepcopy(claim)]
+
+    store.list_claim_records = return_unscoped_record
+    response = _post_immediate(
+        monkeypatch,
+        store,
+        _immediate_request(
+            conversation_id=conversation_id,
+            explanation_kind="support",
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["resolution_status"] == "invalid"
+    assert response.json()["reason_code"] == "support_record_invalid"
+    assert response.json()["record"] is None
+
+
+@pytest.mark.parametrize("failure", ["candidate", "claim"])
+def test_immediate_history_store_failure_is_bounded_unavailable(monkeypatch, failure):
+    conversation_id = str(uuid4())
+    candidate = _candidate(conversation_id=conversation_id)
+    store = FakePG([candidate])
+    if failure == "candidate":
+        store.candidate_error = True
+    else:
+        store.claim_error = True
+
+    response = _post_immediate(
+        monkeypatch,
+        store,
+        _immediate_request(
+            conversation_id=conversation_id,
+            explanation_kind="support",
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["resolution_status"] == "unavailable"
+    assert response.json()["reason_code"] == "history_store_unavailable"
+    assert response.json()["record"] is None
+
+
+@pytest.mark.parametrize(
+    "extra_field",
+    [
+        "previous_assistant_text",
+        "response_digest",
+        "normalized_first_paragraph",
+        "assistant_message_id",
+        "claim_id",
+        "trace_id",
+        "acquisition_manifest_id",
+    ],
+)
+def test_immediate_request_rejects_client_owned_history_hints(
+    monkeypatch,
+    extra_field,
+):
+    conversation_id = str(uuid4())
+    body = _immediate_request(
+        conversation_id=conversation_id,
+        explanation_kind="support",
+    )
+    body[extra_field] = "client-supplied-history"
+    store = FakePG([_candidate(conversation_id=conversation_id)])
+
+    response = _post_immediate(monkeypatch, store, body)
+
+    assert response.status_code == 422
+    assert store.calls == []
+    assert store.claim_calls == []
 
 
 def test_acquisition_history_resolver_requires_internal_authentication(monkeypatch):
