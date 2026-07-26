@@ -54,6 +54,7 @@ from services.claim_records import (
 )
 from services.acquisition_history import (
     resolve_acquisition_history as load_acquisition_history,
+    resolve_immediate_history as load_immediate_history,
 )
 
 from models import (
@@ -79,6 +80,8 @@ from models import (
     InitiativeEvaluateResponse,
     InitiativeFeedbackRequest,
     InitiativeFeedbackResponse,
+    ImmediateHistoryResolveRequest,
+    ImmediateHistoryResolveResponse,
     ProactiveDeliveryAttemptRequest,
     ProactiveDeliveryAttemptResponse,
     ProactiveEvaluateRequest,
@@ -2775,6 +2778,21 @@ async def resolve_acquisition_history(
 ):
     _require_matching_request_id(request, body.request_id)
     return await load_acquisition_history(pg, body)
+
+
+@app.post(
+    "/v1/internal/immediate-history/resolve",
+    response_model=ImmediateHistoryResolveResponse,
+    tags=["traces"],
+    dependencies=[Depends(require_api_key)],
+    summary="Resolve the newest durable assistant response to its retained record",
+)
+async def resolve_immediate_history(
+    body: ImmediateHistoryResolveRequest,
+    request: Request,
+):
+    _require_matching_request_id(request, body.request_id)
+    return await load_immediate_history(pg, body)
 
 
 @app.post(

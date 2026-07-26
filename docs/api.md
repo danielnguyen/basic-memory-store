@@ -80,6 +80,74 @@ The service also exposes scoped internal diagnostic routes alongside memory,
 episode, derived-data, and recall operations. These routes return bounded
 diagnostics rather than raw model prompts or unrestricted dependency output.
 
+## Internal immediate-history resolution
+
+Authenticated internal callers can resolve the single newest durable assistant
+response in an exact owner and conversation through:
+
+```text
+POST /v1/internal/immediate-history/resolve
+```
+
+The request is strict and versioned:
+
+```json
+{
+  "schema_version": "immediate-history-resolution.v1",
+  "request_id": "history_lookup_1",
+  "owner_id": "owner_123",
+  "conversation_id": "550e8400-e29b-41d4-a716-446655440000",
+  "surface": "telegram",
+  "explanation_kind": "support"
+}
+```
+
+`explanation_kind` is either `support` for an immutable claim record or
+`acquisition` for a retained acquisition manifest. The caller does not send the
+previous assistant response, a response digest or first paragraph, an assistant
+message ID, a claim ID, a trace ID, or a manifest ID. Such extra fields are
+rejected.
+
+The resolver first asks PostgreSQL for exactly one assistant candidate scoped to
+the supplied owner and conversation. It does not inspect an older assistant
+message when the newest candidate is missing, malformed, mismatched, or has no
+record. For `support`, it then requests at most two claim records filtered by the
+server-resolved assistant message and original request IDs so multiple records
+fail as `ambiguous`. For `acquisition`, it validates the newest message, request
+trace, surface, response digest, manifest association, and manifest privacy
+boundary using server-owned data.
+
+A resolved support response has this shape:
+
+```json
+{
+  "schema_version": "immediate-history-resolution.v1",
+  "request_id": "history_lookup_1",
+  "owner_id": "owner_123",
+  "conversation_id": "550e8400-e29b-41d4-a716-446655440000",
+  "surface": "telegram",
+  "explanation_kind": "support",
+  "resolution_status": "resolved",
+  "match_count": 1,
+  "reason_code": "support_record_resolved",
+  "record": {
+    "record_kind": "support",
+    "assistant_message_id": "550e8400-e29b-41d4-a716-446655440001",
+    "original_request_id": "original_chat_request_1",
+    "support_record": {},
+    "acquisition_record": null
+  }
+}
+```
+
+An acquisition result uses `record_kind: "acquisition"`, sets
+`support_record` to null, and returns the existing bounded acquisition-history
+record in `acquisition_record`. Unresolved responses contain no record and use
+one of the bounded statuses `no_record`, `ambiguous`, `invalid`, or
+`unavailable`. Resolution is read-only: it performs no retrieval, model call,
+acquisition, verification, or write. User-facing explanation wording and any
+explicit fresh verification remain orchestration responsibilities.
+
 ## Internal acquisition-history resolution
 
 Authenticated internal callers can resolve one retained assistant response to

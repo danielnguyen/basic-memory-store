@@ -1820,6 +1820,88 @@ class AcquisitionHistoryResolveResponse(BaseModel):
         return self
 
 
+# ---- Immediate history resolution ----
+
+ImmediateHistoryExplanationKind = Literal["support", "acquisition"]
+ImmediateHistoryResolutionStatus = Literal[
+    "resolved",
+    "no_record",
+    "ambiguous",
+    "invalid",
+    "unavailable",
+]
+ImmediateHistoryReasonCode = Literal[
+    "support_record_resolved",
+    "acquisition_record_resolved",
+    "immediate_response_not_found",
+    "immediate_response_invalid",
+    "support_record_not_found",
+    "support_record_ambiguous",
+    "support_record_invalid",
+    "acquisition_record_not_found",
+    "acquisition_record_invalid",
+    "history_store_unavailable",
+]
+
+
+class ImmediateHistoryResolveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["immediate-history-resolution.v1"]
+    request_id: AcquisitionHistoryIdentifier
+    owner_id: AcquisitionHistoryIdentifier
+    conversation_id: UUID
+    surface: Annotated[str, Field(min_length=1, max_length=64)]
+    explanation_kind: ImmediateHistoryExplanationKind
+
+
+class ImmediateHistoryRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    record_kind: ImmediateHistoryExplanationKind
+    assistant_message_id: AcquisitionHistoryIdentifier
+    original_request_id: AcquisitionHistoryIdentifier
+    support_record: ClaimRecord | None = None
+    acquisition_record: AcquisitionHistoryRecord | None = None
+
+    @model_validator(mode="after")
+    def validate_record_kind(self):
+        if self.record_kind == "support":
+            if self.support_record is None or self.acquisition_record is not None:
+                raise ValueError("support_record_shape_invalid")
+        elif self.acquisition_record is None or self.support_record is not None:
+            raise ValueError("acquisition_record_shape_invalid")
+        return self
+
+
+class ImmediateHistoryResolveResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["immediate-history-resolution.v1"]
+    request_id: AcquisitionHistoryIdentifier
+    owner_id: AcquisitionHistoryIdentifier
+    conversation_id: UUID
+    surface: Annotated[str, Field(min_length=1, max_length=64)]
+    explanation_kind: ImmediateHistoryExplanationKind
+    resolution_status: ImmediateHistoryResolutionStatus
+    match_count: Annotated[int, Field(ge=0, le=2)]
+    reason_code: ImmediateHistoryReasonCode
+    record: ImmediateHistoryRecord | None = None
+
+    @model_validator(mode="after")
+    def validate_resolution_shape(self):
+        if self.resolution_status == "resolved":
+            if self.record is None or self.match_count != 1:
+                raise ValueError("resolved_immediate_history_record_required")
+            if self.record.record_kind != self.explanation_kind:
+                raise ValueError("immediate_history_record_kind_mismatch")
+        elif self.record is not None:
+            raise ValueError("unresolved_immediate_history_record_not_allowed")
+        if self.resolution_status == "ambiguous" and self.match_count != 2:
+            raise ValueError("ambiguous_immediate_history_match_count_invalid")
+        return self
+
+
 # ---- Chat ----
 
 class ChatRequest(BaseModel):
