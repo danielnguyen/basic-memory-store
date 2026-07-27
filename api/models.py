@@ -51,6 +51,7 @@ RetrievalFreshnessState = Literal[
 BoundedLabel = Annotated[str, Field(min_length=1, max_length=64)]
 BoundedScopeId = Annotated[str, Field(min_length=1, max_length=160)]
 RESERVED_POLICY_METADATA_KEY = "retrieval_policy_metadata"
+HISTORY_ROOT_LINEAGE_METADATA_KEY = "history_root_lineage"
 
 
 def _normalize_label(value: str) -> str:
@@ -339,14 +340,26 @@ class ConversationResolveResponse(BaseModel):
 
 # ---- Messages ----
 
+class HistoryRootLineage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["history-root-lineage.v1"]
+    root_assistant_message_id: UUID
+    record_kind: Literal["support", "acquisition"]
+
 class MessageCreateRequest(BaseModel):
     RESERVED_POLICY_METADATA_KEY: ClassVar[str] = RESERVED_POLICY_METADATA_KEY
+    HISTORY_ROOT_LINEAGE_METADATA_KEY: ClassVar[str] = HISTORY_ROOT_LINEAGE_METADATA_KEY
 
     owner_id: str = Field(..., examples=["owner_123"])
     role: Role = Field(..., examples=["user"])
     content: str = Field(..., examples=["Hello world"])
     client_id: Optional[str] = Field(default=None, examples=["phone"])
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="Arbitrary JSON metadata.")
+    history_root_lineage: Optional[Any] = Field(
+        default=None,
+        description="Optional assistant history root lineage validated before persistence.",
+    )
     policy_metadata: Optional[RetrievalRecordPolicyMetadata] = None
 
     @model_validator(mode="after")
@@ -1830,7 +1843,7 @@ ImmediateHistoryResolutionStatus = Literal[
     "invalid",
     "unavailable",
 ]
-ImmediateHistoryReasonCode = Literal[
+ImmediateHistoryV1ReasonCode = Literal[
     "support_record_resolved",
     "acquisition_record_resolved",
     "immediate_response_not_found",
@@ -1844,7 +1857,7 @@ ImmediateHistoryReasonCode = Literal[
 ]
 
 
-class ImmediateHistoryResolveRequest(BaseModel):
+class ImmediateHistoryResolveRequestV1(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: Literal["immediate-history-resolution.v1"]
@@ -1874,7 +1887,7 @@ class ImmediateHistoryRecord(BaseModel):
         return self
 
 
-class ImmediateHistoryResolveResponse(BaseModel):
+class ImmediateHistoryResolveResponseV1(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: Literal["immediate-history-resolution.v1"]
@@ -1885,7 +1898,7 @@ class ImmediateHistoryResolveResponse(BaseModel):
     explanation_kind: ImmediateHistoryExplanationKind
     resolution_status: ImmediateHistoryResolutionStatus
     match_count: Annotated[int, Field(ge=0, le=2)]
-    reason_code: ImmediateHistoryReasonCode
+    reason_code: ImmediateHistoryV1ReasonCode
     record: ImmediateHistoryRecord | None = None
 
     @model_validator(mode="after")
@@ -1900,6 +1913,190 @@ class ImmediateHistoryResolveResponse(BaseModel):
         if self.resolution_status == "ambiguous" and self.match_count != 2:
             raise ValueError("ambiguous_immediate_history_match_count_invalid")
         return self
+
+
+ImmediateHistoryResolutionSource = Literal[
+    "direct_record",
+    "root_lineage",
+    "none",
+]
+ImmediateHistoryV2ReasonCode = Literal[
+    "direct_support_record_resolved",
+    "direct_acquisition_record_resolved",
+    "root_lineage_support_record_resolved",
+    "root_lineage_acquisition_record_resolved",
+    "direct_record_absent_lineage_absent",
+    "lineage_root_missing",
+    "lineage_root_unresolvable",
+    "lineage_root_not_direct_record_owner",
+    "direct_support_record_ambiguous",
+    "direct_response_invalid",
+    "direct_support_record_invalid",
+    "direct_acquisition_record_invalid",
+    "lineage_malformed",
+    "lineage_version_unsupported",
+    "lineage_record_kind_mismatch",
+    "lineage_owner_mismatch",
+    "lineage_conversation_mismatch",
+    "lineage_surface_mismatch",
+    "lineage_root_role_invalid",
+    "lineage_root_recursive",
+    "lineage_root_association_invalid",
+    "history_store_unavailable",
+]
+
+
+class ImmediateHistoryResolveRequestV2(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["immediate-history-resolution.v2"]
+    request_id: AcquisitionHistoryIdentifier
+    owner_id: AcquisitionHistoryIdentifier
+    conversation_id: UUID
+    surface: Annotated[str, Field(min_length=1, max_length=64)]
+    explanation_kind: ImmediateHistoryExplanationKind
+
+
+class ImmediateHistoryResolveResponseV2(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["immediate-history-resolution.v2"]
+    request_id: AcquisitionHistoryIdentifier
+    owner_id: AcquisitionHistoryIdentifier
+    conversation_id: UUID
+    surface: Annotated[str, Field(min_length=1, max_length=64)]
+    explanation_kind: ImmediateHistoryExplanationKind
+    resolution_status: ImmediateHistoryResolutionStatus
+    resolution_source: ImmediateHistoryResolutionSource
+    lineage_dereference_count: Literal[0, 1]
+    match_count: Annotated[int, Field(ge=0, le=2)]
+    reason_code: ImmediateHistoryV2ReasonCode
+    record: ImmediateHistoryRecord | None = None
+    history_root_lineage: HistoryRootLineage | None = None
+
+    @model_validator(mode="after")
+    def validate_resolution_shape(self):
+        direct_resolved = {
+            "support": "direct_support_record_resolved",
+            "acquisition": "direct_acquisition_record_resolved",
+        }
+        root_resolved = {
+            "support": "root_lineage_support_record_resolved",
+            "acquisition": "root_lineage_acquisition_record_resolved",
+        }
+        if self.resolution_status == "resolved":
+            if (
+                self.record is None
+                or self.history_root_lineage is None
+                or self.match_count != 1
+                or self.record.record_kind != self.explanation_kind
+                or self.history_root_lineage.record_kind != self.explanation_kind
+            ):
+                raise ValueError("resolved_immediate_history_v2_shape_invalid")
+            if self.resolution_source == "direct_record":
+                if (
+                    self.lineage_dereference_count != 0
+                    or self.reason_code != direct_resolved[self.explanation_kind]
+                ):
+                    raise ValueError("direct_immediate_history_v2_shape_invalid")
+            elif self.resolution_source == "root_lineage":
+                if (
+                    self.lineage_dereference_count != 1
+                    or self.reason_code != root_resolved[self.explanation_kind]
+                ):
+                    raise ValueError("root_immediate_history_v2_shape_invalid")
+            else:
+                raise ValueError("resolved_immediate_history_v2_source_invalid")
+            return self
+
+        if (
+            self.resolution_source != "none"
+            or self.record is not None
+            or self.history_root_lineage is not None
+        ):
+            raise ValueError("unresolved_immediate_history_v2_shape_invalid")
+        if self.resolution_status == "ambiguous":
+            if (
+                self.explanation_kind != "support"
+                or self.reason_code != "direct_support_record_ambiguous"
+                or self.lineage_dereference_count != 0
+                or self.match_count != 2
+            ):
+                raise ValueError("ambiguous_immediate_history_v2_shape_invalid")
+        elif self.match_count != 0:
+            raise ValueError("unresolved_immediate_history_v2_match_count_invalid")
+
+        no_record_reasons = {
+            "direct_record_absent_lineage_absent",
+            "lineage_root_missing",
+            "lineage_root_unresolvable",
+            "lineage_root_not_direct_record_owner",
+        }
+        invalid_reasons = {
+            "direct_response_invalid",
+            "direct_support_record_invalid",
+            "direct_acquisition_record_invalid",
+            "lineage_malformed",
+            "lineage_version_unsupported",
+            "lineage_record_kind_mismatch",
+            "lineage_owner_mismatch",
+            "lineage_conversation_mismatch",
+            "lineage_surface_mismatch",
+            "lineage_root_role_invalid",
+            "lineage_root_recursive",
+            "lineage_root_association_invalid",
+        }
+        if self.resolution_status == "no_record" and self.reason_code not in no_record_reasons:
+            raise ValueError("no_record_immediate_history_v2_reason_invalid")
+        if self.resolution_status == "invalid" and self.reason_code not in invalid_reasons:
+            raise ValueError("invalid_immediate_history_v2_reason_invalid")
+        if (
+            self.resolution_status == "unavailable"
+            and self.reason_code != "history_store_unavailable"
+        ):
+            raise ValueError("unavailable_immediate_history_v2_reason_invalid")
+
+        if (
+            self.reason_code
+            in {"direct_support_record_ambiguous", "direct_support_record_invalid"}
+            and self.explanation_kind != "support"
+        ):
+            raise ValueError("support_immediate_history_v2_reason_kind_invalid")
+        if (
+            self.reason_code == "direct_acquisition_record_invalid"
+            and self.explanation_kind != "acquisition"
+        ):
+            raise ValueError("acquisition_immediate_history_v2_reason_kind_invalid")
+
+        prelookup_reasons = {
+            "direct_record_absent_lineage_absent",
+            "direct_response_invalid",
+            "direct_support_record_invalid",
+            "direct_acquisition_record_invalid",
+            "lineage_malformed",
+            "lineage_version_unsupported",
+            "lineage_record_kind_mismatch",
+        }
+        if self.reason_code in prelookup_reasons and self.lineage_dereference_count != 0:
+            raise ValueError("prelookup_immediate_history_v2_dereference_invalid")
+        if (
+            self.reason_code not in prelookup_reasons
+            and self.reason_code != "history_store_unavailable"
+            and self.resolution_status != "ambiguous"
+            and self.lineage_dereference_count != 1
+        ):
+            raise ValueError("root_immediate_history_v2_dereference_invalid")
+        return self
+
+
+ImmediateHistoryResolveRequest = Annotated[
+    ImmediateHistoryResolveRequestV1 | ImmediateHistoryResolveRequestV2,
+    Field(discriminator="schema_version"),
+]
+ImmediateHistoryResolveResponse = Annotated[
+    ImmediateHistoryResolveResponseV1 | ImmediateHistoryResolveResponseV2,
+    Field(discriminator="schema_version"),
+]
 
 
 # ---- Chat ----

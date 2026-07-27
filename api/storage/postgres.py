@@ -8,6 +8,10 @@ from uuid import UUID, uuid4
 from psycopg_pool import AsyncConnectionPool
 from psycopg.types.json import Json
 
+from services.acquisition_history import (
+    evaluate_acquisition_candidate,
+    evaluate_support_records,
+)
 from services.derivation_versions import EPISODE_DERIVATION_VERSION, MEMORY_ITEM_DERIVATION_VERSION
 from services.memory_lifecycle import bounded_transition_reason
 
@@ -20,6 +24,14 @@ _CLAIM_RECORD_COLUMNS = """
     uncertainty_disclosure_required, evidence_references_json,
     limitation_codes_json, user_safe_summary, created_at
 """
+_HISTORY_ROOT_LINEAGE_METADATA_KEY = "history_root_lineage"
+
+
+class HistoryRootLineageValidationError(Exception):
+    code = "history_root_lineage_invalid"
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
 
 
 def _claim_record_from_row(row: tuple[Any, ...]) -> dict[str, Any]:
@@ -204,6 +216,7 @@ class PostgresStore:
         client_id: str | None = None,
         metadata: dict | None = None,
         policy_metadata: dict | None = None,
+        history_root_lineage: dict[str, Any] | None = None,
     ) -> UUID:
         q = """
         INSERT INTO messages (conversation_id, owner_id, client_id, role, content, metadata, policy_metadata)
@@ -215,15 +228,129 @@ class PostgresStore:
         SET updated_at = now()
         WHERE id = %s;
         """
-        meta_param = Json(metadata) if metadata is not None else None
+        stored_metadata = dict(metadata) if metadata is not None else {}
+        if _HISTORY_ROOT_LINEAGE_METADATA_KEY in stored_metadata:
+            raise HistoryRootLineageValidationError()
+        if history_root_lineage is not None:
+            stored_metadata[_HISTORY_ROOT_LINEAGE_METADATA_KEY] = history_root_lineage
+        meta_param = Json(stored_metadata) if stored_metadata else None
         policy_param = Json(policy_metadata) if policy_metadata is not None else None
         async with self.pool.connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(q, (conversation_id, owner_id, client_id, role, content, meta_param, policy_param))
-                row = await cur.fetchone()
-                # bump conversation activity timestamp
-                await cur.execute(q_touch, (conversation_id,))
-                return row[0]
+            async with conn.transaction():
+                async with conn.cursor() as cur:
+                    if history_root_lineage is not None:
+                        await self._validate_history_root_lineage_append(
+                            cur,
+                            conversation_id=conversation_id,
+                            owner_id=owner_id,
+                            role=role,
+                            lineage=history_root_lineage,
+                        )
+                    await cur.execute(q, (conversation_id, owner_id, client_id, role, content, meta_param, policy_param))
+                    row = await cur.fetchone()
+                    # bump conversation activity timestamp
+                    await cur.execute(q_touch, (conversation_id,))
+                    return row[0]
+
+    async def _validate_history_root_lineage_append(
+        self,
+        cur,
+        *,
+        conversation_id: UUID,
+        owner_id: str,
+        role: str,
+        lineage: dict[str, Any],
+    ) -> None:
+        if role != "assistant":
+            raise HistoryRootLineageValidationError()
+        if (
+            not isinstance(lineage, dict)
+            or set(lineage)
+            != {"schema_version", "root_assistant_message_id", "record_kind"}
+            or lineage.get("schema_version") != "history-root-lineage.v1"
+        ):
+            raise HistoryRootLineageValidationError()
+        try:
+            root_message_id = UUID(str(lineage["root_assistant_message_id"]))
+            record_kind = lineage["record_kind"]
+        except (KeyError, TypeError, ValueError):
+            raise HistoryRootLineageValidationError() from None
+
+        await cur.execute(
+            """
+            SELECT m.id, m.owner_id, m.conversation_id, m.role, m.content,
+                   m.metadata->'request_id', m.metadata->'history_root_lineage',
+                   m.created_at,
+                   t.id, t.request_id, t.owner_id, t.conversation_id, t.surface,
+                   t.status, t.prompt_json, t.created_at
+            FROM messages m
+            LEFT JOIN traces t
+              ON t.request_id = m.metadata->>'request_id'
+            WHERE m.id = %s
+            LIMIT 1
+            FOR SHARE OF m;
+            """,
+            (root_message_id,),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            raise HistoryRootLineageValidationError()
+        candidate = self._assistant_history_candidate_from_row(row)
+        root_request_id = candidate.get("message_request_id")
+        if (
+            candidate.get("message_owner_id") != owner_id
+            or candidate.get("message_conversation_id") != str(conversation_id)
+            or candidate.get("message_role") != "assistant"
+            or candidate.get("message_history_root_lineage") is not None
+            or not isinstance(candidate.get("message_content"), str)
+            or not candidate["message_content"]
+            or not isinstance(root_request_id, str)
+            or not root_request_id
+        ):
+            raise HistoryRootLineageValidationError()
+
+        if record_kind == "support":
+            await cur.execute(
+                f"""
+                SELECT {_CLAIM_RECORD_COLUMNS}
+                FROM claim_records
+                WHERE owner_id = %s
+                  AND conversation_id = %s
+                  AND assistant_message_id = %s
+                  AND request_id = %s
+                ORDER BY created_at ASC, claim_id ASC
+                LIMIT 2;
+                """,
+                (owner_id, conversation_id, root_message_id, root_request_id),
+            )
+            records = [_claim_record_from_row(item) for item in await cur.fetchall()]
+            stored_surface = records[0].get("surface") if len(records) == 1 else None
+            if not isinstance(stored_surface, str):
+                raise HistoryRootLineageValidationError()
+            status, _, _, _ = evaluate_support_records(
+                records,
+                owner_id=owner_id,
+                conversation_id=conversation_id,
+                surface=stored_surface,
+                message_id=str(root_message_id),
+                original_request_id=root_request_id,
+                message_content=candidate["message_content"],
+            )
+        elif record_kind == "acquisition":
+            stored_surface = candidate.get("trace_surface")
+            if not isinstance(stored_surface, str):
+                raise HistoryRootLineageValidationError()
+            status, _ = evaluate_acquisition_candidate(
+                candidate,
+                request_id=root_request_id,
+                owner_id=owner_id,
+                conversation_id=conversation_id,
+                surface=stored_surface,
+            )
+        else:
+            raise HistoryRootLineageValidationError()
+        if status != "resolved":
+            raise HistoryRootLineageValidationError()
 
 
     async def get_recent_messages(self, conversation_id: UUID, limit: int = 10) -> list[dict[str, Any]]:
@@ -4339,7 +4466,8 @@ class PostgresStore:
         bounded_limit = min(max(int(limit), 1), 50)
         query = """
         SELECT m.id, m.owner_id, m.conversation_id, m.role, m.content,
-               m.metadata->'request_id', m.created_at,
+               m.metadata->'request_id', m.metadata->'history_root_lineage',
+               m.created_at,
                t.id, t.request_id, t.owner_id, t.conversation_id, t.surface,
                t.status, t.prompt_json, t.created_at
         FROM messages m
@@ -4358,30 +4486,53 @@ class PostgresStore:
                     (owner_id, conversation_id, bounded_limit),
                 )
                 rows = await cur.fetchall()
-        return [
-            {
-                "message_id": str(row[0]),
-                "message_owner_id": row[1],
-                "message_conversation_id": str(row[2]),
-                "message_role": row[3],
-                "message_content": row[4],
-                "message_request_id": row[5],
-                "message_created_at": str(row[6]),
-                "trace_id": str(row[7]) if row[7] is not None else None,
-                "trace_request_id": row[8],
-                "trace_owner_id": row[9],
-                "trace_conversation_id": (
-                    str(row[10]) if row[10] is not None else None
-                ),
-                "trace_surface": row[11],
-                "trace_status": row[12],
-                "trace_prompt": row[13],
-                "trace_created_at": (
-                    str(row[14]) if row[14] is not None else None
-                ),
-            }
-            for row in rows
-        ]
+        return [self._assistant_history_candidate_from_row(row) for row in rows]
+
+    @staticmethod
+    def _assistant_history_candidate_from_row(row: tuple[Any, ...]) -> dict[str, Any]:
+        return {
+            "message_id": str(row[0]),
+            "message_owner_id": row[1],
+            "message_conversation_id": str(row[2]),
+            "message_role": row[3],
+            "message_content": row[4],
+            "message_request_id": row[5],
+            "message_history_root_lineage": row[6],
+            "message_created_at": str(row[7]),
+            "trace_id": str(row[8]) if row[8] is not None else None,
+            "trace_request_id": row[9],
+            "trace_owner_id": row[10],
+            "trace_conversation_id": (
+                str(row[11]) if row[11] is not None else None
+            ),
+            "trace_surface": row[12],
+            "trace_status": row[13],
+            "trace_prompt": row[14],
+            "trace_created_at": str(row[15]) if row[15] is not None else None,
+        }
+
+    async def get_assistant_history_root(
+        self,
+        *,
+        message_id: UUID,
+    ) -> dict[str, Any] | None:
+        query = """
+        SELECT m.id, m.owner_id, m.conversation_id, m.role, m.content,
+               m.metadata->'request_id', m.metadata->'history_root_lineage',
+               m.created_at,
+               t.id, t.request_id, t.owner_id, t.conversation_id, t.surface,
+               t.status, t.prompt_json, t.created_at
+        FROM messages m
+        LEFT JOIN traces t
+          ON t.request_id = m.metadata->>'request_id'
+        WHERE m.id = %s
+        LIMIT 1;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(query, (message_id,))
+                row = await cur.fetchone()
+        return self._assistant_history_candidate_from_row(row) if row else None
 
     async def create_trace(self, trace: dict[str, Any]) -> UUID:
         q = """
