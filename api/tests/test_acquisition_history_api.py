@@ -1962,3 +1962,66 @@ def test_v2_response_model_rejects_inconsistent_unresolved_shapes(changes):
 
     with pytest.raises(ValueError):
         ImmediateHistoryResolveResponseV2.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "resolution_source,kind",
+    [
+        ("direct_record", "support"),
+        ("direct_record", "acquisition"),
+        ("root_lineage", "support"),
+        ("root_lineage", "acquisition"),
+    ],
+)
+def test_v2_response_model_requires_lineage_root_to_match_record_message(
+    monkeypatch,
+    resolution_source,
+    kind,
+):
+    conversation_id = str(uuid4())
+    root = _candidate(conversation_id=conversation_id)
+    claims = (
+        [
+            _claim_record(
+                conversation_id=conversation_id,
+                message_id=root["message_id"],
+                request_id=root["message_request_id"],
+            )
+        ]
+        if kind == "support"
+        else []
+    )
+    if resolution_source == "direct_record":
+        newest = root
+        roots = {}
+    else:
+        lineage = _history_lineage(root["message_id"], kind)
+        newest = _candidate(
+            conversation_id=conversation_id,
+            content="Historical explanation without a direct retained record.",
+            request_id="historical-explanation-request",
+            trace=False,
+            lineage=lineage,
+        )
+        roots = {root["message_id"]: root}
+    store = ImmediateHistoryFakePG([newest], claims, roots=roots)
+    response = _post_immediate(
+        monkeypatch,
+        store,
+        _v2_request(conversation_id=conversation_id, explanation_kind=kind),
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["resolution_status"] == "resolved"
+    assert payload["resolution_source"] == resolution_source
+    assert (
+        payload["history_root_lineage"]["root_assistant_message_id"]
+        == payload["record"]["assistant_message_id"]
+    )
+    ImmediateHistoryResolveResponseV2.model_validate(payload)
+
+    mismatched = copy.deepcopy(payload)
+    mismatched["history_root_lineage"]["root_assistant_message_id"] = str(uuid4())
+    with pytest.raises(ValueError):
+        ImmediateHistoryResolveResponseV2.model_validate(mismatched)

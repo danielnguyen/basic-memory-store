@@ -13,7 +13,7 @@ import pytest
 
 import main as main_module
 from services.claim_records import validate_claim_record_association
-from storage.postgres import PostgresStore
+from storage.postgres import HistoryRootLineageValidationError, PostgresStore
 from storage.qdrant import _policy_payload
 
 
@@ -1052,6 +1052,34 @@ def test_message_append_without_lineage_remains_unchanged_with_postgresql_16(
     assert metadata == {"request_id": "ordinary-append"}
 
 
+def test_message_append_without_lineage_or_metadata_remains_unchanged(
+    monkeypatch,
+    postgres_database,
+):
+    root = _seed_history_root(postgres_database, record_kind="support")
+    response, qdrant = _append_through_api(
+        monkeypatch,
+        postgres_database,
+        conversation_id=root["conversation_id"],
+        body={
+            "owner_id": root["owner_id"],
+            "role": "assistant",
+            "content": "Ordinary assistant message without metadata.",
+            "client_id": "telegram:lineage-fixture",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert set(response.json()) == {"message_id"}
+    assert len(qdrant.upserts) == 1
+    with psycopg.connect(postgres_database) as conn:
+        metadata = conn.execute(
+            "SELECT metadata FROM messages WHERE id = %s",
+            (response.json()["message_id"],),
+        ).fetchone()[0]
+    assert metadata is None
+
+
 @pytest.mark.parametrize("record_kind", ["support", "acquisition"])
 def test_valid_lineage_append_is_private_durable_and_resolvable_after_reopen(
     monkeypatch,
@@ -1208,6 +1236,136 @@ def test_invalid_lineage_append_is_bounded_atomic_and_leaks_no_root(
         ).fetchone()[0]
     assert after_count == before_count
     assert after_root_metadata == before_root_metadata
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "metadata_omitted",
+        "metadata_null",
+        "request_id_absent",
+        "request_id_null",
+        "request_id_not_string",
+        "request_id_empty",
+        "request_id_forbidden_characters",
+        "request_id_overlong",
+        "content_empty",
+    ],
+)
+def test_lineage_append_rejects_unusable_explanation_identity_atomically(
+    monkeypatch,
+    postgres_database,
+    mutation,
+):
+    root = _seed_history_root(postgres_database, record_kind="support")
+    lineage = _lineage_payload(root)
+    body = {
+        "owner_id": root["owner_id"],
+        "role": "assistant",
+        "content": "Explanation identity must be reusable by history resolution.",
+        "history_root_lineage": lineage,
+    }
+    submitted_request_id = None
+    if mutation == "metadata_null":
+        body["metadata"] = None
+    elif mutation == "request_id_absent":
+        body["metadata"] = {"ordinary": "PRIVATE ORDINARY METADATA"}
+    elif mutation == "request_id_null":
+        body["metadata"] = {"request_id": None}
+    elif mutation == "request_id_not_string":
+        body["metadata"] = {"request_id": 17}
+    elif mutation == "request_id_empty":
+        submitted_request_id = ""
+        body["metadata"] = {"request_id": submitted_request_id}
+    elif mutation == "request_id_forbidden_characters":
+        submitted_request_id = "PRIVATE REQUEST ID WITH SPACES"
+        body["metadata"] = {"request_id": submitted_request_id}
+    elif mutation == "request_id_overlong":
+        submitted_request_id = "PRIVATE-" + ("x" * 121)
+        body["metadata"] = {"request_id": submitted_request_id}
+    elif mutation == "content_empty":
+        submitted_request_id = "bounded-explanation-request"
+        body["metadata"] = {"request_id": submitted_request_id}
+        body["content"] = ""
+    elif mutation != "metadata_omitted":
+        raise AssertionError(mutation)
+
+    with psycopg.connect(postgres_database) as conn:
+        before_count = conn.execute("SELECT count(*) FROM messages").fetchone()[0]
+        before_root_metadata = conn.execute(
+            "SELECT metadata FROM messages WHERE id = %s",
+            (root["message_id"],),
+        ).fetchone()[0]
+    response, qdrant = _append_through_api(
+        monkeypatch,
+        postgres_database,
+        conversation_id=root["conversation_id"],
+        body=body,
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "history_root_lineage_invalid"}
+    for sentinel in (
+        submitted_request_id,
+        str(root["message_id"]),
+        json.dumps(lineage, sort_keys=True),
+        "PRIVATE ORDINARY METADATA",
+    ):
+        if sentinel:
+            assert sentinel not in response.text
+    assert qdrant.upserts == []
+    with psycopg.connect(postgres_database) as conn:
+        after_count = conn.execute("SELECT count(*) FROM messages").fetchone()[0]
+        after_root_metadata = conn.execute(
+            "SELECT metadata FROM messages WHERE id = %s",
+            (root["message_id"],),
+        ).fetchone()[0]
+    assert after_count == before_count
+    assert after_root_metadata == before_root_metadata
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        None,
+        {},
+        {"request_id": None},
+        {"request_id": 17},
+        {"request_id": ""},
+        {"request_id": "PRIVATE REQUEST ID WITH SPACES"},
+        {"request_id": "x" * 121},
+    ],
+)
+def test_postgres_store_rejects_lineage_without_valid_explanation_request_id(
+    postgres_database,
+    metadata,
+):
+    root = _seed_history_root(postgres_database, record_kind="support")
+    lineage = _lineage_payload(root)
+    with psycopg.connect(postgres_database) as conn:
+        before_count = conn.execute("SELECT count(*) FROM messages").fetchone()[0]
+
+    async def append():
+        store = PostgresStore(postgres_database)
+        await store.open()
+        try:
+            with pytest.raises(HistoryRootLineageValidationError) as exc:
+                await store.add_message(
+                    conversation_id=root["conversation_id"],
+                    owner_id=root["owner_id"],
+                    role="assistant",
+                    content="Direct storage explanation append.",
+                    metadata=metadata,
+                    history_root_lineage=lineage,
+                )
+            assert str(exc.value) == "history_root_lineage_invalid"
+        finally:
+            await store.close()
+
+    asyncio.run(append())
+    with psycopg.connect(postgres_database) as conn:
+        after_count = conn.execute("SELECT count(*) FROM messages").fetchone()[0]
+    assert after_count == before_count
 
 
 @pytest.mark.parametrize(

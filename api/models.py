@@ -1991,6 +1991,8 @@ class ImmediateHistoryResolveResponseV2(BaseModel):
                 or self.match_count != 1
                 or self.record.record_kind != self.explanation_kind
                 or self.history_root_lineage.record_kind != self.explanation_kind
+                or str(self.history_root_lineage.root_assistant_message_id)
+                != self.record.assistant_message_id
             ):
                 raise ValueError("resolved_immediate_history_v2_shape_invalid")
             if self.resolution_source == "direct_record":

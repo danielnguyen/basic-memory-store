@@ -52,7 +52,9 @@ Assistant message append accepts one optional dedicated
 The field is accepted only for an assistant. Its strict object contains only
 the exact schema version, a UUID root assistant message ID, and a closed
 `support` or `acquisition` record kind. Callers cannot inject the reserved
-`history_root_lineage` key through arbitrary `metadata`.
+`history_root_lineage` key through arbitrary `metadata`. A lineage-bearing
+explanation must also have non-empty content and ordinary metadata containing
+a bounded valid `request_id` under the immediate-history identifier contract.
 
 The submitted object is untrusted. Before inserting the explanation, Basic
 Memory Store verifies in one PostgreSQL transaction that the root already
@@ -66,7 +68,9 @@ returns lineage.
 
 Invalid lineage rejects the whole append with bounded
 `history_root_lineage_invalid` detail. The message is not inserted, the root is
-not altered, and no submitted lineage value or root identity is returned.
+not altered, and no submitted request identity, lineage value, or root identity
+is returned. Missing or invalid explanation request identity is the same bounded
+whole-append failure.
 Append has no surface field; record-surface comparison occurs when v2 history
 is resolved. Appends without lineage retain their existing behavior. This
 contract adds no column, table, migration, signing, encryption, or token.

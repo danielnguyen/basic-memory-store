@@ -5,9 +5,11 @@ import re
 from typing import Any, Callable, Optional
 from uuid import UUID, uuid4
 
+from pydantic import TypeAdapter, ValidationError
 from psycopg_pool import AsyncConnectionPool
 from psycopg.types.json import Json
 
+from models import AcquisitionHistoryIdentifier
 from services.acquisition_history import (
     evaluate_acquisition_candidate,
     evaluate_support_records,
@@ -25,6 +27,7 @@ _CLAIM_RECORD_COLUMNS = """
     limitation_codes_json, user_safe_summary, created_at
 """
 _HISTORY_ROOT_LINEAGE_METADATA_KEY = "history_root_lineage"
+_HISTORY_REQUEST_ID_ADAPTER = TypeAdapter(AcquisitionHistoryIdentifier)
 
 
 class HistoryRootLineageValidationError(Exception):
@@ -228,6 +231,12 @@ class PostgresStore:
         SET updated_at = now()
         WHERE id = %s;
         """
+        if history_root_lineage is not None:
+            self._validate_history_lineage_message(
+                role=role,
+                content=content,
+                metadata=metadata,
+            )
         stored_metadata = dict(metadata) if metadata is not None else {}
         if _HISTORY_ROOT_LINEAGE_METADATA_KEY in stored_metadata:
             raise HistoryRootLineageValidationError()
@@ -251,6 +260,28 @@ class PostgresStore:
                     # bump conversation activity timestamp
                     await cur.execute(q_touch, (conversation_id,))
                     return row[0]
+
+    @staticmethod
+    def _validate_history_lineage_message(
+        *,
+        role: str,
+        content: str,
+        metadata: dict | None,
+    ) -> None:
+        if (
+            role != "assistant"
+            or not isinstance(content, str)
+            or not content
+            or not isinstance(metadata, dict)
+        ):
+            raise HistoryRootLineageValidationError()
+        try:
+            _HISTORY_REQUEST_ID_ADAPTER.validate_python(
+                metadata.get("request_id"),
+                strict=True,
+            )
+        except ValidationError:
+            raise HistoryRootLineageValidationError() from None
 
     async def _validate_history_root_lineage_append(
         self,
