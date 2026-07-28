@@ -15,7 +15,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, generate_latest
 
 from settings import get_settings
 from clients.litellm import LiteLLMClient
-from storage.postgres import PostgresStore
+from storage.postgres import HistoryRootLineageValidationError, PostgresStore
 from storage.qdrant import QdrantStore, RetrievalHit as QdrantHit
 from storage.object_store import ObjectStoreClient
 from prompts.context import assemble_messages, build_artifact_context_block, build_context_block
@@ -80,6 +80,7 @@ from models import (
     InitiativeEvaluateResponse,
     InitiativeFeedbackRequest,
     InitiativeFeedbackResponse,
+    HistoryRootLineage,
     ImmediateHistoryResolveRequest,
     ImmediateHistoryResolveResponse,
     ProactiveDeliveryAttemptRequest,
@@ -691,15 +692,40 @@ async def add_message(conversation_id: str, body: MessageCreateRequest):
     cid = UUID(conversation_id)
     policy_metadata = body.policy_metadata.model_dump(mode="json") if body.policy_metadata else None
 
-    mid = await pg.add_message(
-        conversation_id=cid,
-        owner_id=body.owner_id,
-        role=body.role,
-        content=body.content,
-        client_id=body.client_id,
-        metadata=body.metadata,
-        policy_metadata=policy_metadata,
-    )
+    lineage = None
+    if isinstance(body.metadata, dict) and "history_root_lineage" in body.metadata:
+        raise HTTPException(status_code=422, detail="history_root_lineage_invalid")
+    if body.history_root_lineage is not None:
+        if body.role != "assistant":
+            raise HTTPException(status_code=422, detail="history_root_lineage_invalid")
+        try:
+            lineage = HistoryRootLineage.model_validate(
+                body.history_root_lineage
+            ).model_dump(mode="json")
+        except Exception:
+            raise HTTPException(
+                status_code=422,
+                detail="history_root_lineage_invalid",
+            ) from None
+
+    add_message_args = {
+        "conversation_id": cid,
+        "owner_id": body.owner_id,
+        "role": body.role,
+        "content": body.content,
+        "client_id": body.client_id,
+        "metadata": body.metadata,
+        "policy_metadata": policy_metadata,
+    }
+    if lineage is not None:
+        add_message_args["history_root_lineage"] = lineage
+    try:
+        mid = await pg.add_message(**add_message_args)
+    except HistoryRootLineageValidationError:
+        raise HTTPException(
+            status_code=422,
+            detail="history_root_lineage_invalid",
+        ) from None
 
     if body.role in ("user", "assistant") and should_index_message(body.role, body.content):
         try:

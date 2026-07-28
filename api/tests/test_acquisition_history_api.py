@@ -12,6 +12,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 import main as main_module
+from models import ImmediateHistoryResolveResponseV2
 
 
 API_KEY = "testkey"
@@ -39,11 +40,14 @@ class FakePG:
 
 
 class ImmediateHistoryFakePG(FakePG):
-    def __init__(self, candidates, claim_records=None):
+    def __init__(self, candidates, claim_records=None, roots=None):
         super().__init__(candidates)
         self.claim_records = claim_records or []
+        self.roots = roots or {}
         self.claim_calls = []
+        self.root_calls = []
         self.claim_error = False
+        self.root_error = False
 
     async def list_claim_records(self, **kwargs):
         if self.claim_error:
@@ -57,6 +61,12 @@ class ImmediateHistoryFakePG(FakePG):
             and record["assistant_message_id"] == kwargs["assistant_message_id"]
             and record["request_id"] == kwargs["request_id"]
         ][: kwargs["limit"]]
+
+    async def get_assistant_history_root(self, **kwargs):
+        self.root_calls.append(kwargs)
+        if self.root_error:
+            raise RuntimeError("root store unavailable")
+        return copy.deepcopy(self.roots.get(str(kwargs["message_id"])))
 
 
 class FakeQdrant:
@@ -167,6 +177,7 @@ def _candidate(
     message_id: str | None = None,
     manifest=None,
     trace: bool = True,
+    lineage=None,
 ):
     message_id = message_id or str(uuid4())
     if manifest is None:
@@ -178,6 +189,7 @@ def _candidate(
         "message_role": "assistant",
         "message_content": content,
         "message_request_id": request_id,
+        "message_history_root_lineage": lineage,
         "message_created_at": "2026-07-20T00:00:00+00:00",
         "trace_id": str(uuid4()) if trace else None,
         "trace_request_id": request_id if trace else None,
@@ -281,9 +293,14 @@ def _claim_record(*, conversation_id: str, message_id: str, request_id: str):
     }
 
 
-def _immediate_request(*, conversation_id: str, explanation_kind: str):
+def _immediate_request(
+    *,
+    conversation_id: str,
+    explanation_kind: str,
+    schema_version: str = "immediate-history-resolution.v1",
+):
     return {
-        "schema_version": "immediate-history-resolution.v1",
+        "schema_version": schema_version,
         "request_id": "immediate-lookup-1",
         "owner_id": OWNER_ID,
         "conversation_id": conversation_id,
@@ -1333,3 +1350,678 @@ def test_request_contract_rejects_extra_and_conflicting_fields(monkeypatch, upda
     )
     assert response.status_code == 422
     assert store.calls == []
+
+
+def _history_lineage(root_message_id: str, record_kind: str) -> dict:
+    return {
+        "schema_version": "history-root-lineage.v1",
+        "root_assistant_message_id": root_message_id,
+        "record_kind": record_kind,
+    }
+
+
+def _v2_request(*, conversation_id: str, explanation_kind: str) -> dict:
+    return _immediate_request(
+        conversation_id=conversation_id,
+        explanation_kind=explanation_kind,
+        schema_version="immediate-history-resolution.v2",
+    )
+
+
+def _assert_v2_unresolved_is_private(response, *sentinels: str) -> dict:
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["resolution_source"] == "none"
+    assert result["record"] is None
+    assert result["history_root_lineage"] is None
+    for sentinel in sentinels:
+        assert sentinel not in response.text
+    return result
+
+
+def test_v1_wire_shape_remains_exact_for_support_and_acquisition(monkeypatch):
+    conversation_id = str(uuid4())
+    candidate = _candidate(conversation_id=conversation_id)
+    claim = _claim_record(
+        conversation_id=conversation_id,
+        message_id=candidate["message_id"],
+        request_id=candidate["message_request_id"],
+    )
+    store = ImmediateHistoryFakePG([candidate], [claim])
+
+    for kind in ("support", "acquisition"):
+        response = _post_immediate(
+            monkeypatch,
+            store,
+            _immediate_request(
+                conversation_id=conversation_id,
+                explanation_kind=kind,
+            ),
+        )
+        assert response.status_code == 200, response.text
+        assert set(response.json()) == {
+            "schema_version",
+            "request_id",
+            "owner_id",
+            "conversation_id",
+            "surface",
+            "explanation_kind",
+            "resolution_status",
+            "match_count",
+            "reason_code",
+            "record",
+        }
+        assert "history_root_lineage" not in response.text
+        assert "resolution_source" not in response.text
+        assert "lineage_dereference_count" not in response.text
+
+
+@pytest.mark.parametrize("kind", ["support", "acquisition"])
+def test_v2_direct_records_return_canonical_minimal_lineage(monkeypatch, kind):
+    conversation_id = str(uuid4())
+    candidate = _candidate(conversation_id=conversation_id)
+    claims = (
+        [
+            _claim_record(
+                conversation_id=conversation_id,
+                message_id=candidate["message_id"],
+                request_id=candidate["message_request_id"],
+            )
+        ]
+        if kind == "support"
+        else []
+    )
+    store = ImmediateHistoryFakePG([candidate], claims)
+
+    response = _post_immediate(
+        monkeypatch,
+        store,
+        _v2_request(conversation_id=conversation_id, explanation_kind=kind),
+    )
+
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["resolution_status"] == "resolved"
+    assert result["resolution_source"] == "direct_record"
+    assert result["lineage_dereference_count"] == 0
+    assert result["match_count"] == 1
+    assert result["reason_code"] == f"direct_{kind}_record_resolved"
+    assert result["history_root_lineage"] == _history_lineage(
+        candidate["message_id"], kind
+    )
+    assert set(result["history_root_lineage"]) == {
+        "schema_version",
+        "root_assistant_message_id",
+        "record_kind",
+    }
+    assert store.calls == [
+        {
+            "owner_id": OWNER_ID,
+            "conversation_id": UUID(conversation_id),
+            "limit": 1,
+        }
+    ]
+    assert store.root_calls == []
+    if kind == "acquisition":
+        assert store.claim_calls == []
+
+
+@pytest.mark.parametrize("kind", ["support", "acquisition"])
+def test_v2_valid_lineage_resolves_same_exact_root_record_once(monkeypatch, kind):
+    conversation_id = str(uuid4())
+    root = _candidate(conversation_id=conversation_id)
+    lineage = _history_lineage(root["message_id"], kind)
+    newest = _candidate(
+        conversation_id=conversation_id,
+        content="Historical explanation without a direct retained record.",
+        request_id="historical-explanation-request",
+        trace=False,
+        lineage=lineage,
+    )
+    claims = (
+        [
+            _claim_record(
+                conversation_id=conversation_id,
+                message_id=root["message_id"],
+                request_id=root["message_request_id"],
+            )
+        ]
+        if kind == "support"
+        else []
+    )
+    store = ImmediateHistoryFakePG(
+        [newest],
+        claims,
+        roots={root["message_id"]: root},
+    )
+
+    response = _post_immediate(
+        monkeypatch,
+        store,
+        _v2_request(conversation_id=conversation_id, explanation_kind=kind),
+    )
+
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["resolution_status"] == "resolved"
+    assert result["resolution_source"] == "root_lineage"
+    assert result["lineage_dereference_count"] == 1
+    assert result["reason_code"] == f"root_lineage_{kind}_record_resolved"
+    assert result["record"]["assistant_message_id"] == root["message_id"]
+    assert result["record"]["original_request_id"] == root["message_request_id"]
+    assert result["history_root_lineage"] == lineage
+    assert len(store.calls) == 1
+    assert store.calls[0]["limit"] == 1
+    assert store.root_calls == [{"message_id": UUID(root["message_id"])}]
+    if kind == "acquisition":
+        assert store.claim_calls == []
+
+
+def test_v2_three_successive_explanations_preserve_original_direct_root(monkeypatch):
+    conversation_id = str(uuid4())
+    root = _candidate(conversation_id=conversation_id)
+    lineage = _history_lineage(root["message_id"], "acquisition")
+    returned_roots = []
+    for index in range(3):
+        newest = _candidate(
+            conversation_id=conversation_id,
+            content=f"Historical explanation {index}.",
+            request_id=f"historical-explanation-{index}",
+            trace=False,
+            lineage=lineage,
+        )
+        store = ImmediateHistoryFakePG(
+            [newest], roots={root["message_id"]: root}
+        )
+        result = _post_immediate(
+            monkeypatch,
+            store,
+            _v2_request(
+                conversation_id=conversation_id,
+                explanation_kind="acquisition",
+            ),
+        ).json()
+        returned_roots.append(
+            result["history_root_lineage"]["root_assistant_message_id"]
+        )
+        assert newest["message_id"] not in returned_roots
+    assert returned_roots == [root["message_id"]] * 3
+
+
+def test_v2_direct_no_record_without_lineage_terminates_without_root_lookup(monkeypatch):
+    conversation_id = str(uuid4())
+    newest = _candidate(
+        conversation_id=conversation_id,
+        content="Ordinary assistant answer.",
+        trace=False,
+    )
+    store = ImmediateHistoryFakePG([newest])
+
+    result = _assert_v2_unresolved_is_private(
+        _post_immediate(
+            monkeypatch,
+            store,
+            _v2_request(
+                conversation_id=conversation_id,
+                explanation_kind="acquisition",
+            ),
+        ),
+        newest["message_id"],
+    )
+
+    assert result["resolution_status"] == "no_record"
+    assert result["reason_code"] == "direct_record_absent_lineage_absent"
+    assert result["lineage_dereference_count"] == 0
+    assert store.root_calls == []
+
+
+@pytest.mark.parametrize(
+    "direct_failure,expected_status,expected_reason",
+    [
+        ("invalid_response", "invalid", "direct_response_invalid"),
+        ("invalid_support", "invalid", "direct_support_record_invalid"),
+        ("ambiguous_support", "ambiguous", "direct_support_record_ambiguous"),
+        ("invalid_acquisition", "invalid", "direct_acquisition_record_invalid"),
+        ("unavailable_candidate", "unavailable", "history_store_unavailable"),
+        ("unavailable_support", "unavailable", "history_store_unavailable"),
+    ],
+)
+def test_v2_direct_non_no_record_outcomes_never_inspect_lineage(
+    monkeypatch,
+    direct_failure,
+    expected_status,
+    expected_reason,
+):
+    conversation_id = str(uuid4())
+    root_id = str(uuid4())
+    candidate = _candidate(
+        conversation_id=conversation_id,
+        lineage=_history_lineage(root_id, "support"),
+    )
+    kind = "support"
+    claims = []
+    if direct_failure == "invalid_response":
+        candidate["message_request_id"] = None
+    elif direct_failure == "invalid_support":
+        claim = _claim_record(
+            conversation_id=conversation_id,
+            message_id=candidate["message_id"],
+            request_id=candidate["message_request_id"],
+        )
+        claim["claim_anchor_digest"] = "sha256:" + ("f" * 64)
+        claims = [claim]
+    elif direct_failure == "ambiguous_support":
+        claim = _claim_record(
+            conversation_id=conversation_id,
+            message_id=candidate["message_id"],
+            request_id=candidate["message_request_id"],
+        )
+        second = copy.deepcopy(claim)
+        second["claim_id"] = "claim_fixture_2"
+        claims = [claim, second]
+    elif direct_failure == "invalid_acquisition":
+        kind = "acquisition"
+        candidate["message_history_root_lineage"]["record_kind"] = "acquisition"
+        candidate["trace_prompt"]["evidence_acquisition"]["response_digest"] = (
+            "sha256:" + ("f" * 64)
+        )
+    store = ImmediateHistoryFakePG([candidate], claims)
+    if direct_failure == "unavailable_candidate":
+        store.candidate_error = True
+    elif direct_failure == "unavailable_support":
+        store.claim_error = True
+
+    result = _assert_v2_unresolved_is_private(
+        _post_immediate(
+            monkeypatch,
+            store,
+            _v2_request(
+                conversation_id=conversation_id,
+                explanation_kind=kind,
+            ),
+        ),
+        root_id,
+    )
+
+    assert result["resolution_status"] == expected_status
+    assert result["reason_code"] == expected_reason
+    assert result["lineage_dereference_count"] == 0
+    assert store.root_calls == []
+
+
+@pytest.mark.parametrize(
+    "lineage,kind,expected_reason",
+    [
+        ("not-an-object", "support", "lineage_malformed"),
+        (
+            {
+                "schema_version": "history-root-lineage.v2",
+                "root_assistant_message_id": str(uuid4()),
+                "record_kind": "support",
+            },
+            "support",
+            "lineage_version_unsupported",
+        ),
+        (
+            {
+                **_history_lineage(str(uuid4()), "support"),
+                "extra": "forbidden",
+            },
+            "support",
+            "lineage_malformed",
+        ),
+        (
+            _history_lineage("x" * 121, "support"),
+            "support",
+            "lineage_malformed",
+        ),
+        (
+            {
+                "schema_version": "history-root-lineage.v1",
+                "root_assistant_message_id": 17,
+                "record_kind": "support",
+            },
+            "support",
+            "lineage_malformed",
+        ),
+        (
+            _history_lineage(str(uuid4()), "acquisition"),
+            "support",
+            "lineage_record_kind_mismatch",
+        ),
+        (
+            _history_lineage(str(uuid4()), "support"),
+            "acquisition",
+            "lineage_record_kind_mismatch",
+        ),
+    ],
+)
+def test_v2_invalid_or_wrong_kind_lineage_fails_before_root_lookup(
+    monkeypatch,
+    lineage,
+    kind,
+    expected_reason,
+):
+    conversation_id = str(uuid4())
+    candidate = _candidate(
+        conversation_id=conversation_id,
+        content="Historical explanation.",
+        trace=False,
+        lineage=lineage,
+    )
+    store = ImmediateHistoryFakePG([candidate])
+    serialized_lineage = json.dumps(lineage, sort_keys=True)
+
+    result = _assert_v2_unresolved_is_private(
+        _post_immediate(
+            monkeypatch,
+            store,
+            _v2_request(conversation_id=conversation_id, explanation_kind=kind),
+        ),
+        serialized_lineage,
+    )
+
+    assert result["resolution_status"] == "invalid"
+    assert result["reason_code"] == expected_reason
+    assert result["lineage_dereference_count"] == 0
+    assert store.root_calls == []
+    if kind == "acquisition":
+        assert store.claim_calls == []
+
+
+@pytest.mark.parametrize(
+    "root_failure,expected_status,expected_reason",
+    [
+        ("missing", "no_record", "lineage_root_missing"),
+        ("unresolvable", "no_record", "lineage_root_unresolvable"),
+        ("owner", "invalid", "lineage_owner_mismatch"),
+        ("conversation", "invalid", "lineage_conversation_mismatch"),
+        ("role", "invalid", "lineage_root_role_invalid"),
+        ("recursive", "invalid", "lineage_root_recursive"),
+        ("surface", "invalid", "lineage_surface_mismatch"),
+        ("no_record", "no_record", "lineage_root_not_direct_record_owner"),
+        ("association", "invalid", "lineage_root_association_invalid"),
+        ("unavailable", "unavailable", "history_store_unavailable"),
+    ],
+)
+def test_v2_root_lookup_failures_are_bounded_and_private(
+    monkeypatch,
+    root_failure,
+    expected_status,
+    expected_reason,
+):
+    conversation_id = str(uuid4())
+    root = _candidate(conversation_id=conversation_id)
+    root_id = root["message_id"]
+    lineage = _history_lineage(root_id, "support")
+    newest = _candidate(
+        conversation_id=conversation_id,
+        content="Historical explanation.",
+        trace=False,
+        lineage=lineage,
+    )
+    claim = _claim_record(
+        conversation_id=conversation_id,
+        message_id=root_id,
+        request_id=root["message_request_id"],
+    )
+    roots = {root_id: root}
+    claims = [claim]
+    if root_failure == "missing":
+        roots = {}
+    elif root_failure == "unresolvable":
+        root["message_request_id"] = None
+    elif root_failure == "owner":
+        root["message_owner_id"] = "PRIVATE OTHER OWNER"
+    elif root_failure == "conversation":
+        root["message_conversation_id"] = str(uuid4())
+    elif root_failure == "role":
+        root["message_role"] = "user"
+    elif root_failure == "recursive":
+        root["message_history_root_lineage"] = _history_lineage(
+            str(uuid4()), "support"
+        )
+    elif root_failure == "surface":
+        claim["surface"] = "other-surface"
+    elif root_failure == "no_record":
+        claims = []
+    elif root_failure == "association":
+        claim["claim_anchor_digest"] = "sha256:" + ("f" * 64)
+    store = ImmediateHistoryFakePG([newest], claims, roots=roots)
+    if root_failure == "unavailable":
+        store.root_error = True
+
+    result = _assert_v2_unresolved_is_private(
+        _post_immediate(
+            monkeypatch,
+            store,
+            _v2_request(
+                conversation_id=conversation_id,
+                explanation_kind="support",
+            ),
+        ),
+        root_id,
+        json.dumps(lineage, sort_keys=True),
+        "PRIVATE OTHER OWNER",
+    )
+
+    assert result["resolution_status"] == expected_status
+    assert result["reason_code"] == expected_reason
+    assert result["lineage_dereference_count"] == 1
+    assert len(store.root_calls) == 1
+
+
+def test_v2_privacy_invalid_acquisition_root_leaks_no_private_content(monkeypatch):
+    conversation_id = str(uuid4())
+    root = _candidate(conversation_id=conversation_id)
+    root["trace_prompt"]["evidence_acquisition"]["acquisition"][
+        "raw_payload"
+    ] = "PRIVATE ROOT ACQUISITION SENTINEL"
+    lineage = _history_lineage(root["message_id"], "acquisition")
+    newest = _candidate(
+        conversation_id=conversation_id,
+        content="Historical explanation.",
+        trace=False,
+        lineage=lineage,
+    )
+    store = ImmediateHistoryFakePG(
+        [newest], roots={root["message_id"]: root}
+    )
+
+    result = _assert_v2_unresolved_is_private(
+        _post_immediate(
+            monkeypatch,
+            store,
+            _v2_request(
+                conversation_id=conversation_id,
+                explanation_kind="acquisition",
+            ),
+        ),
+        root["message_id"],
+        "PRIVATE ROOT ACQUISITION SENTINEL",
+    )
+
+    assert result["reason_code"] == "lineage_root_association_invalid"
+    assert store.claim_calls == []
+
+
+@pytest.mark.parametrize(
+    "extra_field",
+    [
+        "previous_assistant_text",
+        "lineage",
+        "history_root_lineage",
+        "root_assistant_message_id",
+        "assistant_message_id",
+        "current_user_message_id",
+        "response_digest",
+        "normalized_first_paragraph",
+        "claim_id",
+        "trace_id",
+        "manifest_id",
+        "acquisition_manifest_id",
+        "source_identity",
+        "alternate_record_kind",
+        "fallback_kind",
+    ],
+)
+def test_v2_request_rejects_every_client_owned_target_or_history_hint(
+    monkeypatch,
+    extra_field,
+):
+    conversation_id = str(uuid4())
+    body = _v2_request(
+        conversation_id=conversation_id,
+        explanation_kind="support",
+    )
+    body[extra_field] = "PRIVATE CLIENT TARGET"
+    store = ImmediateHistoryFakePG(
+        [_candidate(conversation_id=conversation_id)]
+    )
+
+    response = _post_immediate(monkeypatch, store, body)
+
+    assert response.status_code == 422
+    assert store.calls == []
+    assert store.root_calls == []
+
+
+def test_v2_request_id_header_mismatch_remains_enforced(monkeypatch):
+    conversation_id = str(uuid4())
+    body = _v2_request(
+        conversation_id=conversation_id,
+        explanation_kind="support",
+    )
+    store = ImmediateHistoryFakePG(
+        [_candidate(conversation_id=conversation_id)]
+    )
+    monkeypatch.setattr(main_module, "settings", _settings(), raising=True)
+    monkeypatch.setattr(main_module, "pg", store, raising=True)
+    monkeypatch.setattr(main_module, "qdrant", FakeQdrant(), raising=True)
+
+    async def post():
+        transport = httpx.ASGITransport(app=main_module.app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.post(
+                "/v1/internal/immediate-history/resolve",
+                headers={
+                    "X-API-Key": API_KEY,
+                    "X-Request-ID": "different-request-id",
+                },
+                json=body,
+            )
+
+    response = asyncio.run(post())
+    assert response.status_code == 400
+    assert store.calls == []
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"resolution_source": "direct_record"},
+        {"lineage_dereference_count": 1},
+        {
+            "reason_code": "lineage_root_missing",
+            "lineage_dereference_count": 0,
+        },
+        {
+            "explanation_kind": "acquisition",
+            "reason_code": "direct_support_record_invalid",
+            "resolution_status": "invalid",
+        },
+        {
+            "history_root_lineage": {
+                "schema_version": "history-root-lineage.v1",
+                "root_assistant_message_id": str(uuid4()),
+                "record_kind": "support",
+            }
+        },
+    ],
+)
+def test_v2_response_model_rejects_inconsistent_unresolved_shapes(changes):
+    payload = {
+        "schema_version": "immediate-history-resolution.v2",
+        "request_id": "request-current-1",
+        "owner_id": OWNER_ID,
+        "conversation_id": str(uuid4()),
+        "surface": SURFACE,
+        "explanation_kind": "support",
+        "resolution_status": "no_record",
+        "resolution_source": "none",
+        "lineage_dereference_count": 0,
+        "match_count": 0,
+        "reason_code": "direct_record_absent_lineage_absent",
+        "record": None,
+        "history_root_lineage": None,
+    }
+    payload.update(changes)
+
+    with pytest.raises(ValueError):
+        ImmediateHistoryResolveResponseV2.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "resolution_source,kind",
+    [
+        ("direct_record", "support"),
+        ("direct_record", "acquisition"),
+        ("root_lineage", "support"),
+        ("root_lineage", "acquisition"),
+    ],
+)
+def test_v2_response_model_requires_lineage_root_to_match_record_message(
+    monkeypatch,
+    resolution_source,
+    kind,
+):
+    conversation_id = str(uuid4())
+    root = _candidate(conversation_id=conversation_id)
+    claims = (
+        [
+            _claim_record(
+                conversation_id=conversation_id,
+                message_id=root["message_id"],
+                request_id=root["message_request_id"],
+            )
+        ]
+        if kind == "support"
+        else []
+    )
+    if resolution_source == "direct_record":
+        newest = root
+        roots = {}
+    else:
+        lineage = _history_lineage(root["message_id"], kind)
+        newest = _candidate(
+            conversation_id=conversation_id,
+            content="Historical explanation without a direct retained record.",
+            request_id="historical-explanation-request",
+            trace=False,
+            lineage=lineage,
+        )
+        roots = {root["message_id"]: root}
+    store = ImmediateHistoryFakePG([newest], claims, roots=roots)
+    response = _post_immediate(
+        monkeypatch,
+        store,
+        _v2_request(conversation_id=conversation_id, explanation_kind=kind),
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["resolution_status"] == "resolved"
+    assert payload["resolution_source"] == resolution_source
+    assert (
+        payload["history_root_lineage"]["root_assistant_message_id"]
+        == payload["record"]["assistant_message_id"]
+    )
+    ImmediateHistoryResolveResponseV2.model_validate(payload)
+
+    mismatched = copy.deepcopy(payload)
+    mismatched["history_root_lineage"]["root_assistant_message_id"] = str(uuid4())
+    with pytest.raises(ValueError):
+        ImmediateHistoryResolveResponseV2.model_validate(mismatched)

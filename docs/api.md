@@ -28,6 +28,53 @@ durable conversation used by later message and retrieval calls. Message
 persistence writes the authoritative record to PostgreSQL and updates the
 derivable semantic index where configured.
 
+Assistant message append accepts one optional dedicated
+`history_root_lineage` field:
+
+```json
+{
+  "owner_id": "owner_123",
+  "role": "assistant",
+  "content": "A historical explanation.",
+  "client_id": "telegram:stable-client",
+  "metadata": {
+    "request_id": "explanation_request_1"
+  },
+  "history_root_lineage": {
+    "schema_version": "history-root-lineage.v1",
+    "root_assistant_message_id": "550e8400-e29b-41d4-a716-446655440001",
+    "record_kind": "acquisition"
+  },
+  "policy_metadata": null
+}
+```
+
+The field is accepted only for an assistant. Its strict object contains only
+the exact schema version, a UUID root assistant message ID, and a closed
+`support` or `acquisition` record kind. Callers cannot inject the reserved
+`history_root_lineage` key through arbitrary `metadata`. A lineage-bearing
+explanation must also have non-empty content and ordinary metadata containing
+a bounded valid `request_id` under the immediate-history identifier contract.
+
+The submitted object is untrusted. Before inserting the explanation, Basic
+Memory Store verifies in one PostgreSQL transaction that the root already
+exists in the same owner and conversation, is an original assistant message
+without lineage, and directly owns a valid record of the declared kind. Root
+request and record associations are derived from stored state. A valid
+canonical object is stored privately under the existing message metadata JSONB
+while all ordinary metadata and dedicated policy metadata remain intact. The
+normal append response remains only the message acknowledgement and never
+returns lineage.
+
+Invalid lineage rejects the whole append with bounded
+`history_root_lineage_invalid` detail. The message is not inserted, the root is
+not altered, and no submitted request identity, lineage value, or root identity
+is returned. Missing or invalid explanation request identity is the same bounded
+whole-append failure.
+Append has no surface field; record-surface comparison occurs when v2 history
+is resolved. Appends without lineage retain their existing behavior. This
+contract adds no column, table, migration, signing, encryption, or token.
+
 ## Retrieval
 
 The preferred conversation retrieval API is:
@@ -89,6 +136,10 @@ response in an exact owner and conversation through:
 POST /v1/internal/immediate-history/resolve
 ```
 
+The existing `immediate-history-resolution.v1` contract remains supported
+unchanged. It retains its exact request and response shapes, reason codes, and
+strict rejection of client-owned history hints.
+
 The request is strict and versioned:
 
 ```json
@@ -147,6 +198,93 @@ one of the bounded statuses `no_record`, `ambiguous`, `invalid`, or
 `unavailable`. Resolution is read-only: it performs no retrieval, model call,
 acquisition, verification, or write. User-facing explanation wording and any
 explicit fresh verification remain orchestration responsibilities.
+
+The same endpoint also accepts a strict v2 request:
+
+```json
+{
+  "schema_version": "immediate-history-resolution.v2",
+  "request_id": "history_lookup_2",
+  "owner_id": "owner_123",
+  "conversation_id": "550e8400-e29b-41d4-a716-446655440000",
+  "surface": "telegram",
+  "explanation_kind": "acquisition"
+}
+```
+
+V2 accepts no client-supplied target, history text, lineage, root or assistant
+message ID, current-user-message anchor, digest, paragraph, claim, trace,
+manifest, source identity, alternate record kind, or fallback kind. The
+requested `explanation_kind` remains authoritative and is never inferred,
+changed, or retried as the other kind.
+
+A successful direct v2 result has this shape:
+
+```json
+{
+  "schema_version": "immediate-history-resolution.v2",
+  "request_id": "history_lookup_2",
+  "owner_id": "owner_123",
+  "conversation_id": "550e8400-e29b-41d4-a716-446655440000",
+  "surface": "telegram",
+  "explanation_kind": "acquisition",
+  "resolution_status": "resolved",
+  "resolution_source": "direct_record",
+  "lineage_dereference_count": 0,
+  "match_count": 1,
+  "reason_code": "direct_acquisition_record_resolved",
+  "record": {},
+  "history_root_lineage": {
+    "schema_version": "history-root-lineage.v1",
+    "root_assistant_message_id": "550e8400-e29b-41d4-a716-446655440001",
+    "record_kind": "acquisition"
+  }
+}
+```
+
+V2 is direct-first. It inspects exactly one newest assistant message and first
+runs the complete existing validator for the requested kind. A direct
+`resolved`, `invalid`, `ambiguous`, or `unavailable` result is final. Only the
+exact direct outcome `no_record` permits inspection of that newest message's
+private lineage. If lineage is absent, resolution stops. If present, the
+resolver validates its strict schema and requested kind, loads exactly the
+stated root once, requires the same owner and conversation and an original
+assistant root without lineage, derives the root request from stored metadata,
+and reruns the complete direct record association and privacy checks. Current
+request surface is compared with the root record's stored surface at this time.
+
+Successful root resolution uses `resolution_source: "root_lineage"`,
+`lineage_dereference_count: 1`, the validated original root record, and the same
+minimal canonical lineage. The resolver never follows lineage on a root,
+inspects a second newest candidate, scans backward, performs semantic
+retrieval, or retries another kind. An ordinary newest assistant without
+lineage terminates the chain.
+
+V2 uses the closed status values `resolved`, `no_record`, `ambiguous`,
+`invalid`, and `unavailable`; source values `direct_record`, `root_lineage`,
+and `none`; and dereference counts `0` and `1`. Its closed reason codes are:
+
+- resolved: `direct_support_record_resolved`,
+  `direct_acquisition_record_resolved`,
+  `root_lineage_support_record_resolved`, and
+  `root_lineage_acquisition_record_resolved`;
+- no record: `direct_record_absent_lineage_absent`,
+  `lineage_root_missing`, `lineage_root_unresolvable`, and
+  `lineage_root_not_direct_record_owner`;
+- ambiguous: `direct_support_record_ambiguous`;
+- invalid direct result: `direct_response_invalid`,
+  `direct_support_record_invalid`, and `direct_acquisition_record_invalid`;
+- invalid lineage: `lineage_malformed`, `lineage_version_unsupported`,
+  `lineage_record_kind_mismatch`, `lineage_owner_mismatch`,
+  `lineage_conversation_mismatch`, `lineage_surface_mismatch`,
+  `lineage_root_role_invalid`, `lineage_root_recursive`, and
+  `lineage_root_association_invalid`;
+- unavailable: `history_store_unavailable`.
+
+Every unsuccessful v2 response uses `resolution_source: "none"` with null
+`record` and null `history_root_lineage`. It truthfully reports whether zero or
+one root lookup occurred and exposes no root ID, lineage value, private record
+content, prompt, trace, digest, source identity, or arbitrary message metadata.
 
 ## Internal acquisition-history resolution
 
