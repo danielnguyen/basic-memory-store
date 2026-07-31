@@ -33,6 +33,7 @@ case "${1:-}" in
       tests/test_episodes_migration.py \
       tests/test_recall_migration.py \
       tests/test_schema_migrations_integration.py \
+      tests/test_conversation_lifecycle_postgres.py \
       tests/test_claim_records_postgres.py \
       tests/test_memory_lifecycle_postgres.py \
       tests/test_provenance_postgres_integration.py \

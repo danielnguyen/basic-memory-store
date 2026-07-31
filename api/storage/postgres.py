@@ -37,6 +37,53 @@ class HistoryRootLineageValidationError(Exception):
         super().__init__(self.code)
 
 
+class ConversationNotFoundError(Exception):
+    code = "conversation_not_found"
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
+
+
+class ConversationNotOpenError(Exception):
+    code = "conversation_not_open"
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
+
+
+class ConversationLifecycleConflictError(Exception):
+    code = "conversation_lifecycle_conflict"
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
+
+
+class ConversationReplacementError(Exception):
+    code = "conversation_replacement_invalid"
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
+
+
+_CONVERSATION_COLUMNS = """
+    id, owner_id, client_id, title, lifecycle_state,
+    superseded_by_conversation_id, created_at, updated_at
+"""
+
+
+def _conversation_from_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "conversation_id": str(row[0]),
+        "owner_id": row[1],
+        "client_id": row[2],
+        "title": row[3],
+        "lifecycle_state": row[4],
+        "superseded_by_conversation_id": str(row[5]) if row[5] is not None else None,
+        "created_at": str(row[6]),
+        "updated_at": str(row[7]),
+    }
+
+
 def _claim_record_from_row(row: tuple[Any, ...]) -> dict[str, Any]:
     return {
         "claim_id": row[0],
@@ -135,6 +182,8 @@ class Conversation:
     owner_id: str
     client_id: Optional[str]
     title: Optional[str]
+    lifecycle_state: str
+    superseded_by_conversation_id: Optional[UUID]
 
 
 @dataclass
@@ -177,10 +226,10 @@ class PostgresStore:
                 return row[0]
 
     async def get_conversation_by_owner_client(self, owner_id: str, client_id: str) -> dict[str, Any] | None:
-        q = """
-        SELECT id, owner_id, client_id, title, created_at, updated_at
+        q = f"""
+        SELECT {_CONVERSATION_COLUMNS}
         FROM conversations
-        WHERE owner_id = %s AND client_id = %s
+        WHERE owner_id = %s AND client_id = %s AND lifecycle_state = 'open'
         ORDER BY created_at ASC, id ASC
         LIMIT 1;
         """
@@ -190,14 +239,7 @@ class PostgresStore:
                 row = await cur.fetchone()
         if row is None:
             return None
-        return {
-            "conversation_id": str(row[0]),
-            "owner_id": row[1],
-            "client_id": row[2],
-            "title": row[3],
-            "created_at": str(row[4]),
-            "updated_at": str(row[5]),
-        }
+        return _conversation_from_row(row)
 
     async def get_or_create_event_stream_conversation(
         self,
@@ -231,6 +273,12 @@ class PostgresStore:
         SET updated_at = now()
         WHERE id = %s;
         """
+        q_lock_conversation = """
+        SELECT lifecycle_state
+        FROM conversations
+        WHERE id = %s AND owner_id = %s
+        FOR UPDATE;
+        """
         if history_root_lineage is not None:
             self._validate_history_lineage_message(
                 role=role,
@@ -247,6 +295,12 @@ class PostgresStore:
         async with self.pool.connection() as conn:
             async with conn.transaction():
                 async with conn.cursor() as cur:
+                    await cur.execute(q_lock_conversation, (conversation_id, owner_id))
+                    conversation = await cur.fetchone()
+                    if conversation is None:
+                        raise ConversationNotFoundError()
+                    if conversation[0] != "open":
+                        raise ConversationNotOpenError()
                     if history_root_lineage is not None:
                         await self._validate_history_root_lineage_append(
                             cur,
@@ -461,6 +515,7 @@ class PostgresStore:
         self,
         owner_id: str,
         client_id: str | None = None,
+        lifecycle_state: str | None = None,
         limit: int = 20,
         cursor: str | None = None,
     ) -> tuple[list[dict[str, Any]], str | None]:
@@ -477,6 +532,10 @@ class PostgresStore:
             where += " AND client_id = %s"
             params.append(client_id)
 
+        if lifecycle_state is not None:
+            where += " AND lifecycle_state = %s"
+            params.append(lifecycle_state)
+
         # Pagination: fetch rows strictly "before" cursor in (updated_at, id) ordering
         cursor_clause = ""
         if cursor:
@@ -489,7 +548,7 @@ class PostgresStore:
                 cursor_clause = ""
 
         q = f"""
-        SELECT id, owner_id, client_id, title, created_at, updated_at
+        SELECT {_CONVERSATION_COLUMNS}
         FROM conversations
         {where}
         {cursor_clause}
@@ -506,21 +565,12 @@ class PostgresStore:
         out: list[dict[str, Any]] = []
         next_cursor: str | None = None
 
-        for (cid, owner, c_id, title, created_at, updated_at) in rows:
-            out.append(
-                {
-                    "conversation_id": str(cid),
-                    "owner_id": owner,
-                    "client_id": c_id,
-                    "title": title,
-                    "created_at": str(created_at),
-                    "updated_at": str(updated_at),
-                }
-            )
+        for row in rows:
+            out.append(_conversation_from_row(row))
 
         if rows:
             last = rows[-1]
-            last_updated_at = str(last[5])  # updated_at
+            last_updated_at = str(last[7])  # updated_at
             last_id = str(last[0])
             next_cursor = f"{last_updated_at}|{last_id}"
 
@@ -549,6 +599,7 @@ class PostgresStore:
         SELECT id
         FROM conversations
         WHERE owner_id = %s AND client_id = %s
+          AND lifecycle_state = 'open'
           AND updated_at >= (now() - (%s || ' seconds')::interval)
         ORDER BY updated_at DESC
         LIMIT 1;
@@ -572,8 +623,8 @@ class PostgresStore:
                 return (await cur.fetchone()) is not None
 
     async def get_conversation(self, conversation_id: UUID) -> dict[str, Any] | None:
-        q = """
-        SELECT id, owner_id, client_id, title, created_at, updated_at
+        q = f"""
+        SELECT {_CONVERSATION_COLUMNS}
         FROM conversations
         WHERE id = %s
         LIMIT 1;
@@ -584,14 +635,98 @@ class PostgresStore:
                 row = await cur.fetchone()
         if row is None:
             return None
-        return {
-            "conversation_id": str(row[0]),
-            "owner_id": row[1],
-            "client_id": row[2],
-            "title": row[3],
-            "created_at": str(row[4]),
-            "updated_at": str(row[5]),
-        }
+        return _conversation_from_row(row)
+
+    async def get_conversation_for_owner(
+        self,
+        conversation_id: UUID,
+        owner_id: str,
+    ) -> dict[str, Any] | None:
+        q = f"""
+        SELECT {_CONVERSATION_COLUMNS}
+        FROM conversations
+        WHERE id = %s AND owner_id = %s
+        LIMIT 1;
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, (conversation_id, owner_id))
+                row = await cur.fetchone()
+        return _conversation_from_row(row) if row is not None else None
+
+    async def transition_conversation_lifecycle(
+        self,
+        *,
+        conversation_id: UUID,
+        owner_id: str,
+        lifecycle_state: str,
+        superseded_by_conversation_id: UUID | None,
+    ) -> dict[str, Any]:
+        source_q = f"""
+        SELECT {_CONVERSATION_COLUMNS}
+        FROM conversations
+        WHERE id = %s AND owner_id = %s
+        FOR UPDATE;
+        """
+        replacement_q = """
+        SELECT lifecycle_state
+        FROM conversations
+        WHERE id = %s AND owner_id = %s
+        FOR UPDATE;
+        """
+        update_q = f"""
+        UPDATE conversations
+        SET lifecycle_state = %s,
+            superseded_by_conversation_id = %s,
+            updated_at = now()
+        WHERE id = %s AND owner_id = %s
+        RETURNING {_CONVERSATION_COLUMNS};
+        """
+        async with self.pool.connection() as conn:
+            async with conn.transaction():
+                async with conn.cursor() as cur:
+                    await cur.execute(source_q, (conversation_id, owner_id))
+                    source = await cur.fetchone()
+                    if source is None:
+                        raise ConversationNotFoundError()
+
+                    current_state = source[4]
+                    current_replacement = source[5]
+                    if (
+                        current_state == lifecycle_state
+                        and current_replacement == superseded_by_conversation_id
+                    ):
+                        return _conversation_from_row(source)
+                    if current_state == "superseded":
+                        raise ConversationLifecycleConflictError()
+
+                    if lifecycle_state == "superseded":
+                        if (
+                            superseded_by_conversation_id is None
+                            or superseded_by_conversation_id == conversation_id
+                        ):
+                            raise ConversationReplacementError()
+                        await cur.execute(
+                            replacement_q,
+                            (superseded_by_conversation_id, owner_id),
+                        )
+                        replacement = await cur.fetchone()
+                        if replacement is None or replacement[0] != "open":
+                            raise ConversationReplacementError()
+                    elif superseded_by_conversation_id is not None:
+                        raise ConversationReplacementError()
+
+                    await cur.execute(
+                        update_q,
+                        (
+                            lifecycle_state,
+                            superseded_by_conversation_id,
+                            conversation_id,
+                            owner_id,
+                        ),
+                    )
+                    updated = await cur.fetchone()
+                    return _conversation_from_row(updated)
 
     async def claim_event_ingest(
         self,

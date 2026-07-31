@@ -8,9 +8,22 @@ CREATE TABLE IF NOT EXISTS conversations (
   owner_id TEXT NOT NULL,
   client_id TEXT,
   title TEXT,
+  lifecycle_state TEXT NOT NULL DEFAULT 'open',
+  superseded_by_conversation_id UUID REFERENCES conversations(id) ON DELETE RESTRICT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT conversations_lifecycle_state_check
+    CHECK (lifecycle_state IN ('open', 'closed', 'superseded')),
+  CONSTRAINT conversations_lifecycle_replacement_check CHECK (
+    (lifecycle_state IN ('open', 'closed') AND superseded_by_conversation_id IS NULL)
+    OR (lifecycle_state = 'superseded' AND superseded_by_conversation_id IS NOT NULL)
+  ),
+  CONSTRAINT conversations_replacement_not_self_check
+    CHECK (superseded_by_conversation_id IS NULL OR superseded_by_conversation_id <> id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_conversations_owner_lifecycle_activity
+  ON conversations(owner_id, lifecycle_state, updated_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS messages (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

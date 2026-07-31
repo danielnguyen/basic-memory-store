@@ -8,6 +8,12 @@ from fastapi.testclient import TestClient
 import main as main_module
 from models import OrchestrateChatRequest
 from services.chunking import chunk_text
+from storage.postgres import (
+    ConversationLifecycleConflictError,
+    ConversationNotFoundError,
+    ConversationNotOpenError,
+    ConversationReplacementError,
+)
 
 
 # -------------------------
@@ -17,6 +23,7 @@ from services.chunking import chunk_text
 class FakePG:
     def __init__(self):
         self.conversations = set()
+        self.conversation_rows = {}
         self.messages = []  # list of dicts
         self.artifacts = {}
         self.traces = {}
@@ -28,9 +35,19 @@ class FakePG:
     async def close(self): ...
     async def ping(self): return True
 
-    async def create_conversation(self, owner_id: str, client_id: str, title=None):
+    async def create_conversation(self, owner_id: str, client_id: str | None, title=None):
         cid = uuid.uuid4()
         self.conversations.add(cid)
+        self.conversation_rows[cid] = {
+            "conversation_id": str(cid),
+            "owner_id": owner_id,
+            "client_id": client_id,
+            "title": title,
+            "lifecycle_state": "open",
+            "superseded_by_conversation_id": None,
+            "created_at": "2026-01-01 00:00:00+00:00",
+            "updated_at": "2026-01-01 00:00:00+00:00",
+        }
         return cid
 
     async def conversation_exists(self, cid):
@@ -39,22 +56,92 @@ class FakePG:
     async def get_conversation(self, cid):
         if cid not in self.conversations:
             return None
-        return {
+        return self.conversation_rows.get(cid) or {
             "conversation_id": str(cid),
             "owner_id": "daniel",
             "client_id": "smoke",
             "title": None,
+            "lifecycle_state": "open",
+            "superseded_by_conversation_id": None,
             "created_at": "2026-01-01 00:00:00+00:00",
             "updated_at": "2026-01-01 00:00:00+00:00",
         }
 
+    async def get_conversation_for_owner(self, cid, owner_id):
+        conversation = await self.get_conversation(cid)
+        if conversation is None or conversation["owner_id"] != owner_id:
+            return None
+        return conversation
+
+    async def transition_conversation_lifecycle(
+        self,
+        *,
+        conversation_id,
+        owner_id,
+        lifecycle_state,
+        superseded_by_conversation_id,
+    ):
+        conversation = await self.get_conversation_for_owner(conversation_id, owner_id)
+        if conversation is None:
+            raise ConversationNotFoundError()
+        if (
+            conversation["lifecycle_state"] == lifecycle_state
+            and conversation["superseded_by_conversation_id"]
+            == (str(superseded_by_conversation_id) if superseded_by_conversation_id else None)
+        ):
+            return conversation
+        if conversation["lifecycle_state"] == "superseded":
+            raise ConversationLifecycleConflictError()
+        if lifecycle_state == "superseded":
+            if superseded_by_conversation_id is None or superseded_by_conversation_id == conversation_id:
+                raise ConversationReplacementError()
+            replacement = await self.get_conversation_for_owner(
+                superseded_by_conversation_id,
+                owner_id,
+            )
+            if replacement is None or replacement["lifecycle_state"] != "open":
+                raise ConversationReplacementError()
+        elif superseded_by_conversation_id is not None:
+            raise ConversationReplacementError()
+        conversation["lifecycle_state"] = lifecycle_state
+        conversation["superseded_by_conversation_id"] = (
+            str(superseded_by_conversation_id) if superseded_by_conversation_id else None
+        )
+        conversation["updated_at"] = "2026-01-01 00:00:01+00:00"
+        return conversation
+
     async def resolve_conversation(self, owner_id: str, client_id: str, idle_ttl_s: int, title=None):
-        # Always create new for test determinism
+        for cid in self.conversations:
+            conversation = await self.get_conversation(cid)
+            if (
+                conversation["owner_id"] == owner_id
+                and conversation["client_id"] == client_id
+                and conversation["lifecycle_state"] == "open"
+            ):
+                return cid, True
         cid = await self.create_conversation(owner_id, client_id, title)
         return cid, False
 
-    async def add_message(self, conversation_id, owner_id, role, content, client_id, metadata=None, policy_metadata=None):
+    async def add_message(
+        self,
+        conversation_id,
+        owner_id,
+        role,
+        content,
+        client_id,
+        metadata=None,
+        policy_metadata=None,
+        history_root_lineage=None,
+    ):
+        conversation = await self.get_conversation_for_owner(conversation_id, owner_id)
+        if conversation is None:
+            raise ConversationNotFoundError()
+        if conversation["lifecycle_state"] != "open":
+            raise ConversationNotOpenError()
         mid = uuid.uuid4()
+        stored_metadata = dict(metadata or {})
+        if history_root_lineage is not None:
+            stored_metadata["history_root_lineage"] = history_root_lineage
         self.messages.append(
             {
                 "message_id": str(mid),
@@ -63,7 +150,7 @@ class FakePG:
                 "role": role,
                 "content": content,
                 "client_id": client_id,
-                "metadata": metadata or {},
+                "metadata": stored_metadata,
                 "policy_metadata": policy_metadata,
                 "created_at": "2026-01-01 00:00:00+00:00",
             }
@@ -97,9 +184,29 @@ class FakePG:
                 )
         return out
 
-    async def list_conversations(self, owner_id, client_id=None, limit=20, cursor=None):
-        # keep it simple
-        return ([], None)
+    async def list_conversations(
+        self,
+        owner_id,
+        client_id=None,
+        lifecycle_state=None,
+        limit=20,
+        cursor=None,
+    ):
+        conversations = []
+        for cid in self.conversations:
+            conversation = await self.get_conversation(cid)
+            if conversation["owner_id"] != owner_id:
+                continue
+            if client_id is not None and conversation["client_id"] != client_id:
+                continue
+            if lifecycle_state is not None and conversation["lifecycle_state"] != lifecycle_state:
+                continue
+            conversations.append(conversation)
+        conversations.sort(
+            key=lambda item: (item["updated_at"], item["conversation_id"]),
+            reverse=True,
+        )
+        return conversations[:limit], None
 
     async def create_artifact(
         self,
@@ -611,6 +718,213 @@ def test_readyz_is_public(client):
     r = client.get("/readyz")
     assert r.status_code == 200
     assert r.json()["ok"] is True
+
+
+def _create_conversation(client, *, owner_id="owner-alpha", client_id="client-one"):
+    response = client.post(
+        "/v1/conversations",
+        headers=auth_headers(),
+        json={"owner_id": owner_id, "client_id": client_id, "title": "bounded chat"},
+    )
+    assert response.status_code == 200
+    return response.json()["conversation_id"]
+
+
+def test_conversation_projection_lookup_and_lifecycle_filter_are_owner_scoped(client):
+    conversation_id = _create_conversation(client)
+
+    exact = client.get(
+        f"/v1/conversations/{conversation_id}",
+        headers=auth_headers(),
+        params={"owner_id": "owner-alpha"},
+    )
+    assert exact.status_code == 200
+    assert exact.json() == {
+        "conversation_id": conversation_id,
+        "owner_id": "owner-alpha",
+        "client_id": "client-one",
+        "title": "bounded chat",
+        "lifecycle_state": "open",
+        "superseded_by_conversation_id": None,
+        "created_at": "2026-01-01 00:00:00+00:00",
+        "updated_at": "2026-01-01 00:00:00+00:00",
+    }
+    missing = client.get(
+        f"/v1/conversations/{uuid.uuid4()}",
+        headers=auth_headers(),
+        params={"owner_id": "owner-alpha"},
+    )
+    mismatched = client.get(
+        f"/v1/conversations/{conversation_id}",
+        headers=auth_headers(),
+        params={"owner_id": "owner-beta"},
+    )
+    assert (missing.status_code, missing.json()) == (404, {"detail": "conversation_not_found"})
+    assert (mismatched.status_code, mismatched.json()) == (404, {"detail": "conversation_not_found"})
+
+    listed = client.get(
+        "/v1/conversations",
+        headers=auth_headers(),
+        params={"owner_id": "owner-alpha", "lifecycle_state": "open"},
+    )
+    hidden = client.get(
+        "/v1/conversations",
+        headers=auth_headers(),
+        params={"owner_id": "owner-alpha", "lifecycle_state": "closed"},
+    )
+    assert [item["conversation_id"] for item in listed.json()["conversations"]] == [conversation_id]
+    assert hidden.json()["conversations"] == []
+
+
+def test_conversation_lookup_has_bounded_identifier_and_dependency_errors(client, monkeypatch):
+    malformed = client.get(
+        "/v1/conversations/not-a-uuid",
+        headers=auth_headers(),
+        params={"owner_id": "owner-alpha"},
+    )
+    assert (malformed.status_code, malformed.json()) == (422, {"detail": "conversation_id_invalid"})
+
+    async def unavailable(*args, **kwargs):
+        raise RuntimeError("private dependency detail")
+
+    monkeypatch.setattr(main_module.pg, "get_conversation_for_owner", unavailable)
+    failed = client.get(
+        f"/v1/conversations/{uuid.uuid4()}",
+        headers=auth_headers(),
+        params={"owner_id": "owner-alpha"},
+    )
+    assert (failed.status_code, failed.json()) == (503, {"detail": "conversation_lookup_unavailable"})
+    assert "private dependency detail" not in failed.text
+
+
+def test_conversation_lifecycle_transition_and_rolling_resolver_compatibility(client):
+    conversation_id = _create_conversation(client)
+    closed = client.post(
+        f"/v1/conversations/{conversation_id}/lifecycle",
+        headers=auth_headers(),
+        json={"owner_id": "owner-alpha", "lifecycle_state": "closed"},
+    )
+    assert closed.status_code == 200
+    assert closed.json()["lifecycle_state"] == "closed"
+
+    resolved = client.post(
+        "/v1/conversations/resolve",
+        headers=auth_headers(),
+        json={"owner_id": "owner-alpha", "client_id": "client-one"},
+    )
+    assert resolved.status_code == 200
+    assert resolved.json()["reused"] is False
+    assert resolved.json()["conversation_id"] != conversation_id
+
+    repeated = client.post(
+        "/v1/conversations/resolve",
+        headers=auth_headers(),
+        json={"owner_id": "owner-alpha", "client_id": "client-one"},
+    )
+    assert repeated.status_code == 200
+    assert repeated.json() == {
+        "conversation_id": resolved.json()["conversation_id"],
+        "reused": True,
+    }
+
+
+def test_conversation_transition_errors_are_bounded(client):
+    source_id = _create_conversation(client)
+    replacement_id = _create_conversation(client, client_id="client-two")
+    superseded = client.post(
+        f"/v1/conversations/{source_id}/lifecycle",
+        headers=auth_headers(),
+        json={
+            "owner_id": "owner-alpha",
+            "lifecycle_state": "superseded",
+            "superseded_by_conversation_id": replacement_id,
+        },
+    )
+    assert superseded.status_code == 200
+    assert superseded.json()["superseded_by_conversation_id"] == replacement_id
+
+    terminal = client.post(
+        f"/v1/conversations/{source_id}/lifecycle",
+        headers=auth_headers(),
+        json={"owner_id": "owner-alpha", "lifecycle_state": "closed"},
+    )
+    invalid_replacement = client.post(
+        f"/v1/conversations/{replacement_id}/lifecycle",
+        headers=auth_headers(),
+        json={
+            "owner_id": "owner-alpha",
+            "lifecycle_state": "superseded",
+            "superseded_by_conversation_id": str(uuid.uuid4()),
+        },
+    )
+    hidden = client.post(
+        f"/v1/conversations/{source_id}/lifecycle",
+        headers=auth_headers(),
+        json={"owner_id": "owner-beta", "lifecycle_state": "closed"},
+    )
+    assert (terminal.status_code, terminal.json()) == (409, {"detail": "conversation_lifecycle_conflict"})
+    assert (invalid_replacement.status_code, invalid_replacement.json()) == (
+        409,
+        {"detail": "conversation_replacement_invalid"},
+    )
+    assert (hidden.status_code, hidden.json()) == (404, {"detail": "conversation_not_found"})
+
+
+def test_message_append_requires_owner_of_open_conversation_before_indexing(client):
+    conversation_id = _create_conversation(client)
+    closed = client.post(
+        f"/v1/conversations/{conversation_id}/lifecycle",
+        headers=auth_headers(),
+        json={"owner_id": "owner-alpha", "lifecycle_state": "closed"},
+    )
+    assert closed.status_code == 200
+
+    before_messages = len(main_module.pg.messages)
+    before_upserts = len(main_module.qdrant.upserts)
+    rejected = client.post(
+        f"/v1/conversations/{conversation_id}/messages",
+        headers=auth_headers(),
+        json={
+            "owner_id": "owner-alpha",
+            "role": "assistant",
+            "content": "This content is long enough to be indexed.",
+            "client_id": "client-one",
+        },
+    )
+    hidden = client.post(
+        f"/v1/conversations/{conversation_id}/messages",
+        headers=auth_headers(),
+        json={
+            "owner_id": "owner-beta",
+            "role": "assistant",
+            "content": "This content is long enough to be indexed.",
+            "client_id": "client-one",
+        },
+    )
+    assert (rejected.status_code, rejected.json()) == (409, {"detail": "conversation_not_open"})
+    assert (hidden.status_code, hidden.json()) == (404, {"detail": "conversation_not_found"})
+    assert len(main_module.pg.messages) == before_messages
+    assert len(main_module.qdrant.upserts) == before_upserts
+
+    reopened = client.post(
+        f"/v1/conversations/{conversation_id}/lifecycle",
+        headers=auth_headers(),
+        json={"owner_id": "owner-alpha", "lifecycle_state": "open"},
+    )
+    assert reopened.status_code == 200
+    accepted = client.post(
+        f"/v1/conversations/{conversation_id}/messages",
+        headers=auth_headers(),
+        json={
+            "owner_id": "owner-alpha",
+            "role": "assistant",
+            "content": "This content is long enough to be indexed.",
+            "client_id": "client-one",
+        },
+    )
+    assert accepted.status_code == 200
+    assert len(main_module.pg.messages) == before_messages + 1
+    assert len(main_module.qdrant.upserts) == before_upserts + 1
 
 
 def test_v1_chat_requires_auth(client):

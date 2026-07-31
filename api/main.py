@@ -15,7 +15,14 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, generate_latest
 
 from settings import get_settings
 from clients.litellm import LiteLLMClient
-from storage.postgres import HistoryRootLineageValidationError, PostgresStore
+from storage.postgres import (
+    ConversationLifecycleConflictError,
+    ConversationNotFoundError,
+    ConversationNotOpenError,
+    ConversationReplacementError,
+    HistoryRootLineageValidationError,
+    PostgresStore,
+)
 from storage.qdrant import QdrantStore, RetrievalHit as QdrantHit
 from storage.object_store import ObjectStoreClient
 from prompts.context import assemble_messages, build_artifact_context_block, build_context_block
@@ -66,8 +73,10 @@ from models import (
     ChatResponse,
     ConversationCreateRequest,
     ConversationCreateResponse,
+    ConversationLifecycleRequest,
+    ConversationLifecycleState,
     ConversationListResponse,
-    ConversationSummary,
+    ConversationProjection,
     OrchestrateChatRequest,
     OrchestrateChatResponse,
     ConversationResolveRequest,
@@ -647,15 +656,22 @@ async def create_conversation(body: ConversationCreateRequest):
     dependencies=[Depends(require_api_key)],
     summary="List conversations (most recent first)",
 )
-async def list_conversations(owner_id: str, client_id: str | None = None, limit: int = 20, cursor: str | None = None):
+async def list_conversations(
+    owner_id: str,
+    client_id: str | None = None,
+    lifecycle_state: ConversationLifecycleState | None = None,
+    limit: int = 20,
+    cursor: str | None = None,
+):
     convos, next_cursor = await pg.list_conversations(
         owner_id=owner_id,
         client_id=client_id,
+        lifecycle_state=lifecycle_state,
         limit=limit,
         cursor=cursor,
     )
     return ConversationListResponse(
-        conversations=[ConversationSummary(**c) for c in convos],
+        conversations=[ConversationProjection(**c) for c in convos],
         next_cursor=next_cursor,
     )
 
@@ -665,7 +681,7 @@ async def list_conversations(owner_id: str, client_id: str | None = None, limit:
     response_model=ConversationResolveResponse,
     tags=["conversations"],
     dependencies=[Depends(require_api_key)],
-    summary="Resolve rolling conversation for a client (reuse if recently active)",
+    summary="Resolve a rolling same-client conversation (reuse if recently active)",
 )
 async def resolve_conversation(body: ConversationResolveRequest):
     cid, reused = await pg.resolve_conversation(
@@ -675,6 +691,62 @@ async def resolve_conversation(body: ConversationResolveRequest):
         title=body.title,
     )
     return ConversationResolveResponse(conversation_id=str(cid), reused=reused)
+
+
+@app.get(
+    "/v1/conversations/{conversation_id}",
+    response_model=ConversationProjection,
+    tags=["conversations"],
+    dependencies=[Depends(require_api_key)],
+    summary="Get owner-scoped conversation facts",
+)
+async def get_conversation(conversation_id: str, owner_id: str):
+    try:
+        cid = UUID(conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="conversation_id_invalid") from None
+    try:
+        conversation = await pg.get_conversation_for_owner(cid, owner_id)
+    except Exception:
+        logging.exception("conversation lookup failed")
+        raise HTTPException(status_code=503, detail="conversation_lookup_unavailable") from None
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="conversation_not_found")
+    return ConversationProjection(**conversation)
+
+
+@app.post(
+    "/v1/conversations/{conversation_id}/lifecycle",
+    response_model=ConversationProjection,
+    tags=["conversations"],
+    dependencies=[Depends(require_api_key)],
+    summary="Update owner-scoped conversation lifecycle",
+)
+async def transition_conversation_lifecycle(
+    conversation_id: str,
+    body: ConversationLifecycleRequest,
+):
+    try:
+        cid = UUID(conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="conversation_id_invalid") from None
+    try:
+        conversation = await pg.transition_conversation_lifecycle(
+            conversation_id=cid,
+            owner_id=body.owner_id,
+            lifecycle_state=body.lifecycle_state,
+            superseded_by_conversation_id=body.superseded_by_conversation_id,
+        )
+    except ConversationNotFoundError:
+        raise HTTPException(status_code=404, detail="conversation_not_found") from None
+    except ConversationLifecycleConflictError:
+        raise HTTPException(status_code=409, detail="conversation_lifecycle_conflict") from None
+    except ConversationReplacementError:
+        raise HTTPException(status_code=409, detail="conversation_replacement_invalid") from None
+    except Exception:
+        logging.exception("conversation lifecycle update failed")
+        raise HTTPException(status_code=503, detail="conversation_lifecycle_unavailable") from None
+    return ConversationProjection(**conversation)
 
 
 # -------------------------
@@ -689,7 +761,10 @@ async def resolve_conversation(body: ConversationResolveRequest):
     summary="Append a message (and index it for retrieval when applicable)",
 )
 async def add_message(conversation_id: str, body: MessageCreateRequest):
-    cid = UUID(conversation_id)
+    try:
+        cid = UUID(conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="conversation_id_invalid") from None
     policy_metadata = body.policy_metadata.model_dump(mode="json") if body.policy_metadata else None
 
     lineage = None
@@ -721,11 +796,18 @@ async def add_message(conversation_id: str, body: MessageCreateRequest):
         add_message_args["history_root_lineage"] = lineage
     try:
         mid = await pg.add_message(**add_message_args)
+    except ConversationNotFoundError:
+        raise HTTPException(status_code=404, detail="conversation_not_found") from None
+    except ConversationNotOpenError:
+        raise HTTPException(status_code=409, detail="conversation_not_open") from None
     except HistoryRootLineageValidationError:
         raise HTTPException(
             status_code=422,
             detail="history_root_lineage_invalid",
         ) from None
+    except Exception:
+        logging.exception("message append failed")
+        raise HTTPException(status_code=503, detail="message_append_unavailable") from None
 
     if body.role in ("user", "assistant") and should_index_message(body.role, body.content):
         try:
