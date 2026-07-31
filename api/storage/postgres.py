@@ -51,6 +51,13 @@ class ConversationNotOpenError(Exception):
         super().__init__(self.code)
 
 
+class MessageAppendConflictError(Exception):
+    code = "message_append_conflict"
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
+
+
 class ConversationLifecycleConflictError(Exception):
     code = "conversation_lifecycle_conflict"
 
@@ -262,11 +269,23 @@ class PostgresStore:
         metadata: dict | None = None,
         policy_metadata: dict | None = None,
         history_root_lineage: dict[str, Any] | None = None,
+        message_id: UUID | None = None,
     ) -> UUID:
-        q = """
+        q_insert_generated = """
         INSERT INTO messages (conversation_id, owner_id, client_id, role, content, metadata, policy_metadata)
         VALUES (%s, %s, %s, %s, %s, %s, %s)
         RETURNING id;
+        """
+        q_insert_supplied = """
+        INSERT INTO messages (id, conversation_id, owner_id, client_id, role, content, metadata, policy_metadata)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (id) DO NOTHING
+        RETURNING id;
+        """
+        q_existing = """
+        SELECT conversation_id, owner_id, client_id, role, content, metadata, policy_metadata
+        FROM messages
+        WHERE id = %s;
         """
         q_touch = """
         UPDATE conversations
@@ -279,7 +298,7 @@ class PostgresStore:
         WHERE id = %s AND owner_id = %s
         FOR UPDATE;
         """
-        if history_root_lineage is not None:
+        if message_id is None and history_root_lineage is not None:
             self._validate_history_lineage_message(
                 role=role,
                 content=content,
@@ -290,8 +309,10 @@ class PostgresStore:
             raise HistoryRootLineageValidationError()
         if history_root_lineage is not None:
             stored_metadata[_HISTORY_ROOT_LINEAGE_METADATA_KEY] = history_root_lineage
-        meta_param = Json(stored_metadata) if stored_metadata else None
-        policy_param = Json(policy_metadata) if policy_metadata is not None else None
+        canonical_metadata = stored_metadata or None
+        canonical_policy_metadata = policy_metadata if policy_metadata is not None else None
+        meta_param = Json(canonical_metadata) if canonical_metadata is not None else None
+        policy_param = Json(canonical_policy_metadata) if canonical_policy_metadata is not None else None
         async with self.pool.connection() as conn:
             async with conn.transaction():
                 async with conn.cursor() as cur:
@@ -299,9 +320,31 @@ class PostgresStore:
                     conversation = await cur.fetchone()
                     if conversation is None:
                         raise ConversationNotFoundError()
+                    if message_id is not None:
+                        await cur.execute(q_existing, (message_id,))
+                        existing = await cur.fetchone()
+                        if existing is not None:
+                            if self._message_append_matches(
+                                existing,
+                                conversation_id=conversation_id,
+                                owner_id=owner_id,
+                                client_id=client_id,
+                                role=role,
+                                content=content,
+                                metadata=canonical_metadata,
+                                policy_metadata=canonical_policy_metadata,
+                            ):
+                                return message_id
+                            raise MessageAppendConflictError()
                     if conversation[0] != "open":
                         raise ConversationNotOpenError()
                     if history_root_lineage is not None:
+                        if message_id is not None:
+                            self._validate_history_lineage_message(
+                                role=role,
+                                content=content,
+                                metadata=metadata,
+                            )
                         await self._validate_history_root_lineage_append(
                             cur,
                             conversation_id=conversation_id,
@@ -309,11 +352,75 @@ class PostgresStore:
                             role=role,
                             lineage=history_root_lineage,
                         )
-                    await cur.execute(q, (conversation_id, owner_id, client_id, role, content, meta_param, policy_param))
-                    row = await cur.fetchone()
+                    if message_id is None:
+                        await cur.execute(
+                            q_insert_generated,
+                            (
+                                conversation_id,
+                                owner_id,
+                                client_id,
+                                role,
+                                content,
+                                meta_param,
+                                policy_param,
+                            ),
+                        )
+                        row = await cur.fetchone()
+                    else:
+                        await cur.execute(
+                            q_insert_supplied,
+                            (
+                                message_id,
+                                conversation_id,
+                                owner_id,
+                                client_id,
+                                role,
+                                content,
+                                meta_param,
+                                policy_param,
+                            ),
+                        )
+                        row = await cur.fetchone()
+                        if row is None:
+                            await cur.execute(q_existing, (message_id,))
+                            existing = await cur.fetchone()
+                            if existing is not None and self._message_append_matches(
+                                existing,
+                                conversation_id=conversation_id,
+                                owner_id=owner_id,
+                                client_id=client_id,
+                                role=role,
+                                content=content,
+                                metadata=canonical_metadata,
+                                policy_metadata=canonical_policy_metadata,
+                            ):
+                                return message_id
+                            raise MessageAppendConflictError()
                     # bump conversation activity timestamp
                     await cur.execute(q_touch, (conversation_id,))
                     return row[0]
+
+    @staticmethod
+    def _message_append_matches(
+        row: tuple[Any, ...],
+        *,
+        conversation_id: UUID,
+        owner_id: str,
+        client_id: str | None,
+        role: str,
+        content: str,
+        metadata: dict[str, Any] | None,
+        policy_metadata: dict[str, Any] | None,
+    ) -> bool:
+        return row == (
+            conversation_id,
+            owner_id,
+            client_id,
+            role,
+            content,
+            metadata,
+            policy_metadata,
+        )
 
     @staticmethod
     def _validate_history_lineage_message(

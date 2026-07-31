@@ -13,7 +13,11 @@ import pytest
 
 import main as main_module
 from services.claim_records import validate_claim_record_association
-from storage.postgres import HistoryRootLineageValidationError, PostgresStore
+from storage.postgres import (
+    HistoryRootLineageValidationError,
+    MessageAppendConflictError,
+    PostgresStore,
+)
 from storage.qdrant import _policy_payload
 
 
@@ -1161,6 +1165,116 @@ def test_valid_lineage_append_is_private_durable_and_resolvable_after_reopen(
     assert result["lineage_dereference_count"] == 1
     assert result["record"]["assistant_message_id"] == str(root["message_id"])
     assert result["history_root_lineage"] == lineage
+
+
+def test_supplied_identity_lineage_retry_and_mismatch_are_bounded(
+    monkeypatch,
+    postgres_database,
+):
+    root = _seed_history_root(postgres_database, record_kind="support")
+    message_id = uuid4()
+    lineage = _lineage_payload(root)
+    policy = {
+        "memory_domains": ["technical"],
+        "sensitivity": "low",
+        "content_class": None,
+        "entity_ids": [],
+        "relationship_ids": [],
+        "relationship_scopes": [],
+    }
+    body = {
+        "message_id": str(message_id),
+        "owner_id": root["owner_id"],
+        "role": "assistant",
+        "content": "Durable explanation with exact lineage.",
+        "client_id": "web:lineage-fixture",
+        "metadata": {
+            "request_id": "durable-lineage-append",
+            "response_kind": "claim_explanation",
+        },
+        "history_root_lineage": lineage,
+        "policy_metadata": policy,
+    }
+    first, qdrant = _append_through_api(
+        monkeypatch,
+        postgres_database,
+        conversation_id=root["conversation_id"],
+        body=body,
+    )
+    with psycopg.connect(postgres_database) as conn:
+        after_first = conn.execute(
+            "SELECT updated_at FROM conversations WHERE id = %s",
+            (root["conversation_id"],),
+        ).fetchone()[0]
+    retry, retry_qdrant = _append_through_api(
+        monkeypatch,
+        postgres_database,
+        conversation_id=root["conversation_id"],
+        body={
+            **body,
+            "metadata": {
+                "response_kind": "claim_explanation",
+                "request_id": "durable-lineage-append",
+            },
+        },
+    )
+    with psycopg.connect(postgres_database) as conn:
+        after_retry = conn.execute(
+            "SELECT updated_at FROM conversations WHERE id = %s",
+            (root["conversation_id"],),
+        ).fetchone()[0]
+        rows = conn.execute(
+            "SELECT metadata, policy_metadata FROM messages WHERE id = %s",
+            (message_id,),
+        ).fetchall()
+
+    assert first.status_code == retry.status_code == 200
+    assert first.json() == retry.json() == {"message_id": str(message_id)}
+    assert after_retry == after_first
+    assert rows == [
+        (
+            {
+                "request_id": "durable-lineage-append",
+                "response_kind": "claim_explanation",
+                "history_root_lineage": lineage,
+            },
+            policy,
+        )
+    ]
+    assert qdrant.upserts[0]["message_id"] == message_id
+    assert retry_qdrant.upserts[0]["message_id"] == message_id
+
+    changed_content, changed_content_qdrant = _append_through_api(
+        monkeypatch,
+        postgres_database,
+        conversation_id=root["conversation_id"],
+        body={**body, "content": "PRIVATE CHANGED EXPLANATION"},
+    )
+    changed_lineage, changed_lineage_qdrant = _append_through_api(
+        monkeypatch,
+        postgres_database,
+        conversation_id=root["conversation_id"],
+        body={
+            **body,
+            "history_root_lineage": {**lineage, "record_kind": "acquisition"},
+        },
+    )
+    for response in (changed_content, changed_lineage):
+        assert response.status_code == 409
+        assert response.json() == {"detail": MessageAppendConflictError.code}
+        assert "PRIVATE CHANGED EXPLANATION" not in response.text
+        assert str(root["message_id"]) not in response.text
+    assert changed_content_qdrant.upserts == []
+    assert changed_lineage_qdrant.upserts == []
+    with psycopg.connect(postgres_database) as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM messages WHERE id = %s",
+            (message_id,),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT updated_at FROM conversations WHERE id = %s",
+            (root["conversation_id"],),
+        ).fetchone()[0] == after_first
 
 
 @pytest.mark.parametrize(

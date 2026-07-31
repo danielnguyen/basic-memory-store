@@ -373,6 +373,7 @@ class MessageCreateRequest(BaseModel):
     RESERVED_POLICY_METADATA_KEY: ClassVar[str] = RESERVED_POLICY_METADATA_KEY
     HISTORY_ROOT_LINEAGE_METADATA_KEY: ClassVar[str] = HISTORY_ROOT_LINEAGE_METADATA_KEY
 
+    message_id: Optional[UUID] = None
     owner_id: str = Field(..., examples=["owner_123"])
     role: Role = Field(..., examples=["user"])
     content: str = Field(..., examples=["Hello world"])
