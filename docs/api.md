@@ -19,14 +19,43 @@ record. It is provenance, not ownership, and must not be substituted for
 | --- | --- |
 | Create a conversation | `POST /v1/conversations` |
 | List conversations | `GET /v1/conversations` |
-| Resolve a conversation identity | `POST /v1/conversations/resolve` |
+| Get owner-scoped conversation facts | `GET /v1/conversations/{conversation_id}` |
+| Update conversation lifecycle | `POST /v1/conversations/{conversation_id}/lifecycle` |
+| Resolve a rolling same-client conversation | `POST /v1/conversations/resolve` |
 | Persist a message | `POST /v1/conversations/{conversation_id}/messages` |
 | Ingest an event | `POST /v1/events/ingest` |
 
-Conversation resolution uses bounded identifying inputs to find or create the
-durable conversation used by later message and retrieval calls. Message
-persistence writes the authoritative record to PostgreSQL and updates the
-derivable semantic index where configured.
+Every conversation has a durable `lifecycle_state` of `open`, `closed`, or
+`superseded`. A superseded conversation records the UUID of its open replacement.
+That relationship does not redirect reads, move messages, or create a second
+conversation identity.
+
+Exact lookup requires both `conversation_id` and `owner_id`. A missing row and
+an owner mismatch produce the same bounded not-found response. The projection
+contains conversation metadata and lifecycle facts, never retained message
+content. `GET /v1/conversations` remains owner-scoped and accepts optional
+`client_id` and `lifecycle_state` filters in addition to its existing cursor and
+limit controls. Lifecycle filtering occurs before the result limit. These APIs
+expose durable facts; callers remain responsible for deciding which conversation
+fits their current interaction.
+
+The lifecycle update endpoint accepts an exact owner, a target state, and a
+replacement UUID only when the target is `superseded`. Open conversations may be
+closed or superseded, closed conversations may be explicitly reopened or
+superseded, and superseded conversations are terminal except for an identical
+repeat. A replacement must be a different, open conversation owned by the same
+owner. Rejected updates are atomic and disclose no cross-owner replacement facts.
+
+`POST /v1/conversations/resolve` is a rolling same-client compatibility
+resolver. It reuses only a recent open conversation for the supplied owner and
+client; otherwise it creates a new open conversation. It does not select across
+clients or owners and does not use message semantics or provider inference.
+
+Message persistence writes the authoritative record to PostgreSQL and updates
+the derivable semantic index where configured. Before inserting, PostgreSQL
+locks and validates that the conversation exists, belongs to the submitted
+owner, and is open. A rejected append inserts nothing, does not update
+conversation activity, and does not invoke indexing.
 
 Assistant message append accepts one optional dedicated
 `history_root_lineage` field:

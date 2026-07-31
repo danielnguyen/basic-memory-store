@@ -232,20 +232,25 @@ def test_working_message_queries_are_owner_qualified_before_limit_with_postgresq
                 client_id="client-working",
                 policy_metadata=policy,
             )
-            cross_owner_message_id = await store.add_message(
-                conversation_id=conversation_id,
-                owner_id="other-owner",
-                role="assistant",
-                content="cross owner working must not consume limit",
-                client_id="client-working",
-                policy_metadata=policy,
-            )
+            cross_owner_message_id = uuid4()
         finally:
             await store.close()
         return conversation_id, owner_message_id, cross_owner_message_id
 
     conversation_id, owner_message_id, cross_owner_message_id = asyncio.run(run())
     with psycopg.connect(postgres_database) as conn:
+        conn.execute(
+            """
+            INSERT INTO messages (
+              id, conversation_id, owner_id, client_id, role, content,
+              policy_metadata, created_at
+            ) VALUES (
+              %s, %s, 'other-owner', 'client-working', 'assistant',
+              'cross owner working must not consume limit', %s::jsonb, now()
+            )
+            """,
+            (cross_owner_message_id, conversation_id, json.dumps(policy)),
+        )
         conn.execute(
             """
             UPDATE messages
@@ -404,14 +409,7 @@ def test_assistant_trace_candidates_use_scoped_left_join_and_newest_order(
                 client_id="client-history",
                 metadata={"request_id": "history-request-user"},
             )
-            await store.add_message(
-                conversation_id=conversation_id,
-                owner_id="other-owner",
-                role="assistant",
-                content="Cross-owner assistant response.",
-                client_id="client-history",
-                metadata={"request_id": "history-request-cross-owner"},
-            )
+            cross_owner_id = uuid4()
             await store.add_message(
                 conversation_id=other_conversation_id,
                 owner_id="owner-history",
@@ -431,6 +429,23 @@ def test_assistant_trace_candidates_use_scoped_left_join_and_newest_order(
                 }
             )
             with psycopg.connect(postgres_database) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO messages (
+                      id, conversation_id, owner_id, client_id, role, content,
+                      metadata, created_at
+                    ) VALUES (
+                      %s, %s, 'other-owner', 'client-history', 'assistant',
+                      'Cross-owner assistant response.', %s::jsonb,
+                      now() + interval '1 minute'
+                    )
+                    """,
+                    (
+                        cross_owner_id,
+                        conversation_id,
+                        json.dumps({"request_id": "history-request-cross-owner"}),
+                    ),
+                )
                 conn.execute(
                     """
                     UPDATE messages
@@ -1395,6 +1410,17 @@ def test_lineage_append_revalidates_root_scope_kind_role_and_association(
     lineage_root_id = root["message_id"]
     if mutation == "cross_owner":
         append_owner = "PRIVATE CROSS OWNER"
+        async def create_cross_owner_destination():
+            store = PostgresStore(postgres_database)
+            await store.open()
+            try:
+                return await store.create_conversation(
+                    owner_id=append_owner,
+                    client_id="telegram:cross-owner-destination",
+                )
+            finally:
+                await store.close()
+        append_conversation = asyncio.run(create_cross_owner_destination())
     elif mutation == "cross_conversation":
         async def create_other_conversation():
             store = PostgresStore(postgres_database)
@@ -1469,7 +1495,11 @@ def test_lineage_append_revalidates_root_scope_kind_role_and_association(
     }
     with psycopg.connect(postgres_database) as conn:
         before_count = conn.execute("SELECT count(*) FROM messages").fetchone()[0]
-    response, _ = _append_through_api(
+        before_root_metadata = conn.execute(
+            "SELECT metadata FROM messages WHERE id = %s",
+            (root["message_id"],),
+        ).fetchone()[0]
+    response, qdrant = _append_through_api(
         monkeypatch,
         postgres_database,
         conversation_id=append_conversation,
@@ -1486,9 +1516,16 @@ def test_lineage_append_revalidates_root_scope_kind_role_and_association(
     assert response.json() == {"detail": "history_root_lineage_invalid"}
     assert str(lineage_root_id) not in response.text
     assert "PRIVATE CROSS OWNER" not in response.text
+    assert json.dumps(lineage, sort_keys=True) not in response.text
+    assert qdrant.upserts == []
     with psycopg.connect(postgres_database) as conn:
         after_count = conn.execute("SELECT count(*) FROM messages").fetchone()[0]
+        after_root_metadata = conn.execute(
+            "SELECT metadata FROM messages WHERE id = %s",
+            (root["message_id"],),
+        ).fetchone()[0]
     assert after_count == before_count
+    assert after_root_metadata == before_root_metadata
 
 
 def test_two_explanation_appends_store_same_original_root_not_parent(

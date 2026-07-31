@@ -18,6 +18,7 @@ Role = Literal["user", "assistant", "system", "tool"]
 RetrievalScope = Literal["conversation", "client", "owner"]
 TimeWindow = Literal["7d", "30d", "90d", "all"]
 RetrievalMode = Literal["recent", "balanced", "historical"]
+ConversationLifecycleState = Literal["open", "closed", "superseded"]
 RetrievalContractMode = Literal["augmented", "raw", "compare"]
 RetrievalSourceType = Literal["message", "derived_text"]
 ArtifactContentClass = Literal[
@@ -309,17 +310,22 @@ class ConversationCreateResponse(BaseModel):
     conversation_id: str = Field(..., description="UUID of the new conversation.")
 
 
-class ConversationSummary(BaseModel):
+class ConversationProjection(BaseModel):
     conversation_id: str
     owner_id: str
     client_id: Optional[str] = None
     title: Optional[str] = None
+    lifecycle_state: ConversationLifecycleState
+    superseded_by_conversation_id: Optional[str] = None
     created_at: str
     updated_at: str
 
 
+ConversationSummary = ConversationProjection
+
+
 class ConversationListResponse(BaseModel):
-    conversations: List[ConversationSummary]
+    conversations: List[ConversationProjection]
     next_cursor: Optional[str] = Field(
         default=None,
         description="Opaque cursor for pagination (pass back as cursor=...).",
@@ -336,6 +342,22 @@ class ConversationResolveRequest(BaseModel):
 class ConversationResolveResponse(BaseModel):
     conversation_id: str
     reused: bool
+
+
+class ConversationLifecycleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    owner_id: str
+    lifecycle_state: ConversationLifecycleState
+    superseded_by_conversation_id: Optional[UUID] = None
+
+    @model_validator(mode="after")
+    def validate_replacement(self) -> "ConversationLifecycleRequest":
+        if self.lifecycle_state == "superseded" and self.superseded_by_conversation_id is None:
+            raise ValueError("superseded_by_conversation_id is required for superseded conversations")
+        if self.lifecycle_state != "superseded" and self.superseded_by_conversation_id is not None:
+            raise ValueError("superseded_by_conversation_id is only valid for superseded conversations")
+        return self
 
 
 # ---- Messages ----

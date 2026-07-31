@@ -24,6 +24,9 @@ SOURCE_DB_DIR = ROOT / "db"
 PRE_MANIFEST_BASELINE_CHECKSUM = (
     "2708ee8985b1f4bdd8d67b9eaeca99b9051e11bc4c8ca15de1069d1ec6c59ca0"
 )
+PRE_CONVERSATION_LIFECYCLE_BASELINE_CHECKSUM = (
+    "b88f055be2b0ed998e9438fdbbbb3f2c8ec4c669921d7bcbbf7e1f1b93adc3eb"
+)
 RECENT_LEGACY_MIGRATIONS = [
     SOURCE_DB_DIR / "migrations" / "legacy" / "20260531_cluster9a_r20_memory_items_additive.sql",
     SOURCE_DB_DIR / "migrations" / "legacy" / "20260601_cluster9b_r21_episodes_additive.sql",
@@ -70,6 +73,22 @@ CREATE INDEX IF NOT EXISTS idx_comparator_child_parent_active
   ON comparator_child(parent_code, created_at DESC)
   WHERE status = 'active';
 """
+
+
+def without_conversation_lifecycle(sql_text: str) -> str:
+    start = sql_text.index("CREATE TABLE IF NOT EXISTS conversations")
+    end = sql_text.index("CREATE TABLE IF NOT EXISTS messages", start)
+    prior_conversations = """CREATE TABLE IF NOT EXISTS conversations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id TEXT NOT NULL,
+  client_id TEXT,
+  title TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+"""
+    return sql_text[:start] + prior_conversations + sql_text[end:]
 
 
 def admin_dsn() -> str:
@@ -718,8 +737,244 @@ def test_managed_migration_applies_once_and_commits_with_ledger(pg_database: str
     assert second["applied_migrations"] == []
 
 
-def test_pre_acquisition_manifest_baseline_checksum_is_explicitly_compatible() -> None:
+def test_clean_baseline_contains_conversation_lifecycle_constraints_and_index(
+    pg_database: str,
+    temp_db_dir: Path,
+) -> None:
+    upgraded = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
+
+    assert upgraded["state"] == "current"
+    assert column_exists(pg_database, "conversations", "lifecycle_state")
+    assert column_exists(
+        pg_database,
+        "conversations",
+        "superseded_by_conversation_id",
+    )
+    assert column_default(
+        pg_database,
+        "conversations",
+        "lifecycle_state",
+    ) == "'open'::text"
+    with psycopg.connect(pg_database) as conn:
+        columns = conn.execute(
+            """
+            SELECT column_name, is_nullable
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'conversations'
+              AND column_name IN ('lifecycle_state', 'superseded_by_conversation_id')
+            ORDER BY column_name
+            """
+        ).fetchall()
+        checks = {
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT conname
+                FROM pg_constraint con
+                JOIN pg_class rel ON rel.oid = con.conrelid
+                WHERE rel.relname = 'conversations' AND con.contype = 'c'
+                """
+            ).fetchall()
+        }
+        foreign_key = conn.execute(
+            """
+            SELECT target.relname, con.confdeltype
+            FROM pg_constraint con
+            JOIN pg_class rel ON rel.oid = con.conrelid
+            JOIN pg_class target ON target.oid = con.confrelid
+            WHERE rel.relname = 'conversations'
+              AND con.conname = 'conversations_superseded_by_conversation_id_fkey'
+            """
+        ).fetchone()
+        indexes = {
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT indexname
+                FROM pg_indexes
+                WHERE schemaname = 'public' AND tablename = 'conversations'
+                """
+            ).fetchall()
+        }
+    assert columns == [
+        ("lifecycle_state", "NO"),
+        ("superseded_by_conversation_id", "YES"),
+    ]
+    assert {
+        "conversations_lifecycle_state_check",
+        "conversations_lifecycle_replacement_check",
+        "conversations_replacement_not_self_check",
+    } <= checks
+    assert foreign_key == ("conversations", "r")
+    assert "idx_conversations_owner_lifecycle_activity" in indexes
+    assert (
+        SOURCE_DB_DIR
+        / "migrations"
+        / "managed"
+        / "20260731120000_conversation_lifecycle.sql"
+    ).is_file()
+
+
+def test_prior_baseline_advances_conversation_lifecycle_without_rewriting_data(
+    pg_database: str,
+    temp_db_dir: Path,
+) -> None:
     current_baseline = (SOURCE_DB_DIR / "baseline.sql").read_text(encoding="utf-8")
+    prior_baseline = without_conversation_lifecycle(current_baseline)
+    prior_path = temp_db_dir / "baseline.sql"
+    prior_path.write_text(prior_baseline, encoding="utf-8")
+    assert schema_migrations.compute_sha256(prior_path) == PRE_CONVERSATION_LIFECYCLE_BASELINE_CHECKSUM
+    assert (
+        PRE_CONVERSATION_LIFECYCLE_BASELINE_CHECKSUM
+        in schema_migrations.COMPATIBLE_BASELINE_CHECKSUMS
+    )
+    execute_sql(pg_database, prior_baseline)
+
+    source_id = uuid4()
+    replacement_id = uuid4()
+    message_id = uuid4()
+    created_at = "2026-07-01T01:02:03Z"
+    updated_at = "2026-07-02T04:05:06Z"
+    with psycopg.connect(pg_database) as conn:
+        schema_migrations.create_ledger_table(conn)
+        conn.execute(
+            """
+            INSERT INTO schema_migrations (version, kind, checksum_sha256, execution_ms)
+            VALUES (%s, 'baseline', %s, 1)
+            """,
+            (
+                schema_migrations.BASELINE_VERSION,
+                PRE_CONVERSATION_LIFECYCLE_BASELINE_CHECKSUM,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO conversations (
+              id, owner_id, client_id, title, created_at, updated_at
+            ) VALUES
+              (%s, 'owner-upgrade', 'client-one', 'source', %s, %s),
+              (%s, 'owner-upgrade', 'client-two', 'replacement', %s, %s)
+            """,
+            (
+                source_id,
+                created_at,
+                updated_at,
+                replacement_id,
+                created_at,
+                updated_at,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO messages (
+              id, conversation_id, owner_id, client_id, role, content, created_at
+            ) VALUES (%s, %s, 'owner-upgrade', 'client-one', 'user', 'preserved', %s)
+            """,
+            (message_id, source_id, created_at),
+        )
+        conn.commit()
+
+    prior_path.write_text(current_baseline, encoding="utf-8")
+    migration = (
+        SOURCE_DB_DIR
+        / "migrations"
+        / "managed"
+        / "20260731120000_conversation_lifecycle.sql"
+    )
+    shutil.copy2(migration, temp_db_dir / "migrations" / "managed" / migration.name)
+
+    before = run_cli_ok("status", dsn=pg_database, db_dir=temp_db_dir)
+    upgraded = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
+    repeated = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
+    checked = run_cli_ok("check", dsn=pg_database, db_dir=temp_db_dir)
+
+    assert before["baseline_checksum_status"] == "compatible_prior"
+    assert before["pending_migrations"] == [migration.name]
+    assert upgraded["applied_migrations"] == [migration.name]
+    assert repeated["applied_migrations"] == []
+    assert checked["state"] == "current"
+    assert ledger_rows(pg_database).count(("20260731120000", "migration")) == 1
+    with psycopg.connect(pg_database) as conn:
+        conversations = conn.execute(
+            """
+            SELECT id, owner_id, client_id, title, lifecycle_state,
+                   superseded_by_conversation_id, created_at, updated_at
+            FROM conversations
+            ORDER BY client_id
+            """
+        ).fetchall()
+        message = conn.execute(
+            """
+            SELECT id, conversation_id, owner_id, client_id, role, content, created_at
+            FROM messages
+            WHERE id = %s
+            """,
+            (message_id,),
+        ).fetchone()
+    assert conversations == [
+        (
+            source_id,
+            "owner-upgrade",
+            "client-one",
+            "source",
+            "open",
+            None,
+            conversations[0][6],
+            conversations[0][7],
+        ),
+        (
+            replacement_id,
+            "owner-upgrade",
+            "client-two",
+            "replacement",
+            "open",
+            None,
+            conversations[1][6],
+            conversations[1][7],
+        ),
+    ]
+    assert str(conversations[0][6]) == "2026-07-01 01:02:03+00:00"
+    assert str(conversations[0][7]) == "2026-07-02 04:05:06+00:00"
+    assert message[:6] == (
+        message_id,
+        source_id,
+        "owner-upgrade",
+        "client-one",
+        "user",
+        "preserved",
+    )
+    assert str(message[6]) == "2026-07-01 01:02:03+00:00"
+
+    invalid_updates = [
+        ("UPDATE conversations SET lifecycle_state = 'unknown' WHERE id = %s", (source_id,)),
+        (
+            "UPDATE conversations SET superseded_by_conversation_id = %s WHERE id = %s",
+            (replacement_id, source_id),
+        ),
+        (
+            "UPDATE conversations SET lifecycle_state = 'superseded' WHERE id = %s",
+            (source_id,),
+        ),
+        (
+            """
+            UPDATE conversations
+            SET lifecycle_state = 'superseded', superseded_by_conversation_id = id
+            WHERE id = %s
+            """,
+            (source_id,),
+        ),
+    ]
+    for statement, params in invalid_updates:
+        with psycopg.connect(pg_database) as conn:
+            with pytest.raises(psycopg.errors.CheckViolation):
+                conn.execute(statement, params)
+
+
+def test_pre_acquisition_manifest_baseline_checksum_is_explicitly_compatible() -> None:
+    current_baseline = without_conversation_lifecycle(
+        (SOURCE_DB_DIR / "baseline.sql").read_text(encoding="utf-8")
+    )
     manifest_constraint = """  CONSTRAINT claim_records_acquisition_manifest_id_check CHECK (
     acquisition_manifest_id IS NULL
     OR (
@@ -751,7 +1006,9 @@ def test_prior_enrolled_baseline_advances_through_claim_record_migration(
     temp_db_dir: Path,
 ) -> None:
     prior_checksum = "fa647801e25230ee1f59d85f385f4f363706c7f72f588bb43ebef12c0ab45eaf"
-    current_baseline = (SOURCE_DB_DIR / "baseline.sql").read_text(encoding="utf-8")
+    current_baseline = without_conversation_lifecycle(
+        (SOURCE_DB_DIR / "baseline.sql").read_text(encoding="utf-8")
+    )
     start = current_baseline.index("CREATE TABLE IF NOT EXISTS claim_records")
     end_marker = "ON claim_records(owner_id, request_id, created_at ASC);\n\n"
     end = current_baseline.index(end_marker, start) + len(end_marker)
@@ -816,7 +1073,9 @@ def test_pre_acquisition_manifest_baseline_advances_through_manifest_migration(
     pg_database: str,
     temp_db_dir: Path,
 ) -> None:
-    current_baseline = (SOURCE_DB_DIR / "baseline.sql").read_text(encoding="utf-8")
+    current_baseline = without_conversation_lifecycle(
+        (SOURCE_DB_DIR / "baseline.sql").read_text(encoding="utf-8")
+    )
     manifest_constraint = """  CONSTRAINT claim_records_acquisition_manifest_id_check CHECK (
     acquisition_manifest_id IS NULL
     OR (
@@ -1304,6 +1563,7 @@ def test_derivation_version_cleanup_migrates_only_exact_legacy_values_and_defaul
         "20260701120000_artifact_policy_metadata.sql",
         "20260714230000_claim_records.sql",
         "20260717120000_claim_acquisition_manifest.sql",
+        "20260731120000_conversation_lifecycle.sql",
     ]
     assert repeated["applied_migrations"] == []
     assert column_default(pg_database, "memory_items", "derivation_version") == f"'{MEMORY_ITEM_DERIVATION_VERSION}'::text"
