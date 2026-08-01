@@ -21,6 +21,7 @@ from storage.postgres import (
     ConversationNotOpenError,
     ConversationReplacementError,
     HistoryRootLineageValidationError,
+    MessageAppendConflictError,
     PostgresStore,
 )
 from storage.qdrant import QdrantStore, RetrievalHit as QdrantHit
@@ -794,12 +795,16 @@ async def add_message(conversation_id: str, body: MessageCreateRequest):
     }
     if lineage is not None:
         add_message_args["history_root_lineage"] = lineage
+    if body.message_id is not None:
+        add_message_args["message_id"] = body.message_id
     try:
         mid = await pg.add_message(**add_message_args)
     except ConversationNotFoundError:
         raise HTTPException(status_code=404, detail="conversation_not_found") from None
     except ConversationNotOpenError:
         raise HTTPException(status_code=409, detail="conversation_not_open") from None
+    except MessageAppendConflictError:
+        raise HTTPException(status_code=409, detail="message_append_conflict") from None
     except HistoryRootLineageValidationError:
         raise HTTPException(
             status_code=422,

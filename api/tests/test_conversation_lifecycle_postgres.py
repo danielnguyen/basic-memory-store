@@ -13,6 +13,7 @@ from storage.postgres import (
     ConversationNotFoundError,
     ConversationNotOpenError,
     ConversationReplacementError,
+    MessageAppendConflictError,
     PostgresStore,
 )
 
@@ -51,6 +52,19 @@ def _message_count(dsn: str, conversation_id: UUID) -> int:
             "SELECT count(*) FROM messages WHERE conversation_id = %s",
             (conversation_id,),
         ).fetchone()[0]
+
+
+def _message_row(dsn: str, message_id: UUID) -> tuple[Any, ...] | None:
+    with psycopg.connect(dsn) as conn:
+        return conn.execute(
+            """
+            SELECT conversation_id, owner_id, client_id, role, content,
+                   metadata, policy_metadata, created_at
+            FROM messages
+            WHERE id = %s
+            """,
+            (message_id,),
+        ).fetchone()
 
 
 def test_creation_exact_lookup_and_owner_scoped_lifecycle_listing(postgres_database):
@@ -372,3 +386,462 @@ def test_message_append_owner_and_open_state_checks_are_atomic(postgres_database
     assert _row(postgres_database, open_id)[2] > before[open_id]
     assert _row(postgres_database, closed_id)[2] == before[closed_id]
     assert _row(postgres_database, superseded_id)[2] == before[superseded_id]
+
+
+def test_supplied_message_identity_exact_retry_is_durable_and_activity_stable(
+    postgres_database,
+):
+    message_id = uuid4()
+    metadata = {"surface": "web", "nested": {"alpha": 1, "beta": 2}}
+    reordered_metadata = {"nested": {"beta": 2, "alpha": 1}, "surface": "web"}
+    policy = {
+        "memory_domains": ["technical"],
+        "sensitivity": "low",
+        "entity_ids": [],
+        "relationship_ids": [],
+        "relationship_scopes": [],
+    }
+
+    async def exercise(store: PostgresStore):
+        conversation_id = await store.create_conversation(
+            "owner-identity",
+            "client-origin",
+            "durable identity",
+        )
+        with psycopg.connect(postgres_database) as conn:
+            conn.execute(
+                "UPDATE conversations SET updated_at = '2026-01-01T00:00:00Z' WHERE id = %s",
+                (conversation_id,),
+            )
+            conn.commit()
+        before = _row(postgres_database, conversation_id)[2]
+        first = await store.add_message(
+            conversation_id=conversation_id,
+            owner_id="owner-identity",
+            role="user",
+            content="Exact durable append.",
+            client_id=None,
+            metadata=metadata,
+            policy_metadata=policy,
+            message_id=message_id,
+        )
+        after_first = _row(postgres_database, conversation_id)[2]
+        retry = await store.add_message(
+            conversation_id=conversation_id,
+            owner_id="owner-identity",
+            role="user",
+            content="Exact durable append.",
+            client_id=None,
+            metadata=reordered_metadata,
+            policy_metadata=dict(reversed(list(policy.items()))),
+            message_id=message_id,
+        )
+        after_retry = _row(postgres_database, conversation_id)[2]
+        legacy_first = await store.add_message(
+            conversation_id=conversation_id,
+            owner_id="owner-identity",
+            role="user",
+            content="Repeated legacy append.",
+        )
+        legacy_second = await store.add_message(
+            conversation_id=conversation_id,
+            owner_id="owner-identity",
+            role="user",
+            content="Repeated legacy append.",
+        )
+        return (
+            conversation_id,
+            first,
+            retry,
+            legacy_first,
+            legacy_second,
+            before,
+            after_first,
+            after_retry,
+        )
+
+    result = _run(postgres_database, exercise)
+    (
+        conversation_id,
+        first,
+        retry,
+        legacy_first,
+        legacy_second,
+        before,
+        after_first,
+        after_retry,
+    ) = result
+    assert first == retry == message_id
+    assert legacy_first != legacy_second
+    assert before < after_first == after_retry
+    assert _message_count(postgres_database, conversation_id) == 3
+    stored = _message_row(postgres_database, message_id)
+    assert stored[:7] == (
+        conversation_id,
+        "owner-identity",
+        None,
+        "user",
+        "Exact durable append.",
+        metadata,
+        policy,
+    )
+
+    async def retry_after_reopen(store: PostgresStore):
+        return await store.add_message(
+            conversation_id=conversation_id,
+            owner_id="owner-identity",
+            role="user",
+            content="Exact durable append.",
+            client_id=None,
+            metadata=metadata,
+            policy_metadata=policy,
+            message_id=message_id,
+        )
+
+    before_reopen_retry = _row(postgres_database, conversation_id)[2]
+    reopened_retry = _run(postgres_database, retry_after_reopen)
+    assert reopened_retry == message_id
+    assert _message_count(postgres_database, conversation_id) == 3
+    assert _row(postgres_database, conversation_id)[2] == before_reopen_retry
+
+
+def test_empty_metadata_retry_matches_existing_null_storage(postgres_database):
+    message_id = uuid4()
+
+    async def exercise(store: PostgresStore):
+        conversation_id = await store.create_conversation("owner-empty", "client-one")
+        first = await store.add_message(
+            conversation_id=conversation_id,
+            owner_id="owner-empty",
+            role="user",
+            content="Empty metadata normalization.",
+            metadata=None,
+            message_id=message_id,
+        )
+        after_first = _row(postgres_database, conversation_id)[2]
+        retry = await store.add_message(
+            conversation_id=conversation_id,
+            owner_id="owner-empty",
+            role="user",
+            content="Empty metadata normalization.",
+            metadata={},
+            message_id=message_id,
+        )
+        return conversation_id, first, retry, after_first
+
+    conversation_id, first, retry, after_first = _run(postgres_database, exercise)
+    assert first == retry == message_id
+    assert _message_count(postgres_database, conversation_id) == 1
+    assert _message_row(postgres_database, message_id)[5] is None
+    assert _row(postgres_database, conversation_id)[2] == after_first
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["conversation", "client", "role", "content", "metadata", "policy_metadata"],
+)
+def test_supplied_message_identity_mismatch_conflicts_without_mutation(
+    postgres_database,
+    mutation,
+):
+    message_id = uuid4()
+    metadata = {"surface": "voice"}
+    policy = {"memory_domains": ["personal"], "sensitivity": "low"}
+
+    async def exercise(store: PostgresStore):
+        conversation_id = await store.create_conversation("owner-conflict", "client-one")
+        other_conversation_id = await store.create_conversation("owner-conflict", "client-two")
+        await store.add_message(
+            conversation_id=conversation_id,
+            owner_id="owner-conflict",
+            role="user",
+            content="Original private content.",
+            client_id="client-one",
+            metadata=metadata,
+            policy_metadata=policy,
+            message_id=message_id,
+        )
+        original_row = _message_row(postgres_database, message_id)
+        target_id = other_conversation_id if mutation == "conversation" else conversation_id
+        target_before = _row(postgres_database, target_id)[2]
+        append = {
+            "conversation_id": target_id,
+            "owner_id": "owner-conflict",
+            "role": "assistant" if mutation == "role" else "user",
+            "content": "Changed private content." if mutation == "content" else "Original private content.",
+            "client_id": "client-two" if mutation == "client" else "client-one",
+            "metadata": {"surface": "car"} if mutation == "metadata" else metadata,
+            "policy_metadata": (
+                {"memory_domains": ["technical"], "sensitivity": "high"}
+                if mutation == "policy_metadata"
+                else policy
+            ),
+            "message_id": message_id,
+        }
+        with pytest.raises(MessageAppendConflictError) as exc:
+            await store.add_message(**append)
+        return conversation_id, target_id, target_before, original_row, str(exc.value)
+
+    conversation_id, target_id, target_before, original_row, detail = _run(
+        postgres_database,
+        exercise,
+    )
+    assert detail == "message_append_conflict"
+    assert _message_row(postgres_database, message_id) == original_row
+    assert _message_count(postgres_database, conversation_id) == 1
+    assert _message_count(postgres_database, target_id) == (1 if target_id == conversation_id else 0)
+    assert _row(postgres_database, target_id)[2] == target_before
+
+
+def test_supplied_message_identity_owner_boundaries_precede_collision_inspection(
+    postgres_database,
+):
+    message_id = uuid4()
+
+    async def exercise(store: PostgresStore):
+        owner_conversation = await store.create_conversation("owner-boundary", "client-one")
+        foreign_conversation = await store.create_conversation("owner-foreign", "client-one")
+        await store.add_message(
+            conversation_id=foreign_conversation,
+            owner_id="owner-foreign",
+            role="user",
+            content="PRIVATE FOREIGN CONTENT",
+            message_id=message_id,
+        )
+        with pytest.raises(ConversationNotFoundError):
+            await store.add_message(
+                conversation_id=owner_conversation,
+                owner_id="wrong-owner",
+                role="user",
+                content="PRIVATE FOREIGN CONTENT",
+                message_id=message_id,
+            )
+        with pytest.raises(ConversationNotFoundError):
+            await store.add_message(
+                conversation_id=uuid4(),
+                owner_id="owner-boundary",
+                role="user",
+                content="PRIVATE FOREIGN CONTENT",
+                message_id=message_id,
+            )
+        with pytest.raises(MessageAppendConflictError) as exc:
+            await store.add_message(
+                conversation_id=owner_conversation,
+                owner_id="owner-boundary",
+                role="user",
+                content="PRIVATE FOREIGN CONTENT",
+                message_id=message_id,
+            )
+        return owner_conversation, foreign_conversation, str(exc.value)
+
+    owner_conversation, foreign_conversation, detail = _run(postgres_database, exercise)
+    assert detail == "message_append_conflict"
+    assert _message_count(postgres_database, owner_conversation) == 0
+    assert _message_count(postgres_database, foreign_conversation) == 1
+
+
+@pytest.mark.parametrize("terminal_state", ["closed", "superseded"])
+def test_exact_retry_survives_terminal_lifecycle_but_new_append_does_not(
+    postgres_database,
+    terminal_state,
+):
+    message_id = uuid4()
+
+    async def exercise(store: PostgresStore):
+        conversation_id = await store.create_conversation("owner-terminal", "client-one")
+        replacement_id = await store.create_conversation("owner-terminal", "client-two")
+        await store.add_message(
+            conversation_id=conversation_id,
+            owner_id="owner-terminal",
+            role="user",
+            content="Persisted before terminal lifecycle.",
+            client_id="client-one",
+            message_id=message_id,
+        )
+        await store.transition_conversation_lifecycle(
+            conversation_id=conversation_id,
+            owner_id="owner-terminal",
+            lifecycle_state=terminal_state,
+            superseded_by_conversation_id=(
+                replacement_id if terminal_state == "superseded" else None
+            ),
+        )
+        terminal_activity = _row(postgres_database, conversation_id)[2]
+        retry = await store.add_message(
+            conversation_id=conversation_id,
+            owner_id="owner-terminal",
+            role="user",
+            content="Persisted before terminal lifecycle.",
+            client_id="client-one",
+            message_id=message_id,
+        )
+        with pytest.raises(MessageAppendConflictError):
+            await store.add_message(
+                conversation_id=conversation_id,
+                owner_id="owner-terminal",
+                role="user",
+                content="Changed after terminal lifecycle.",
+                client_id="client-one",
+                message_id=message_id,
+            )
+        with pytest.raises(ConversationNotOpenError):
+            await store.add_message(
+                conversation_id=conversation_id,
+                owner_id="owner-terminal",
+                role="user",
+                content="New supplied append after terminal lifecycle.",
+                message_id=uuid4(),
+            )
+        with pytest.raises(ConversationNotOpenError):
+            await store.add_message(
+                conversation_id=conversation_id,
+                owner_id="owner-terminal",
+                role="user",
+                content="Legacy append after terminal lifecycle.",
+            )
+        return conversation_id, retry, terminal_activity
+
+    conversation_id, retry, terminal_activity = _run(postgres_database, exercise)
+    assert retry == message_id
+    assert _message_count(postgres_database, conversation_id) == 1
+    assert _row(postgres_database, conversation_id)[2] == terminal_activity
+
+
+def test_concurrent_exact_appends_converge_on_one_message(postgres_database):
+    message_id = uuid4()
+
+    async def exercise():
+        setup = PostgresStore(postgres_database)
+        await setup.open()
+        try:
+            conversation_id = await setup.create_conversation("owner-concurrent", "client-one")
+        finally:
+            await setup.close()
+        with psycopg.connect(postgres_database) as conn:
+            conn.execute(
+                "UPDATE conversations SET updated_at = '2026-01-01T00:00:00Z' WHERE id = %s",
+                (conversation_id,),
+            )
+            conn.commit()
+        before = _row(postgres_database, conversation_id)[2]
+        first_store = PostgresStore(postgres_database)
+        second_store = PostgresStore(postgres_database)
+        await first_store.open()
+        await second_store.open()
+        gate = asyncio.Event()
+
+        async def append(store: PostgresStore):
+            await gate.wait()
+            return await store.add_message(
+                conversation_id=conversation_id,
+                owner_id="owner-concurrent",
+                role="user",
+                content="Concurrent exact append.",
+                client_id="client-one",
+                message_id=message_id,
+            )
+
+        try:
+            tasks = [asyncio.create_task(append(first_store)), asyncio.create_task(append(second_store))]
+            await asyncio.sleep(0)
+            gate.set()
+            results = await asyncio.gather(*tasks)
+            after_creation = _row(postgres_database, conversation_id)[2]
+            retry = await first_store.add_message(
+                conversation_id=conversation_id,
+                owner_id="owner-concurrent",
+                role="user",
+                content="Concurrent exact append.",
+                client_id="client-one",
+                message_id=message_id,
+            )
+            after_retry = _row(postgres_database, conversation_id)[2]
+        finally:
+            await first_store.close()
+            await second_store.close()
+        return conversation_id, results, retry, before, after_creation, after_retry
+
+    conversation_id, results, retry, before, after_creation, after_retry = asyncio.run(
+        exercise()
+    )
+    assert results == [message_id, message_id]
+    assert retry == message_id
+    assert _message_count(postgres_database, conversation_id) == 1
+    assert before < after_creation == after_retry
+
+
+def test_concurrent_mismatched_appends_have_one_winner(postgres_database):
+    message_id = uuid4()
+
+    async def exercise():
+        setup = PostgresStore(postgres_database)
+        await setup.open()
+        try:
+            conversation_id = await setup.create_conversation("owner-race", "client-one")
+        finally:
+            await setup.close()
+        first_store = PostgresStore(postgres_database)
+        second_store = PostgresStore(postgres_database)
+        await first_store.open()
+        await second_store.open()
+        gate = asyncio.Event()
+
+        async def append(store: PostgresStore, content: str):
+            await gate.wait()
+            return await store.add_message(
+                conversation_id=conversation_id,
+                owner_id="owner-race",
+                role="user",
+                content=content,
+                message_id=message_id,
+            )
+
+        try:
+            tasks = [
+                asyncio.create_task(append(first_store, "First concurrent payload.")),
+                asyncio.create_task(append(second_store, "Second concurrent payload.")),
+            ]
+            await asyncio.sleep(0)
+            gate.set()
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            await first_store.close()
+            await second_store.close()
+        return conversation_id, results
+
+    conversation_id, results = asyncio.run(exercise())
+    assert sum(result == message_id for result in results) == 1
+    assert sum(isinstance(result, MessageAppendConflictError) for result in results) == 1
+    assert _message_count(postgres_database, conversation_id) == 1
+    assert _message_row(postgres_database, message_id)[4] in {
+        "First concurrent payload.",
+        "Second concurrent payload.",
+    }
+
+
+def test_supplied_message_insert_failure_rolls_back_activity(postgres_database):
+    message_id = uuid4()
+
+    async def exercise(store: PostgresStore):
+        conversation_id = await store.create_conversation("owner-rollback", "client-one")
+        with psycopg.connect(postgres_database) as conn:
+            conn.execute(
+                "UPDATE conversations SET updated_at = '2026-01-01T00:00:00Z' WHERE id = %s",
+                (conversation_id,),
+            )
+            conn.commit()
+        before = _row(postgres_database, conversation_id)[2]
+        with pytest.raises(psycopg.errors.CheckViolation):
+            await store.add_message(
+                conversation_id=conversation_id,
+                owner_id="owner-rollback",
+                role="invalid",
+                content="This insert must roll back.",
+                message_id=message_id,
+            )
+        return conversation_id, before
+
+    conversation_id, before = _run(postgres_database, exercise)
+    assert _message_row(postgres_database, message_id) is None
+    assert _message_count(postgres_database, conversation_id) == 0
+    assert _row(postgres_database, conversation_id)[2] == before

@@ -46,6 +46,11 @@ jobs:
             tests/test_recall_migration.py \
             tests/test_schema_migrations_integration.py
 
+      - name: Run conversation lifecycle PostgreSQL integration tests
+        run: |
+          cd api
+          python -m pytest -q tests/test_conversation_lifecycle_postgres.py
+
       - name: Run trace and immediate-history PostgreSQL integration tests
         run: |
           cd api

@@ -13,6 +13,7 @@ from storage.postgres import (
     ConversationNotFoundError,
     ConversationNotOpenError,
     ConversationReplacementError,
+    MessageAppendConflictError,
 )
 
 
@@ -132,26 +133,40 @@ class FakePG:
         metadata=None,
         policy_metadata=None,
         history_root_lineage=None,
+        message_id=None,
     ):
         conversation = await self.get_conversation_for_owner(conversation_id, owner_id)
         if conversation is None:
             raise ConversationNotFoundError()
-        if conversation["lifecycle_state"] != "open":
-            raise ConversationNotOpenError()
-        mid = uuid.uuid4()
         stored_metadata = dict(metadata or {})
         if history_root_lineage is not None:
             stored_metadata["history_root_lineage"] = history_root_lineage
+        canonical = {
+            "message_id": str(message_id) if message_id is not None else None,
+            "conversation_id": str(conversation_id),
+            "owner_id": owner_id,
+            "role": role,
+            "content": content,
+            "client_id": client_id,
+            "metadata": stored_metadata,
+            "policy_metadata": policy_metadata,
+        }
+        if message_id is not None:
+            existing = next(
+                (row for row in self.messages if row["message_id"] == str(message_id)),
+                None,
+            )
+            if existing is not None:
+                if all(existing[key] == value for key, value in canonical.items()):
+                    return message_id
+                raise MessageAppendConflictError()
+        if conversation["lifecycle_state"] != "open":
+            raise ConversationNotOpenError()
+        mid = message_id or uuid.uuid4()
         self.messages.append(
             {
+                **canonical,
                 "message_id": str(mid),
-                "conversation_id": str(conversation_id),
-                "owner_id": owner_id,
-                "role": role,
-                "content": content,
-                "client_id": client_id,
-                "metadata": stored_metadata,
-                "policy_metadata": policy_metadata,
                 "created_at": "2026-01-01 00:00:00+00:00",
             }
         )
@@ -925,6 +940,122 @@ def test_message_append_requires_owner_of_open_conversation_before_indexing(clie
     assert accepted.status_code == 200
     assert len(main_module.pg.messages) == before_messages + 1
     assert len(main_module.qdrant.upserts) == before_upserts + 1
+
+
+def test_message_append_legacy_requests_remain_fresh_and_do_not_forward_identity(
+    client,
+    monkeypatch,
+):
+    conversation_id = _create_conversation(client)
+    calls = []
+    original = main_module.pg.add_message
+
+    async def recording_add_message(**kwargs):
+        calls.append(dict(kwargs))
+        return await original(**kwargs)
+
+    monkeypatch.setattr(main_module.pg, "add_message", recording_add_message, raising=True)
+    body = {
+        "owner_id": "owner-alpha",
+        "role": "user",
+        "content": "A repeated legacy append remains a new message.",
+        "client_id": "client-one",
+    }
+    first = client.post(
+        f"/v1/conversations/{conversation_id}/messages",
+        headers=auth_headers(),
+        json=body,
+    )
+    second = client.post(
+        f"/v1/conversations/{conversation_id}/messages",
+        headers=auth_headers(),
+        json=body,
+    )
+
+    assert first.status_code == second.status_code == 200
+    assert set(first.json()) == set(second.json()) == {"message_id"}
+    assert first.json()["message_id"] != second.json()["message_id"]
+    assert len(main_module.pg.messages) == 2
+    assert all("message_id" not in call for call in calls)
+
+
+def test_message_append_supplied_identity_is_forwarded_returned_and_indexed(client):
+    conversation_id = _create_conversation(client)
+    message_id = uuid.uuid4()
+    body = {
+        "message_id": str(message_id),
+        "owner_id": "owner-alpha",
+        "role": "assistant",
+        "content": "A supplied durable message identity is indexed.",
+        "client_id": "client-one",
+        "metadata": {"surface": "web"},
+    }
+    first = client.post(
+        f"/v1/conversations/{conversation_id}/messages",
+        headers=auth_headers(),
+        json=body,
+    )
+    retry = client.post(
+        f"/v1/conversations/{conversation_id}/messages",
+        headers=auth_headers(),
+        json=body,
+    )
+
+    assert first.status_code == retry.status_code == 200
+    assert first.json() == retry.json() == {"message_id": str(message_id)}
+    assert len(main_module.pg.messages) == 1
+    assert len(main_module.qdrant.upserts) == 2
+    assert all(call["message_id"] == message_id for call in main_module.qdrant.upserts)
+
+
+def test_message_append_rejects_invalid_identity_before_storage(client):
+    conversation_id = _create_conversation(client)
+    before_messages = len(main_module.pg.messages)
+    before_upserts = len(main_module.qdrant.upserts)
+    response = client.post(
+        f"/v1/conversations/{conversation_id}/messages",
+        headers=auth_headers(),
+        json={
+            "message_id": "not-a-uuid",
+            "owner_id": "owner-alpha",
+            "role": "user",
+            "content": "This request must not reach storage.",
+        },
+    )
+
+    assert response.status_code == 422
+    assert len(main_module.pg.messages) == before_messages
+    assert len(main_module.qdrant.upserts) == before_upserts
+
+
+@pytest.mark.parametrize(
+    "error,expected",
+    [
+        (MessageAppendConflictError(), (409, {"detail": "message_append_conflict"})),
+        (RuntimeError("PRIVATE STORAGE FAILURE"), (503, {"detail": "message_append_unavailable"})),
+    ],
+)
+def test_message_append_storage_errors_are_bounded(client, monkeypatch, error, expected):
+    conversation_id = _create_conversation(client)
+
+    async def failed_append(**kwargs):
+        raise error
+
+    monkeypatch.setattr(main_module.pg, "add_message", failed_append, raising=True)
+    response = client.post(
+        f"/v1/conversations/{conversation_id}/messages",
+        headers=auth_headers(),
+        json={
+            "message_id": str(uuid.uuid4()),
+            "owner_id": "owner-alpha",
+            "role": "user",
+            "content": "PRIVATE STORED CONTENT SENTINEL",
+        },
+    )
+
+    assert (response.status_code, response.json()) == expected
+    assert "PRIVATE" not in response.text
+    assert main_module.qdrant.upserts == []
 
 
 def test_v1_chat_requires_auth(client):

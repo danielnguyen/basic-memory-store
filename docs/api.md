@@ -57,6 +57,23 @@ locks and validates that the conversation exists, belongs to the submitted
 owner, and is open. A rejected append inserts nothing, does not update
 conversation activity, and does not invoke indexing.
 
+The append request accepts an optional `message_id` UUID. When omitted, Basic
+Memory Store generates a fresh durable UUID, so repeated requests without an ID
+remain distinct appends. When supplied, the caller selects the durable message
+UUID. An exact retry with the same conversation, owner, client, role, content,
+stored metadata, history lineage, and policy metadata returns the same UUID
+without inserting another row or advancing conversation activity. JSON object
+key order does not affect equivalence.
+
+Reusing a supplied UUID with different append content or scope returns `409`
+with `message_append_conflict` and does not reveal the existing message. An
+exact retry may still return a message after its conversation is later closed
+or superseded because it performs no append. A new message, whether its UUID is
+supplied or generated, still requires an open owner-scoped conversation. The
+response remains exactly `{"message_id": "<uuid>"}`. The supplied UUID is the
+message's existing durable identity; it does not create another conversation
+identity, reservation, or append token.
+
 Assistant message append accepts one optional dedicated
 `history_root_lineage` field:
 
