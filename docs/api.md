@@ -34,10 +34,16 @@ Exact lookup requires both `conversation_id` and `owner_id`. A missing row and
 an owner mismatch produce the same bounded not-found response. The projection
 contains conversation metadata and lifecycle facts, never retained message
 content. `GET /v1/conversations` remains owner-scoped and accepts optional
-`client_id` and `lifecycle_state` filters in addition to its existing cursor and
-limit controls. Lifecycle filtering occurs before the result limit. These APIs
-expose durable facts; callers remain responsible for deciding which conversation
-fits their current interaction.
+`client_id`, `lifecycle_state`, and `updated_since` filters in addition to its
+existing cursor and limit controls. `updated_since` must include a timezone and
+applies the inclusive `updated_at >= updated_since` boundary. It composes with
+owner, client, lifecycle, cursor, and limit filtering, and is applied before the
+result limit.
+
+The activity cutoff is only a mechanical durable-fact filter. Raw recency does
+not select a conversation; callers remain responsible for continuation and
+retirement policy and for deciding which conversation fits their current
+interaction.
 
 The lifecycle update endpoint accepts an exact owner, a target state, and a
 replacement UUID only when the target is `superseded`. Open conversations may be

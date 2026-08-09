@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 import re
 from typing import Any, Callable, Optional
 from uuid import UUID, uuid4
@@ -625,6 +626,7 @@ class PostgresStore:
         lifecycle_state: str | None = None,
         limit: int = 20,
         cursor: str | None = None,
+        updated_since: datetime | None = None,
     ) -> tuple[list[dict[str, Any]], str | None]:
         """
         List conversations for an owner (optionally per client_id), ordered by updated_at desc.
@@ -642,6 +644,10 @@ class PostgresStore:
         if lifecycle_state is not None:
             where += " AND lifecycle_state = %s"
             params.append(lifecycle_state)
+
+        if updated_since is not None:
+            where += " AND updated_at >= %s"
+            params.append(updated_since)
 
         # Pagination: fetch rows strictly "before" cursor in (updated_at, id) ordering
         cursor_clause = ""

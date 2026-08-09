@@ -1,5 +1,6 @@
 import uuid
 import types
+from datetime import datetime
 from pathlib import Path
 import anyio
 import pytest
@@ -31,6 +32,7 @@ class FakePG:
         self.derived_text = {}
         self.embedding_refs = []
         self.fail_activate_attempt = False
+        self.last_list_updated_since = None
 
     async def open(self): ...
     async def close(self): ...
@@ -206,7 +208,9 @@ class FakePG:
         lifecycle_state=None,
         limit=20,
         cursor=None,
+        updated_since=None,
     ):
+        self.last_list_updated_since = updated_since
         conversations = []
         for cid in self.conversations:
             conversation = await self.get_conversation(cid)
@@ -215,6 +219,11 @@ class FakePG:
             if client_id is not None and conversation["client_id"] != client_id:
                 continue
             if lifecycle_state is not None and conversation["lifecycle_state"] != lifecycle_state:
+                continue
+            if (
+                updated_since is not None
+                and datetime.fromisoformat(conversation["updated_at"]) < updated_since
+            ):
                 continue
             conversations.append(conversation)
         conversations.sort(
@@ -789,6 +798,84 @@ def test_conversation_projection_lookup_and_lifecycle_filter_are_owner_scoped(cl
     )
     assert [item["conversation_id"] for item in listed.json()["conversations"]] == [conversation_id]
     assert hidden.json()["conversations"] == []
+
+
+def test_conversation_activity_filter_is_inclusive_and_composes_before_limit(client):
+    older_id = _create_conversation(client)
+    equal_id = _create_conversation(client)
+    newer_id = _create_conversation(client)
+    wrong_client_id = _create_conversation(client, client_id="client-two")
+    wrong_lifecycle_id = _create_conversation(client)
+    foreign_id = _create_conversation(client, owner_id="owner-beta")
+    timestamps = {
+        older_id: "2026-01-01 11:59:59+00:00",
+        equal_id: "2026-01-01 12:00:00+00:00",
+        newer_id: "2026-01-01 12:00:01+00:00",
+        wrong_client_id: "2026-01-01 12:00:02+00:00",
+        wrong_lifecycle_id: "2026-01-01 12:00:03+00:00",
+        foreign_id: "2026-01-01 12:00:04+00:00",
+    }
+    for conversation_id, updated_at in timestamps.items():
+        main_module.pg.conversation_rows[uuid.UUID(conversation_id)]["updated_at"] = updated_at
+    main_module.pg.conversation_rows[uuid.UUID(wrong_lifecycle_id)]["lifecycle_state"] = "closed"
+
+    filtered = client.get(
+        "/v1/conversations",
+        headers=auth_headers(),
+        params={
+            "owner_id": "owner-alpha",
+            "client_id": "client-one",
+            "lifecycle_state": "open",
+            "updated_since": "2026-01-01T07:00:00-05:00",
+            "limit": 2,
+        },
+    )
+
+    assert filtered.status_code == 200
+    assert [row["conversation_id"] for row in filtered.json()["conversations"]] == [
+        newer_id,
+        equal_id,
+    ]
+    assert main_module.pg.last_list_updated_since == datetime.fromisoformat(
+        "2026-01-01T07:00:00-05:00"
+    )
+
+    unfiltered = client.get(
+        "/v1/conversations",
+        headers=auth_headers(),
+        params={
+            "owner_id": "owner-alpha",
+            "client_id": "client-one",
+            "lifecycle_state": "open",
+        },
+    )
+    assert unfiltered.status_code == 200
+    assert [row["conversation_id"] for row in unfiltered.json()["conversations"]] == [
+        newer_id,
+        equal_id,
+        older_id,
+    ]
+    assert main_module.pg.last_list_updated_since is None
+
+
+def test_conversation_activity_filter_rejects_naive_and_malformed_timestamps(client):
+    naive = client.get(
+        "/v1/conversations",
+        headers=auth_headers(),
+        params={"owner_id": "owner-alpha", "updated_since": "2026-01-01T12:00:00"},
+    )
+    malformed = client.get(
+        "/v1/conversations",
+        headers=auth_headers(),
+        params={"owner_id": "owner-alpha", "updated_since": "not-a-timestamp"},
+    )
+
+    assert (naive.status_code, naive.json()) == (
+        422,
+        {"detail": "updated_since_timezone_required"},
+    )
+    assert malformed.status_code == 422
+    assert len(malformed.json()["detail"]) == 1
 
 
 def test_conversation_lookup_has_bounded_identifier_and_dependency_errors(client, monkeypatch):
