@@ -663,11 +663,15 @@ async def list_conversations(
     lifecycle_state: ConversationLifecycleState | None = None,
     limit: int = 20,
     cursor: str | None = None,
+    updated_since: datetime | None = None,
 ):
+    if updated_since is not None and updated_since.utcoffset() is None:
+        raise HTTPException(status_code=422, detail="updated_since_timezone_required")
     convos, next_cursor = await pg.list_conversations(
         owner_id=owner_id,
         client_id=client_id,
         lifecycle_state=lifecycle_state,
+        updated_since=updated_since,
         limit=limit,
         cursor=cursor,
     )
