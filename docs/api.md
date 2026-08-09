@@ -34,10 +34,12 @@ Exact lookup requires both `conversation_id` and `owner_id`. A missing row and
 an owner mismatch produce the same bounded not-found response. The projection
 contains conversation metadata and lifecycle facts, never retained message
 content. `GET /v1/conversations` remains owner-scoped and accepts optional
-`client_id`, `lifecycle_state`, and `updated_since` filters in addition to its
-existing cursor and limit controls. `updated_since` must include a timezone and
-applies the inclusive `updated_at >= updated_since` boundary. It composes with
-owner, client, lifecycle, cursor, and limit filtering, and is applied before the
+`client_id`, `lifecycle_state`, `updated_since`, and `updated_before` filters in
+addition to its existing cursor and limit controls. Activity timestamps must
+include a timezone. `updated_since` applies the inclusive
+`updated_at >= updated_since` boundary, while `updated_before` applies the
+strict `updated_at < updated_before` boundary. Both filters may be supplied and
+compose with owner, client, lifecycle, cursor, and limit filtering before the
 result limit.
 
 The activity cutoff is only a mechanical durable-fact filter. Raw recency does
@@ -51,6 +53,13 @@ closed or superseded, closed conversations may be explicitly reopened or
 superseded, and superseded conversations are terminal except for an identical
 repeat. A replacement must be a different, open conversation owned by the same
 owner. Rejected updates are atomic and disclose no cross-owner replacement facts.
+The request may also include a timezone-aware `expected_updated_at`. When a real
+transition is required, PostgreSQL compares that instant with the locked
+conversation's current durable activity inside the lifecycle transaction. A
+stale value returns the existing `conversation_lifecycle_conflict`; an identical
+already-completed target remains idempotent even when the original expected
+activity is repeated. Omitting the precondition preserves normal lifecycle
+behavior.
 
 `POST /v1/conversations/resolve` is a rolling same-client compatibility
 resolver. It reuses only a recent open conversation for the supplied owner and

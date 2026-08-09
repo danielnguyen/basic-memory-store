@@ -350,6 +350,14 @@ class ConversationLifecycleRequest(BaseModel):
     owner_id: str
     lifecycle_state: ConversationLifecycleState
     superseded_by_conversation_id: Optional[UUID] = None
+    expected_updated_at: Optional[datetime] = None
+
+    @field_validator("expected_updated_at")
+    @classmethod
+    def validate_expected_updated_at(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.utcoffset() is None:
+            raise ValueError("expected_updated_at_timezone_required")
+        return value
 
     @model_validator(mode="after")
     def validate_replacement(self) -> "ConversationLifecycleRequest":
