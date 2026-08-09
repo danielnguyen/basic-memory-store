@@ -627,6 +627,7 @@ class PostgresStore:
         limit: int = 20,
         cursor: str | None = None,
         updated_since: datetime | None = None,
+        updated_before: datetime | None = None,
     ) -> tuple[list[dict[str, Any]], str | None]:
         """
         List conversations for an owner (optionally per client_id), ordered by updated_at desc.
@@ -648,6 +649,10 @@ class PostgresStore:
         if updated_since is not None:
             where += " AND updated_at >= %s"
             params.append(updated_since)
+
+        if updated_before is not None:
+            where += " AND updated_at < %s"
+            params.append(updated_before)
 
         # Pagination: fetch rows strictly "before" cursor in (updated_at, id) ordering
         cursor_clause = ""
@@ -774,6 +779,7 @@ class PostgresStore:
         owner_id: str,
         lifecycle_state: str,
         superseded_by_conversation_id: UUID | None,
+        expected_updated_at: datetime | None = None,
     ) -> dict[str, Any]:
         source_q = f"""
         SELECT {_CONVERSATION_COLUMNS}
@@ -811,6 +817,9 @@ class PostgresStore:
                     ):
                         return _conversation_from_row(source)
                     if current_state == "superseded":
+                        raise ConversationLifecycleConflictError()
+
+                    if expected_updated_at is not None and source[7] != expected_updated_at:
                         raise ConversationLifecycleConflictError()
 
                     if lifecycle_state == "superseded":

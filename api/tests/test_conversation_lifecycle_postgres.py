@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -326,6 +326,196 @@ def test_activity_filter_preserves_cursor_pagination(postgres_database):
     assert before == after
 
 
+def test_updated_before_is_strict_applied_before_limit_and_mutation_free(
+    postgres_database,
+):
+    cutoff = datetime(2026, 2, 1, 12, 0, tzinfo=UTC)
+
+    async def exercise(store: PostgresStore):
+        older_id = await store.create_conversation("owner-before", "client-one", "older")
+        equal_id = await store.create_conversation("owner-before", "client-one", "equal")
+        newer_id = await store.create_conversation("owner-before", "client-one", "newer")
+        timestamps = {
+            older_id: datetime(2026, 2, 1, 11, 59, 59, tzinfo=UTC),
+            equal_id: cutoff,
+            newer_id: datetime(2026, 2, 1, 12, 0, 1, tzinfo=UTC),
+        }
+        with psycopg.connect(postgres_database) as conn:
+            for conversation_id, updated_at in timestamps.items():
+                conn.execute(
+                    "UPDATE conversations SET updated_at = %s WHERE id = %s",
+                    (updated_at, conversation_id),
+                )
+            conn.commit()
+        before = {
+            conversation_id: _row(postgres_database, conversation_id)
+            for conversation_id in timestamps
+        }
+        filtered, _ = await store.list_conversations(
+            "owner-before",
+            updated_before=cutoff,
+            limit=1,
+        )
+        after = {
+            conversation_id: _row(postgres_database, conversation_id)
+            for conversation_id in timestamps
+        }
+        return older_id, equal_id, newer_id, filtered, before, after
+
+    older_id, equal_id, newer_id, filtered, before, after = _run(
+        postgres_database,
+        exercise,
+    )
+    assert [row["conversation_id"] for row in filtered] == [str(older_id)]
+    assert str(equal_id) not in {row["conversation_id"] for row in filtered}
+    assert str(newer_id) not in {row["conversation_id"] for row in filtered}
+    assert before == after
+
+
+def test_updated_before_composes_with_owner_client_lifecycle_and_updated_since(
+    postgres_database,
+):
+    updated_since = datetime(2026, 2, 1, 11, 58, tzinfo=UTC)
+    updated_before = datetime(2026, 2, 1, 12, 0, tzinfo=UTC)
+
+    async def exercise(store: PostgresStore):
+        selected_id = await store.create_conversation("owner-window", "client-one", "selected")
+        too_old_id = await store.create_conversation("owner-window", "client-one", "too old")
+        equal_upper_id = await store.create_conversation(
+            "owner-window",
+            "client-one",
+            "equal upper",
+        )
+        wrong_owner_id = await store.create_conversation("owner-foreign", "client-one", "foreign")
+        wrong_client_id = await store.create_conversation(
+            "owner-window",
+            "client-two",
+            "other client",
+        )
+        closed_id = await store.create_conversation("owner-window", "client-one", "closed")
+        await store.transition_conversation_lifecycle(
+            conversation_id=closed_id,
+            owner_id="owner-window",
+            lifecycle_state="closed",
+            superseded_by_conversation_id=None,
+        )
+        timestamps = {
+            selected_id: datetime(2026, 2, 1, 11, 59, tzinfo=UTC),
+            too_old_id: datetime(2026, 2, 1, 11, 57, 59, tzinfo=UTC),
+            equal_upper_id: updated_before,
+            wrong_owner_id: datetime(2026, 2, 1, 11, 59, tzinfo=UTC),
+            wrong_client_id: datetime(2026, 2, 1, 11, 59, tzinfo=UTC),
+            closed_id: datetime(2026, 2, 1, 11, 59, tzinfo=UTC),
+        }
+        with psycopg.connect(postgres_database) as conn:
+            for conversation_id, updated_at in timestamps.items():
+                conn.execute(
+                    "UPDATE conversations SET updated_at = %s WHERE id = %s",
+                    (updated_at, conversation_id),
+                )
+            conn.commit()
+        rows, _ = await store.list_conversations(
+            "owner-window",
+            client_id="client-one",
+            lifecycle_state="open",
+            updated_since=updated_since,
+            updated_before=updated_before,
+            limit=10,
+        )
+        return selected_id, rows
+
+    selected_id, rows = _run(postgres_database, exercise)
+    assert [row["conversation_id"] for row in rows] == [str(selected_id)]
+
+
+def test_updated_before_preserves_cursor_pagination(postgres_database):
+    cutoff = datetime(2026, 2, 1, 12, 0, tzinfo=UTC)
+
+    async def exercise(store: PostgresStore):
+        oldest_id = await store.create_conversation("owner-before-pages", "client-one", "oldest")
+        middle_id = await store.create_conversation("owner-before-pages", "client-one", "middle")
+        newest_id = await store.create_conversation("owner-before-pages", "client-one", "newest")
+        equal_id = await store.create_conversation("owner-before-pages", "client-one", "equal")
+        timestamps = {
+            oldest_id: datetime(2026, 2, 1, 11, 57, tzinfo=UTC),
+            middle_id: datetime(2026, 2, 1, 11, 58, tzinfo=UTC),
+            newest_id: datetime(2026, 2, 1, 11, 59, tzinfo=UTC),
+            equal_id: cutoff,
+        }
+        with psycopg.connect(postgres_database) as conn:
+            for conversation_id, updated_at in timestamps.items():
+                conn.execute(
+                    "UPDATE conversations SET updated_at = %s WHERE id = %s",
+                    (updated_at, conversation_id),
+                )
+            conn.commit()
+        before = {
+            conversation_id: _row(postgres_database, conversation_id)
+            for conversation_id in timestamps
+        }
+        first, first_cursor = await store.list_conversations(
+            "owner-before-pages",
+            updated_before=cutoff,
+            limit=2,
+        )
+        second, second_cursor = await store.list_conversations(
+            "owner-before-pages",
+            updated_before=cutoff,
+            limit=2,
+            cursor=first_cursor,
+        )
+        final, final_cursor = await store.list_conversations(
+            "owner-before-pages",
+            updated_before=cutoff,
+            limit=2,
+            cursor=second_cursor,
+        )
+        after = {
+            conversation_id: _row(postgres_database, conversation_id)
+            for conversation_id in timestamps
+        }
+        return (
+            oldest_id,
+            middle_id,
+            newest_id,
+            equal_id,
+            first,
+            first_cursor,
+            second,
+            second_cursor,
+            final,
+            final_cursor,
+            before,
+            after,
+        )
+
+    result = _run(postgres_database, exercise)
+    (
+        oldest_id,
+        middle_id,
+        newest_id,
+        equal_id,
+        first,
+        first_cursor,
+        second,
+        second_cursor,
+        final,
+        final_cursor,
+        before,
+        after,
+    ) = result
+    assert [row["conversation_id"] for row in first] == [str(newest_id), str(middle_id)]
+    assert first_cursor == f"{first[-1]['updated_at']}|{middle_id}"
+    assert [row["conversation_id"] for row in second] == [str(oldest_id)]
+    assert second_cursor == f"{second[-1]['updated_at']}|{oldest_id}"
+    assert final == []
+    assert final_cursor is None
+    assert str(equal_id) not in {
+        row["conversation_id"] for row in [*first, *second, *final]
+    }
+    assert before == after
+
+
 def test_allowed_idempotent_and_terminal_lifecycle_transitions(postgres_database):
     async def exercise(store: PostgresStore):
         source_id = await store.create_conversation("owner-state", "client-one", "source")
@@ -393,6 +583,186 @@ def test_allowed_idempotent_and_terminal_lifecycle_transitions(postgres_database
     assert superseded["lifecycle_state"] == "superseded"
     assert superseded == repeated_superseded
     assert closed_to_superseded["lifecycle_state"] == "superseded"
+
+
+def test_lifecycle_expected_activity_matches_instants_and_preserves_idempotent_retry(
+    postgres_database,
+):
+    initial_activity = datetime(2026, 3, 1, 12, 0, 0, 123456, tzinfo=UTC)
+
+    async def exercise(store: PostgresStore):
+        exact_id = await store.create_conversation("owner-expected", "client-one", "exact")
+        offset_id = await store.create_conversation("owner-expected", "client-two", "offset")
+        with psycopg.connect(postgres_database) as conn:
+            conn.execute(
+                "UPDATE conversations SET updated_at = %s WHERE id = ANY(%s)",
+                (initial_activity, [exact_id, offset_id]),
+            )
+            conn.commit()
+        exact_expected = _row(postgres_database, exact_id)[2]
+        offset_expected = _row(postgres_database, offset_id)[2]
+        equivalent_offset = offset_expected.astimezone(timezone(timedelta(hours=-5)))
+
+        exact_closed = await store.transition_conversation_lifecycle(
+            conversation_id=exact_id,
+            owner_id="owner-expected",
+            lifecycle_state="closed",
+            superseded_by_conversation_id=None,
+            expected_updated_at=exact_expected,
+        )
+        exact_after = _row(postgres_database, exact_id)
+        offset_closed = await store.transition_conversation_lifecycle(
+            conversation_id=offset_id,
+            owner_id="owner-expected",
+            lifecycle_state="closed",
+            superseded_by_conversation_id=None,
+            expected_updated_at=equivalent_offset,
+        )
+        repeated = await store.transition_conversation_lifecycle(
+            conversation_id=exact_id,
+            owner_id="owner-expected",
+            lifecycle_state="closed",
+            superseded_by_conversation_id=None,
+            expected_updated_at=exact_expected,
+        )
+        exact_after_retry = _row(postgres_database, exact_id)
+        return (
+            exact_expected,
+            equivalent_offset,
+            exact_closed,
+            exact_after,
+            offset_closed,
+            repeated,
+            exact_after_retry,
+        )
+
+    (
+        exact_expected,
+        equivalent_offset,
+        exact_closed,
+        exact_after,
+        offset_closed,
+        repeated,
+        exact_after_retry,
+    ) = _run(postgres_database, exercise)
+    assert exact_expected == equivalent_offset
+    assert exact_closed["lifecycle_state"] == "closed"
+    assert offset_closed["lifecycle_state"] == "closed"
+    assert exact_after[2] != exact_expected
+    assert repeated == exact_closed
+    assert exact_after_retry == exact_after
+
+
+def test_message_append_invalidates_stale_lifecycle_activity_precondition(
+    postgres_database,
+):
+    initial_activity = datetime(2026, 3, 1, 12, 0, 0, 123456, tzinfo=UTC)
+
+    async def exercise(store: PostgresStore):
+        source_id = await store.create_conversation("owner-cas", "client-one", "source")
+        foreign_replacement_id = await store.create_conversation(
+            "owner-foreign",
+            "client-two",
+            "foreign replacement",
+        )
+        with psycopg.connect(postgres_database) as conn:
+            conn.execute(
+                "UPDATE conversations SET updated_at = %s WHERE id = %s",
+                (initial_activity, source_id),
+            )
+            conn.commit()
+        expected_updated_at = _row(postgres_database, source_id)[2]
+        foreign_before = _row(postgres_database, foreign_replacement_id)
+        message_id = await store.add_message(
+            conversation_id=source_id,
+            owner_id="owner-cas",
+            role="user",
+            content="New durable activity.",
+            client_id="client-one",
+        )
+        after_append = _row(postgres_database, source_id)
+        with pytest.raises(ConversationLifecycleConflictError):
+            await store.transition_conversation_lifecycle(
+                conversation_id=source_id,
+                owner_id="owner-cas",
+                lifecycle_state="superseded",
+                superseded_by_conversation_id=foreign_replacement_id,
+                expected_updated_at=expected_updated_at,
+            )
+        after_conflict = _row(postgres_database, source_id)
+        foreign_after = _row(postgres_database, foreign_replacement_id)
+        return (
+            source_id,
+            message_id,
+            expected_updated_at,
+            after_append,
+            after_conflict,
+            foreign_before,
+            foreign_after,
+        )
+
+    (
+        source_id,
+        message_id,
+        expected_updated_at,
+        after_append,
+        after_conflict,
+        foreign_before,
+        foreign_after,
+    ) = _run(postgres_database, exercise)
+    assert isinstance(message_id, UUID)
+    assert after_append[0:2] == ("open", None)
+    assert after_append[2] > expected_updated_at
+    assert after_conflict == after_append
+    assert foreign_after == foreign_before
+    assert _message_count(postgres_database, source_id) == 1
+
+
+def test_matching_lifecycle_transition_prevents_later_message_append(
+    postgres_database,
+):
+    initial_activity = datetime(2026, 3, 1, 12, 0, 0, 123456, tzinfo=UTC)
+
+    async def exercise(store: PostgresStore):
+        conversation_id = await store.create_conversation(
+            "owner-transition-first",
+            "client-one",
+            "transition first",
+        )
+        with psycopg.connect(postgres_database) as conn:
+            conn.execute(
+                "UPDATE conversations SET updated_at = %s WHERE id = %s",
+                (initial_activity, conversation_id),
+            )
+            conn.commit()
+        expected_updated_at = _row(postgres_database, conversation_id)[2]
+        closed = await store.transition_conversation_lifecycle(
+            conversation_id=conversation_id,
+            owner_id="owner-transition-first",
+            lifecycle_state="closed",
+            superseded_by_conversation_id=None,
+            expected_updated_at=expected_updated_at,
+        )
+        after_transition = _row(postgres_database, conversation_id)
+        with pytest.raises(ConversationNotOpenError):
+            await store.add_message(
+                conversation_id=conversation_id,
+                owner_id="owner-transition-first",
+                role="user",
+                content="Rejected after close.",
+                client_id="client-one",
+            )
+        after_append_rejection = _row(postgres_database, conversation_id)
+        return conversation_id, closed, after_transition, after_append_rejection
+
+    conversation_id, closed, after_transition, after_append_rejection = _run(
+        postgres_database,
+        exercise,
+    )
+    assert closed["lifecycle_state"] == "closed"
+    assert after_transition[0:2] == ("closed", None)
+    assert after_append_rejection == after_transition
+    assert _message_count(postgres_database, conversation_id) == 0
 
 
 def test_invalid_replacements_and_rejected_transitions_leave_source_unchanged(postgres_database):

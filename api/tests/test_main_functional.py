@@ -33,6 +33,8 @@ class FakePG:
         self.embedding_refs = []
         self.fail_activate_attempt = False
         self.last_list_updated_since = None
+        self.last_list_updated_before = None
+        self.lifecycle_transition_calls = []
 
     async def open(self): ...
     async def close(self): ...
@@ -83,7 +85,17 @@ class FakePG:
         owner_id,
         lifecycle_state,
         superseded_by_conversation_id,
+        expected_updated_at=None,
     ):
+        self.lifecycle_transition_calls.append(
+            {
+                "conversation_id": conversation_id,
+                "owner_id": owner_id,
+                "lifecycle_state": lifecycle_state,
+                "superseded_by_conversation_id": superseded_by_conversation_id,
+                "expected_updated_at": expected_updated_at,
+            }
+        )
         conversation = await self.get_conversation_for_owner(conversation_id, owner_id)
         if conversation is None:
             raise ConversationNotFoundError()
@@ -94,6 +106,11 @@ class FakePG:
         ):
             return conversation
         if conversation["lifecycle_state"] == "superseded":
+            raise ConversationLifecycleConflictError()
+        if (
+            expected_updated_at is not None
+            and datetime.fromisoformat(conversation["updated_at"]) != expected_updated_at
+        ):
             raise ConversationLifecycleConflictError()
         if lifecycle_state == "superseded":
             if superseded_by_conversation_id is None or superseded_by_conversation_id == conversation_id:
@@ -209,8 +226,10 @@ class FakePG:
         limit=20,
         cursor=None,
         updated_since=None,
+        updated_before=None,
     ):
         self.last_list_updated_since = updated_since
+        self.last_list_updated_before = updated_before
         conversations = []
         for cid in self.conversations:
             conversation = await self.get_conversation(cid)
@@ -223,6 +242,11 @@ class FakePG:
             if (
                 updated_since is not None
                 and datetime.fromisoformat(conversation["updated_at"]) < updated_since
+            ):
+                continue
+            if (
+                updated_before is not None
+                and datetime.fromisoformat(conversation["updated_at"]) >= updated_before
             ):
                 continue
             conversations.append(conversation)
@@ -878,6 +902,87 @@ def test_conversation_activity_filter_rejects_naive_and_malformed_timestamps(cli
     assert len(malformed.json()["detail"]) == 1
 
 
+def test_conversation_updated_before_filter_is_strict_and_composes_before_limit(client):
+    older_id = _create_conversation(client)
+    equal_id = _create_conversation(client)
+    newer_id = _create_conversation(client)
+    wrong_client_id = _create_conversation(client, client_id="client-two")
+    wrong_lifecycle_id = _create_conversation(client)
+    foreign_id = _create_conversation(client, owner_id="owner-beta")
+    timestamps = {
+        older_id: "2026-01-01 11:59:59+00:00",
+        equal_id: "2026-01-01 12:00:00+00:00",
+        newer_id: "2026-01-01 12:00:01+00:00",
+        wrong_client_id: "2026-01-01 11:59:59+00:00",
+        wrong_lifecycle_id: "2026-01-01 11:59:59+00:00",
+        foreign_id: "2026-01-01 11:59:59+00:00",
+    }
+    for conversation_id, updated_at in timestamps.items():
+        main_module.pg.conversation_rows[uuid.UUID(conversation_id)]["updated_at"] = updated_at
+    main_module.pg.conversation_rows[uuid.UUID(wrong_lifecycle_id)]["lifecycle_state"] = "closed"
+
+    filtered = client.get(
+        "/v1/conversations",
+        headers=auth_headers(),
+        params={
+            "owner_id": "owner-alpha",
+            "client_id": "client-one",
+            "lifecycle_state": "open",
+            "updated_since": "2026-01-01T06:59:59-05:00",
+            "updated_before": "2026-01-01T07:00:00-05:00",
+            "limit": 1,
+        },
+    )
+
+    assert filtered.status_code == 200
+    assert [row["conversation_id"] for row in filtered.json()["conversations"]] == [
+        older_id
+    ]
+    assert main_module.pg.last_list_updated_since == datetime.fromisoformat(
+        "2026-01-01T06:59:59-05:00"
+    )
+    assert main_module.pg.last_list_updated_before == datetime.fromisoformat(
+        "2026-01-01T07:00:00-05:00"
+    )
+
+    unfiltered = client.get(
+        "/v1/conversations",
+        headers=auth_headers(),
+        params={
+            "owner_id": "owner-alpha",
+            "client_id": "client-one",
+            "lifecycle_state": "open",
+        },
+    )
+    assert unfiltered.status_code == 200
+    assert [row["conversation_id"] for row in unfiltered.json()["conversations"]] == [
+        newer_id,
+        equal_id,
+        older_id,
+    ]
+    assert main_module.pg.last_list_updated_before is None
+
+
+def test_conversation_updated_before_filter_rejects_naive_and_malformed_timestamps(client):
+    naive = client.get(
+        "/v1/conversations",
+        headers=auth_headers(),
+        params={"owner_id": "owner-alpha", "updated_before": "2026-01-01T12:00:00"},
+    )
+    malformed = client.get(
+        "/v1/conversations",
+        headers=auth_headers(),
+        params={"owner_id": "owner-alpha", "updated_before": "not-a-timestamp"},
+    )
+
+    assert (naive.status_code, naive.json()) == (
+        422,
+        {"detail": "updated_before_timezone_required"},
+    )
+    assert malformed.status_code == 422
+    assert len(malformed.json()["detail"]) == 1
+
+
 def test_conversation_lookup_has_bounded_identifier_and_dependency_errors(client, monkeypatch):
     malformed = client.get(
         "/v1/conversations/not-a-uuid",
@@ -908,6 +1013,7 @@ def test_conversation_lifecycle_transition_and_rolling_resolver_compatibility(cl
     )
     assert closed.status_code == 200
     assert closed.json()["lifecycle_state"] == "closed"
+    assert main_module.pg.lifecycle_transition_calls[0]["expected_updated_at"] is None
 
     resolved = client.post(
         "/v1/conversations/resolve",
@@ -928,6 +1034,67 @@ def test_conversation_lifecycle_transition_and_rolling_resolver_compatibility(cl
         "conversation_id": resolved.json()["conversation_id"],
         "reused": True,
     }
+
+
+def test_conversation_lifecycle_expected_activity_reaches_storage_as_an_instant(client):
+    conversation_id = _create_conversation(client)
+    expected = "2025-12-31T19:00:00-05:00"
+
+    closed = client.post(
+        f"/v1/conversations/{conversation_id}/lifecycle",
+        headers=auth_headers(),
+        json={
+            "owner_id": "owner-alpha",
+            "lifecycle_state": "closed",
+            "expected_updated_at": expected,
+        },
+    )
+
+    assert closed.status_code == 200
+    assert closed.json()["lifecycle_state"] == "closed"
+    assert main_module.pg.lifecycle_transition_calls == [
+        {
+            "conversation_id": uuid.UUID(conversation_id),
+            "owner_id": "owner-alpha",
+            "lifecycle_state": "closed",
+            "superseded_by_conversation_id": None,
+            "expected_updated_at": datetime.fromisoformat(expected),
+        }
+    ]
+
+
+def test_conversation_lifecycle_expected_activity_validation_and_conflict_are_bounded(client):
+    conversation_id = _create_conversation(client)
+    naive = client.post(
+        f"/v1/conversations/{conversation_id}/lifecycle",
+        headers=auth_headers(),
+        json={
+            "owner_id": "owner-alpha",
+            "lifecycle_state": "closed",
+            "expected_updated_at": "2026-01-01T00:00:00",
+        },
+    )
+    assert naive.status_code == 422
+    assert main_module.pg.lifecycle_transition_calls == []
+
+    private_replacement = str(uuid.uuid4())
+    stale = client.post(
+        f"/v1/conversations/{conversation_id}/lifecycle",
+        headers=auth_headers(),
+        json={
+            "owner_id": "owner-alpha",
+            "lifecycle_state": "superseded",
+            "superseded_by_conversation_id": private_replacement,
+            "expected_updated_at": "2025-12-31T23:59:59+00:00",
+        },
+    )
+    assert (stale.status_code, stale.json()) == (
+        409,
+        {"detail": "conversation_lifecycle_conflict"},
+    )
+    assert conversation_id not in stale.text
+    assert "owner-alpha" not in stale.text
+    assert private_replacement not in stale.text
 
 
 def test_conversation_transition_errors_are_bounded(client):
