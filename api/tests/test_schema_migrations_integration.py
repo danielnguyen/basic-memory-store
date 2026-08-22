@@ -27,6 +27,9 @@ PRE_MANIFEST_BASELINE_CHECKSUM = (
 PRE_CONVERSATION_LIFECYCLE_BASELINE_CHECKSUM = (
     "b88f055be2b0ed998e9438fdbbbb3f2c8ec4c669921d7bcbbf7e1f1b93adc3eb"
 )
+PRE_CLAIM_SUPPORT_BASELINE_CHECKSUM = (
+    "b58b64403a770a256b6e074dcaa0db764aa9c589f7a28c2f49f48587233302e6"
+)
 RECENT_LEGACY_MIGRATIONS = [
     SOURCE_DB_DIR / "migrations" / "legacy" / "20260531_cluster9a_r20_memory_items_additive.sql",
     SOURCE_DB_DIR / "migrations" / "legacy" / "20260601_cluster9b_r21_episodes_additive.sql",
@@ -89,6 +92,19 @@ def without_conversation_lifecycle(sql_text: str) -> str:
 
 """
     return sql_text[:start] + prior_conversations + sql_text[end:]
+
+
+def without_claim_support(sql_text: str) -> str:
+    normalized = sql_text.replace(
+        "  schema_version TEXT NOT NULL CHECK (schema_version IN ('claim-record.v1', 'claim-record.v2')),\n",
+        "  schema_version TEXT NOT NULL CHECK (schema_version = 'claim-record.v1'),\n",
+    ).replace(
+        "  presented_to_user BOOLEAN NOT NULL DEFAULT TRUE,\n  support_json JSONB,\n",
+        "",
+    )
+    start = normalized.index("  CONSTRAINT claim_records_support_version_check")
+    end = normalized.index("  CHECK (\n    char_length(claim_id)", start)
+    return normalized[:start] + normalized[end:]
 
 
 def admin_dsn() -> str:
@@ -821,7 +837,9 @@ def test_prior_baseline_advances_conversation_lifecycle_without_rewriting_data(
     temp_db_dir: Path,
 ) -> None:
     current_baseline = (SOURCE_DB_DIR / "baseline.sql").read_text(encoding="utf-8")
-    prior_baseline = without_conversation_lifecycle(current_baseline)
+    prior_baseline = without_claim_support(
+        without_conversation_lifecycle(current_baseline)
+    )
     prior_path = temp_db_dir / "baseline.sql"
     prior_path.write_text(prior_baseline, encoding="utf-8")
     assert schema_migrations.compute_sha256(prior_path) == PRE_CONVERSATION_LIFECYCLE_BASELINE_CHECKSUM
@@ -975,6 +993,7 @@ def test_pre_acquisition_manifest_baseline_checksum_is_explicitly_compatible() -
     current_baseline = without_conversation_lifecycle(
         (SOURCE_DB_DIR / "baseline.sql").read_text(encoding="utf-8")
     )
+    current_baseline = without_claim_support(current_baseline)
     manifest_constraint = """  CONSTRAINT claim_records_acquisition_manifest_id_check CHECK (
     acquisition_manifest_id IS NULL
     OR (
@@ -999,6 +1018,131 @@ def test_pre_acquisition_manifest_baseline_checksum_is_explicitly_compatible() -
     assert schema_migrations.compute_sha256(
         SOURCE_DB_DIR / "baseline.sql"
     ) not in schema_migrations.COMPATIBLE_BASELINE_CHECKSUMS
+
+
+def test_pre_claim_support_baseline_checksum_is_explicitly_compatible() -> None:
+    prior_baseline = without_claim_support(
+        (SOURCE_DB_DIR / "baseline.sql").read_text(encoding="utf-8")
+    )
+
+    assert sha256(prior_baseline.encode()).hexdigest() == (
+        PRE_CLAIM_SUPPORT_BASELINE_CHECKSUM
+    )
+    assert (
+        PRE_CLAIM_SUPPORT_BASELINE_CHECKSUM
+        in schema_migrations.COMPATIBLE_BASELINE_CHECKSUMS
+    )
+
+
+def test_claim_support_migration_retains_v1_and_accepts_bounded_v2(
+    pg_database: str,
+    temp_db_dir: Path,
+) -> None:
+    prior_baseline = without_claim_support(
+        (SOURCE_DB_DIR / "baseline.sql").read_text(encoding="utf-8")
+    )
+    prior_path = temp_db_dir / "baseline.sql"
+    prior_path.write_text(prior_baseline, encoding="utf-8")
+    execute_sql(pg_database, prior_baseline)
+    conversation_id = uuid4()
+    message_id = uuid4()
+    with psycopg.connect(pg_database) as conn:
+        schema_migrations.create_ledger_table(conn)
+        conn.execute(
+            """
+            INSERT INTO schema_migrations (version, kind, checksum_sha256, execution_ms)
+            VALUES (%s, 'baseline', %s, 1)
+            """,
+            (schema_migrations.BASELINE_VERSION, PRE_CLAIM_SUPPORT_BASELINE_CHECKSUM),
+        )
+        conn.execute(
+            "INSERT INTO conversations (id, owner_id, title) VALUES (%s, 'owner-v2', 'upgrade')",
+            (conversation_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO messages (id, conversation_id, owner_id, role, content)
+            VALUES (%s, %s, 'owner-v2', 'assistant', 'visible response')
+            """,
+            (message_id, conversation_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO claim_records (
+              claim_id, schema_version, owner_id, conversation_id, request_id,
+              assistant_message_id, surface, runtime_session_id, runtime_turn_id,
+              claim_anchor, claim_anchor_digest, claim_class, calibration_status,
+              evidence_strength, confidence, strongest_authority, freshness_summary,
+              uncertainty_disclosure_required, evidence_references_json,
+              limitation_codes_json, user_safe_summary
+            ) VALUES (
+              'claim-retained-v1', 'claim-record.v1', 'owner-v2', %s, 'request-v1',
+              %s, 'desktop_private', 'session-v1', 'turn-v1', 'Retained claim.',
+              'sha256:61b594e3398f39d83211e0626eb98a5c74b197b03cc18fd97a597a3052599d38',
+              'runtime_inference', 'limited', 'weak', 'low', 'runtime_inference',
+              'unknown', true, '[]'::jsonb, '[]'::jsonb, 'Retained summary.'
+            )
+            """,
+            (conversation_id, message_id),
+        )
+        conn.commit()
+
+    migration = SOURCE_DB_DIR / "migrations" / "managed" / (
+        "20260822120000_claim_support_record.sql"
+    )
+    shutil.copy2(migration, temp_db_dir / "migrations" / "managed" / migration.name)
+
+    upgraded = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
+    repeated = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
+
+    assert upgraded["applied_migrations"] == [migration.name]
+    assert repeated["applied_migrations"] == []
+    with psycopg.connect(pg_database) as conn:
+        retained = conn.execute(
+            """
+            SELECT schema_version, presented_to_user, support_json
+            FROM claim_records WHERE claim_id = 'claim-retained-v1'
+            """
+        ).fetchone()
+        assert retained == ("claim-record.v1", True, None)
+        conn.execute(
+            """
+            INSERT INTO claim_records (
+              claim_id, schema_version, owner_id, conversation_id, request_id,
+              assistant_message_id, surface, runtime_session_id, runtime_turn_id,
+              presented_to_user, support_json, claim_anchor, claim_anchor_digest,
+              claim_class, calibration_status, evidence_strength, confidence,
+              strongest_authority, freshness_summary, uncertainty_disclosure_required,
+              evidence_references_json, limitation_codes_json, user_safe_summary
+            ) VALUES (
+              'claim-new-v2', 'claim-record.v2', 'owner-v2', %s, 'request-v2', %s,
+              'desktop_private', 'session-v2', 'turn-v2', false,
+              '{
+                "claim_digest":"sha256:71b594e3398f39d83211e0626eb98a5c74b197b03cc18fd97a597a3052599d38",
+                "supporting_evidence_ref_ids":[],
+                "counterevidence_ref_ids":[],
+                "material_exclusions":[],
+                "executed_derivations":[],
+                "material_scope_limitations":[],
+                "calibration_status":"limited",
+                "conclusion_disposition":"qualified",
+                "qualification_required":true,
+                "limitation_codes":[]
+              }'::jsonb,
+              'Shadow claim.',
+              'sha256:71b594e3398f39d83211e0626eb98a5c74b197b03cc18fd97a597a3052599d38',
+              'runtime_inference', 'limited', 'weak', 'unknown', 'runtime_inference',
+              'unknown', true, '[]'::jsonb, '[]'::jsonb, 'Shadow summary.'
+            )
+            """,
+            (conversation_id, message_id),
+        )
+        conn.commit()
+        assert conn.execute(
+            "SELECT support_json->>'claim_digest' FROM claim_records WHERE claim_id = 'claim-new-v2'"
+        ).fetchone() == (
+            "sha256:71b594e3398f39d83211e0626eb98a5c74b197b03cc18fd97a597a3052599d38",
+        )
 
 
 def test_prior_enrolled_baseline_advances_through_claim_record_migration(
@@ -1076,6 +1220,7 @@ def test_pre_acquisition_manifest_baseline_advances_through_manifest_migration(
     current_baseline = without_conversation_lifecycle(
         (SOURCE_DB_DIR / "baseline.sql").read_text(encoding="utf-8")
     )
+    current_baseline = without_claim_support(current_baseline)
     manifest_constraint = """  CONSTRAINT claim_records_acquisition_manifest_id_check CHECK (
     acquisition_manifest_id IS NULL
     OR (
@@ -1564,6 +1709,7 @@ def test_derivation_version_cleanup_migrates_only_exact_legacy_values_and_defaul
         "20260714230000_claim_records.sql",
         "20260717120000_claim_acquisition_manifest.sql",
         "20260731120000_conversation_lifecycle.sql",
+        "20260822120000_claim_support_record.sql",
     ]
     assert repeated["applied_migrations"] == []
     assert column_default(pg_database, "memory_items", "derivation_version") == f"'{MEMORY_ITEM_DERIVATION_VERSION}'::text"

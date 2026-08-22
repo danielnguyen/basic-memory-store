@@ -154,7 +154,7 @@ CREATE INDEX IF NOT EXISTS idx_traces_owner_time
 
 CREATE TABLE IF NOT EXISTS claim_records (
   claim_id TEXT PRIMARY KEY,
-  schema_version TEXT NOT NULL CHECK (schema_version = 'claim-record.v1'),
+  schema_version TEXT NOT NULL CHECK (schema_version IN ('claim-record.v1', 'claim-record.v2')),
   owner_id TEXT NOT NULL CHECK (
     char_length(owner_id) BETWEEN 1 AND 120
     AND owner_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
@@ -175,6 +175,8 @@ CREATE TABLE IF NOT EXISTS claim_records (
     AND runtime_turn_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
   ),
   acquisition_manifest_id TEXT,
+  presented_to_user BOOLEAN NOT NULL DEFAULT TRUE,
+  support_json JSONB,
   claim_anchor TEXT NOT NULL CHECK (char_length(claim_anchor) BETWEEN 1 AND 500),
   claim_anchor_digest TEXT NOT NULL
     CHECK (claim_anchor_digest ~ '^sha256:[0-9a-f]{64}$'),
@@ -225,6 +227,31 @@ CREATE TABLE IF NOT EXISTS claim_records (
     OR (
       char_length(acquisition_manifest_id) BETWEEN 1 AND 120
       AND acquisition_manifest_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
+    )
+  ),
+  CONSTRAINT claim_records_support_version_check CHECK (
+    (
+      schema_version = 'claim-record.v1'
+      AND presented_to_user = TRUE
+      AND support_json IS NULL
+    )
+    OR (
+      schema_version = 'claim-record.v2'
+      AND presented_to_user = FALSE
+      AND jsonb_typeof(support_json) = 'object'
+      AND octet_length(support_json::text) <= 32768
+      AND support_json ?& ARRAY[
+        'claim_digest', 'supporting_evidence_ref_ids', 'counterevidence_ref_ids',
+        'material_exclusions', 'executed_derivations', 'material_scope_limitations',
+        'calibration_status', 'conclusion_disposition', 'qualification_required',
+        'limitation_codes'
+      ]
+      AND support_json - ARRAY[
+        'claim_digest', 'supporting_evidence_ref_ids', 'counterevidence_ref_ids',
+        'material_exclusions', 'executed_derivations', 'material_scope_limitations',
+        'calibration_status', 'conclusion_disposition', 'qualification_required',
+        'limitation_codes'
+      ] = '{}'::jsonb
     )
   ),
   CHECK (

@@ -596,7 +596,16 @@ def evaluate_support_records(
 ) -> tuple[str, int, ClaimRecord | None, str | None]:
     if not isinstance(records, list):
         return "invalid", 0, None, "association"
-    bounded = records[:2]
+    visible_records = [
+        record
+        for record in records
+        if not (
+            isinstance(record, dict)
+            and record.get("schema_version") == "claim-record.v2"
+            and record.get("presented_to_user") is False
+        )
+    ]
+    bounded = visible_records[:2]
     if not bounded:
         return "no_record", 0, None, None
     if len(bounded) > 1:
@@ -634,7 +643,7 @@ async def _load_support_evaluation(
             conversation_id=str(body.conversation_id),
             assistant_message_id=message_id,
             request_id=original_request_id,
-            limit=2,
+            limit=50,
         )
     except Exception:
         return "unavailable", 0, None, None

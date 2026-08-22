@@ -293,6 +293,58 @@ def _claim_record(*, conversation_id: str, message_id: str, request_id: str):
     }
 
 
+def _shadow_claim_record(
+    *, conversation_id: str, message_id: str, request_id: str
+) -> dict:
+    record = copy.deepcopy(
+        _claim_record(
+            conversation_id=conversation_id,
+            message_id=message_id,
+            request_id=request_id,
+        )
+    )
+    anchor = "A shadow claim that was not presented to the user."
+    record.update(
+        {
+            "claim_id": "claim_shadow_fixture_1",
+            "schema_version": "claim-record.v2",
+            "presented_to_user": False,
+            "claim_anchor": anchor,
+            "claim_anchor_digest": _digest(anchor),
+            "claim_class": "runtime_inference",
+            "calibration_status": "limited",
+            "evidence_strength": "weak",
+            "confidence": "unknown",
+            "strongest_authority": "unknown",
+            "freshness_summary": "unknown",
+            "uncertainty_disclosure_required": True,
+            "limitation_codes": ["inference_dominant"],
+            "user_safe_summary": "A bounded shadow inference was evaluated.",
+        }
+    )
+    reference = record["validated_evidence_references"][0]
+    reference.update(
+        {
+            "support_kind": "contextual",
+            "authority": "unknown",
+            "freshness_state": "unknown_freshness",
+        }
+    )
+    record["support"] = {
+        "claim_digest": record["claim_anchor_digest"],
+        "supporting_evidence_ref_ids": [reference["ref_id"]],
+        "counterevidence_ref_ids": [],
+        "material_exclusions": [],
+        "executed_derivations": [],
+        "material_scope_limitations": [],
+        "calibration_status": "limited",
+        "conclusion_disposition": "qualified",
+        "qualification_required": True,
+        "limitation_codes": ["interpretation-dependent-derivation"],
+    }
+    return record
+
+
 def _immediate_request(
     *,
     conversation_id: str,
@@ -403,7 +455,7 @@ def test_immediate_support_resolves_exact_newest_assistant_claim(monkeypatch):
             "conversation_id": conversation_id,
             "assistant_message_id": newest["message_id"],
             "request_id": newest["message_request_id"],
-            "limit": 2,
+            "limit": 50,
         }
     ]
 
@@ -519,7 +571,69 @@ def test_immediate_support_multiple_records_is_bounded_ambiguous(monkeypatch):
     assert response.json()["match_count"] == 2
     assert response.json()["reason_code"] == "support_record_ambiguous"
     assert response.json()["record"] is None
-    assert store.claim_calls[0]["limit"] == 2
+    assert store.claim_calls[0]["limit"] == 50
+
+
+def test_immediate_support_ignores_shadow_v2_only_record(monkeypatch):
+    conversation_id = str(uuid4())
+    candidate = _candidate(conversation_id=conversation_id)
+    shadow = _shadow_claim_record(
+        conversation_id=conversation_id,
+        message_id=candidate["message_id"],
+        request_id=candidate["message_request_id"],
+    )
+    store = ImmediateHistoryFakePG([candidate], [shadow])
+
+    response = _post_immediate(
+        monkeypatch,
+        store,
+        _immediate_request(
+            conversation_id=conversation_id,
+            explanation_kind="support",
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["resolution_status"] == "no_record"
+    assert response.json()["match_count"] == 0
+    assert response.json()["reason_code"] == "support_record_not_found"
+    assert response.json()["record"] is None
+
+
+def test_immediate_support_visible_v1_wins_over_shadow_v2_records(monkeypatch):
+    conversation_id = str(uuid4())
+    candidate = _candidate(conversation_id=conversation_id)
+    visible = _claim_record(
+        conversation_id=conversation_id,
+        message_id=candidate["message_id"],
+        request_id=candidate["message_request_id"],
+    )
+    shadows = [
+        _shadow_claim_record(
+            conversation_id=conversation_id,
+            message_id=candidate["message_id"],
+            request_id=candidate["message_request_id"],
+        )
+        for _ in range(3)
+    ]
+    for index, shadow in enumerate(shadows, start=1):
+        shadow["claim_id"] = f"claim_shadow_fixture_{index}"
+    store = ImmediateHistoryFakePG([candidate], [*shadows, visible])
+
+    response = _post_immediate(
+        monkeypatch,
+        store,
+        _immediate_request(
+            conversation_id=conversation_id,
+            explanation_kind="support",
+        ),
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["resolution_status"] == "resolved"
+    assert result["match_count"] == 1
+    assert result["record"]["support_record"] == visible
 
 
 def test_immediate_acquisition_privacy_failure_returns_no_record_data(monkeypatch):
