@@ -4671,10 +4671,10 @@ class PostgresStore:
                             record["runtime_session_id"],
                             record["runtime_turn_id"],
                             record["acquisition_manifest_id"],
-                            record["presented_to_user"],
+                            record.get("presented_to_user", True),
                             (
-                                Json(record["support"])
-                                if record["support"] is not None
+                                Json(record.get("support"))
+                                if record.get("support") is not None
                                 else None
                             ),
                             record["claim_anchor"],
