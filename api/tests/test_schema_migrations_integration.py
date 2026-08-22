@@ -1750,6 +1750,7 @@ def test_derivation_version_cleanup_migrates_only_exact_legacy_values_and_defaul
         "20260717120000_claim_acquisition_manifest.sql",
         "20260731120000_conversation_lifecycle.sql",
         "20260822120000_claim_support_record.sql",
+        "20260822163000_presented_claim_support.sql",
     ]
     assert repeated["applied_migrations"] == []
     assert column_default(pg_database, "memory_items", "derivation_version") == f"'{MEMORY_ITEM_DERIVATION_VERSION}'::text"
