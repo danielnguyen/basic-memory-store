@@ -225,6 +225,11 @@ def _v2_body() -> dict:
 
 
 def _v2_association(body: dict) -> dict:
+    assistant_content = (
+        body["calibration_result"]["claim_anchor"]
+        if body["presented_to_user"]
+        else "The visible legacy answer remains unchanged."
+    )
     return {
         "existing": None,
         "conversation": {"owner_id": body["owner_id"]},
@@ -233,7 +238,7 @@ def _v2_association(body: dict) -> dict:
             "conversation_id": body["conversation_id"],
             "role": "assistant",
             "metadata": {"request_id": body["request_id"]},
-            "content": "The visible legacy answer remains unchanged.",
+            "content": assistant_content,
         },
         "trace": {
             "owner_id": body["owner_id"],
@@ -248,7 +253,7 @@ def _v2_association(body: dict) -> dict:
                     "claim_digest": body["support"]["claim_digest"],
                     "runtime_session_id": body["runtime_session_id"],
                     "runtime_turn_id": body["runtime_turn_id"],
-                    "presented_to_user": False,
+                    "presented_to_user": body["presented_to_user"],
                 }
             },
         },
@@ -350,6 +355,23 @@ def test_v2_shadow_support_record_round_trips_bounded_authority_skeleton(
     assert "The visible legacy answer" not in str(record)
 
 
+def test_v2_presented_support_record_requires_visible_claim_association(
+    client_and_store,
+):
+    client, store = client_and_store
+    body = _v2_body()
+    body["presented_to_user"] = True
+    store.association = _v2_association(body)
+
+    response = _create(client, body)
+
+    assert response.status_code == 200, response.text
+    record = response.json()["record"]
+    assert record["presented_to_user"] is True
+    assert record["claim_anchor"] == body["calibration_result"]["claim_anchor"]
+    assert record["support"] == body["support"]
+
+
 @pytest.mark.parametrize(
     ("mutation", "expected_fragment"),
     [
@@ -393,8 +415,7 @@ def test_v2_rejects_authority_escalation_through_legacy_projection(
 @pytest.mark.parametrize(
     ("mutation", "expected_fragment"),
     [
-        (lambda body: body.update(presented_to_user=True), "v2_shadow_support_required"),
-        (lambda body: body.pop("support"), "v2_shadow_support_required"),
+        (lambda body: body.pop("support"), "v2_support_required"),
         (
             lambda body: body["support"].update(
                 claim_digest="sha256:" + "2" * 64
@@ -417,7 +438,7 @@ def test_v2_rejects_authority_escalation_through_legacy_projection(
         ),
     ],
 )
-def test_v2_shadow_contract_rejects_false_association_and_unbounded_metadata(
+def test_v2_contract_rejects_false_association_and_unbounded_metadata(
     client_and_store,
     mutation,
     expected_fragment,
@@ -450,6 +471,34 @@ def test_v2_shadow_record_requires_exact_trace_association(
     body = _v2_body()
     store.association = _v2_association(body)
     store.association["trace"]["prompt"]["general_evidence_reasoning"][field] = value
+
+    response = _create(client, body)
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "shadow_claim_not_in_trace"
+
+
+@pytest.mark.parametrize(
+    ("presented_to_user", "assistant_content", "trace_presented_to_user"),
+    [
+        (True, "A different visible claim.", True),
+        (True, "The bounded values have a mechanically derived mean.", False),
+        (False, "The visible legacy answer remains unchanged.", True),
+    ],
+)
+def test_v2_presentation_state_and_visible_claim_must_match_trace_and_message(
+    client_and_store,
+    presented_to_user,
+    assistant_content,
+    trace_presented_to_user,
+):
+    client, store = client_and_store
+    body = _v2_body()
+    body["presented_to_user"] = presented_to_user
+    store.association = _v2_association(body)
+    store.association["assistant_message"]["content"] = assistant_content
+    reasoning = store.association["trace"]["prompt"]["general_evidence_reasoning"]
+    reasoning["presented_to_user"] = trace_presented_to_user
 
     response = _create(client, body)
 

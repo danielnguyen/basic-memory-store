@@ -345,6 +345,31 @@ def _shadow_claim_record(
     return record
 
 
+def _presented_claim_record(
+    *, conversation_id: str, message_id: str, request_id: str
+) -> dict:
+    record = _shadow_claim_record(
+        conversation_id=conversation_id,
+        message_id=message_id,
+        request_id=request_id,
+    )
+    visible = _claim_record(
+        conversation_id=conversation_id,
+        message_id=message_id,
+        request_id=request_id,
+    )
+    record.update(
+        {
+            "claim_id": "claim_presented_fixture_1",
+            "presented_to_user": True,
+            "claim_anchor": visible["claim_anchor"],
+            "claim_anchor_digest": visible["claim_anchor_digest"],
+        }
+    )
+    record["support"]["claim_digest"] = record["claim_anchor_digest"]
+    return record
+
+
 def _immediate_request(
     *,
     conversation_id: str,
@@ -634,6 +659,63 @@ def test_immediate_support_visible_v1_wins_over_shadow_v2_records(monkeypatch):
     assert result["resolution_status"] == "resolved"
     assert result["match_count"] == 1
     assert result["record"]["support_record"] == visible
+
+
+def test_immediate_support_resolves_presented_v2_record(monkeypatch):
+    conversation_id = str(uuid4())
+    candidate = _candidate(conversation_id=conversation_id)
+    presented = _presented_claim_record(
+        conversation_id=conversation_id,
+        message_id=candidate["message_id"],
+        request_id=candidate["message_request_id"],
+    )
+    store = ImmediateHistoryFakePG([candidate], [presented])
+
+    response = _post_immediate(
+        monkeypatch,
+        store,
+        _immediate_request(
+            conversation_id=conversation_id,
+            explanation_kind="support",
+        ),
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["resolution_status"] == "resolved"
+    assert result["match_count"] == 1
+    assert result["record"]["support_record"] == presented
+
+
+def test_immediate_support_does_not_choose_between_two_visible_records(monkeypatch):
+    conversation_id = str(uuid4())
+    candidate = _candidate(conversation_id=conversation_id)
+    visible_v1 = _claim_record(
+        conversation_id=conversation_id,
+        message_id=candidate["message_id"],
+        request_id=candidate["message_request_id"],
+    )
+    visible_v2 = _presented_claim_record(
+        conversation_id=conversation_id,
+        message_id=candidate["message_id"],
+        request_id=candidate["message_request_id"],
+    )
+    store = ImmediateHistoryFakePG([candidate], [visible_v1, visible_v2])
+
+    response = _post_immediate(
+        monkeypatch,
+        store,
+        _immediate_request(
+            conversation_id=conversation_id,
+            explanation_kind="support",
+        ),
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["resolution_status"] == "ambiguous"
+    assert result["match_count"] == 2
+    assert result["reason_code"] == "support_record_ambiguous"
 
 
 def test_immediate_acquisition_privacy_failure_returns_no_record_data(monkeypatch):

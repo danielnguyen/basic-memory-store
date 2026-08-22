@@ -462,15 +462,18 @@ associated with the response without being copied into the claim record. The
 field is omitted from responses when it is absent, preserving the legacy
 create, get, and list response shapes.
 
-`claim-record.v2` is an additive shadow-evaluation contract on the same immutable
-table and endpoints. A v2 record must set `presented_to_user` to `false` and
-includes one strict bounded `support` object containing the claim digest,
+`claim-record.v2` is an additive generic-support contract on the same immutable
+table and endpoints. A v2 record explicitly records whether the evaluated claim
+was presented to the user and includes one strict bounded `support` object
+containing the claim digest,
 supporting and counterevidence identities, material exclusions, actual executed
 derivation records, material scope limitations, and the Cognitive Runtime
 calibration/disposition/qualification result. Its same-request trace must retain
-the matching claim digest, runtime session and turn identifiers, and unpresented
-status under `prompt.general_evidence_reasoning`. This associates the evaluated
-claim truthfully without pretending the visible assistant message contained it.
+the matching claim digest, runtime session and turn identifiers, and exact
+presentation status under `prompt.general_evidence_reasoning`. A presented v2
+record additionally requires the normalized first assistant-response paragraph
+to equal its claim anchor. An unpresented v2 record retains the shadow
+association without pretending the visible assistant message contained it.
 When an acquisition manifest is linked to v2, BMS validates the manifest and
 message association but does not reuse legacy task-specific sufficiency as the
 generic conclusion authority.
