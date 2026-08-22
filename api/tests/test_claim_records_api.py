@@ -35,6 +35,10 @@ LEGACY_CLAIM_RECORD_KEYS = {
     "user_safe_summary",
     "created_at",
 }
+V2_CLAIM_RECORD_KEYS = LEGACY_CLAIM_RECORD_KEYS | {
+    "presented_to_user",
+    "support",
+}
 
 
 class FakeQdrant:
@@ -167,6 +171,87 @@ def _body() -> dict:
     }
 
 
+def _v2_body() -> dict:
+    body = _body()
+    body["schema_version"] = "claim-record.v2"
+    body["presented_to_user"] = False
+    result = body["calibration_result"]
+    result["claim_id"] = "claim_shadow_0123456789abcdef0123456789abcdef"
+    result["claim_anchor"] = "The bounded values have a mechanically derived mean."
+    result["claim_anchor_digest"] = "sha256:" + sha256(
+        result["claim_anchor"].encode()
+    ).hexdigest()
+    result["claim_class"] = "runtime_inference"
+    result["calibration_status"] = "limited"
+    result["confidence"] = "unknown"
+    result["strongest_authority"] = "runtime_inference"
+    result["validated_evidence_references"][0].update(
+        {
+            "ref_id": "source-neutral-1",
+            "authority": "trusted_integration",
+            "support_kind": "direct",
+        }
+    )
+    result["limitation_codes"] = ["inference_dominant"]
+    result["user_safe_summary"] = "The evaluated claim depends on interpreted inputs."
+    body["support"] = {
+        "claim_digest": result["claim_anchor_digest"],
+        "supporting_evidence_ref_ids": ["source-neutral-1"],
+        "counterevidence_ref_ids": [],
+        "material_exclusions": [],
+        "executed_derivations": [
+            {
+                "derivation_id": "derivation-mean-1",
+                "operation": "mean",
+                "canonical_inputs": ["0.5", "0.75"],
+                "canonical_result": "0.625",
+                "execution_digest": "sha256:" + "1" * 64,
+                "executor_version": "decimal-v1",
+                "supporting_evidence_ref_ids": ["source-neutral-1"],
+                "input_basis": "model_interpreted",
+            }
+        ],
+        "material_scope_limitations": ["interpretation-dependent-input"],
+        "calibration_status": "limited",
+        "conclusion_disposition": "qualified",
+        "qualification_required": True,
+        "limitation_codes": ["interpretation-dependent-derivation"],
+    }
+    return body
+
+
+def _v2_association(body: dict) -> dict:
+    return {
+        "existing": None,
+        "conversation": {"owner_id": body["owner_id"]},
+        "assistant_message": {
+            "owner_id": body["owner_id"],
+            "conversation_id": body["conversation_id"],
+            "role": "assistant",
+            "metadata": {"request_id": body["request_id"]},
+            "content": "The visible legacy answer remains unchanged.",
+        },
+        "trace": {
+            "owner_id": body["owner_id"],
+            "conversation_id": body["conversation_id"],
+            "surface": body["surface"],
+            "status": "ok",
+            "references": [
+                {"ref_type": "external_source", "ref_id": "source-neutral-1"}
+            ],
+            "prompt": {
+                "general_evidence_reasoning": {
+                    "claim_digest": body["support"]["claim_digest"],
+                    "runtime_session_id": body["runtime_session_id"],
+                    "runtime_turn_id": body["runtime_turn_id"],
+                    "presented_to_user": False,
+                }
+            },
+        },
+        "local_references": {},
+    }
+
+
 def _manifest_association(body: dict, assistant_content: str) -> dict:
     manifest_id = body["acquisition_manifest_id"]
     return {
@@ -241,6 +326,102 @@ def test_create_claim_record_is_strict_and_preserves_calibration(client_and_stor
     assert set(response.json()["record"]) == LEGACY_CLAIM_RECORD_KEYS
     assert store.create_calls[0]["acquisition_manifest_id"] is None
     assert store.create_calls[0]["user_safe_summary"] == body["calibration_result"]["user_safe_summary"]
+
+
+def test_v2_shadow_support_record_round_trips_bounded_authority_skeleton(
+    client_and_store,
+):
+    client, store = client_and_store
+    body = _v2_body()
+    store.association = _v2_association(body)
+
+    response = _create(client, body)
+
+    assert response.status_code == 200, response.text
+    record = response.json()["record"]
+    assert set(record) == V2_CLAIM_RECORD_KEYS
+    assert record["presented_to_user"] is False
+    assert record["support"] == body["support"]
+    assert record["support"]["executed_derivations"][0]["input_basis"] == "model_interpreted"
+    assert "The visible legacy answer" not in str(record)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_fragment"),
+    [
+        (lambda body: body.update(presented_to_user=True), "v2_shadow_support_required"),
+        (lambda body: body.pop("support"), "v2_shadow_support_required"),
+        (
+            lambda body: body["support"].update(
+                claim_digest="sha256:" + "2" * 64
+            ),
+            "support_claim_digest_mismatch",
+        ),
+        (
+            lambda body: body["support"].update(
+                supporting_evidence_ref_ids=["source-not-in-record"]
+            ),
+            "derivation_evidence_reference_unknown",
+        ),
+        (
+            lambda body: body["support"].update(raw_source_body="PRIVATE SOURCE"),
+            "extra_forbidden",
+        ),
+        (
+            lambda body: body["support"].update(provider_scratchpad="PRIVATE THOUGHT"),
+            "extra_forbidden",
+        ),
+    ],
+)
+def test_v2_shadow_contract_rejects_false_association_and_unbounded_metadata(
+    client_and_store,
+    mutation,
+    expected_fragment,
+):
+    client, _ = client_and_store
+    body = _v2_body()
+    mutation(body)
+
+    response = _create(client, body)
+
+    assert response.status_code == 422
+    assert expected_fragment in response.text
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("claim_digest", "sha256:" + "3" * 64),
+        ("runtime_session_id", "session-other"),
+        ("runtime_turn_id", "turn-other"),
+        ("presented_to_user", True),
+    ],
+)
+def test_v2_shadow_record_requires_exact_trace_association(
+    client_and_store,
+    field,
+    value,
+):
+    client, store = client_and_store
+    body = _v2_body()
+    store.association = _v2_association(body)
+    store.association["trace"]["prompt"]["general_evidence_reasoning"][field] = value
+
+    response = _create(client, body)
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "shadow_claim_not_in_trace"
+
+
+def test_v1_rejects_v2_fields_without_changing_legacy_output(client_and_store):
+    client, _ = client_and_store
+    body = _body()
+    body["presented_to_user"] = False
+
+    response = _create(client, body)
+
+    assert response.status_code == 422
+    assert "v1_support_fields_forbidden" in response.text
 
 
 def test_optional_acquisition_manifest_id_round_trips(client_and_store):

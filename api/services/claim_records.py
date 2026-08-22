@@ -118,6 +118,7 @@ def _canonical_record(body: ClaimRecordCreateRequest) -> dict[str, Any]:
         "runtime_session_id": body.runtime_session_id,
         "runtime_turn_id": body.runtime_turn_id,
         "acquisition_manifest_id": body.acquisition_manifest_id,
+        "presented_to_user": body.presented_to_user,
         "claim_anchor": result.claim_anchor,
         "claim_anchor_digest": result.claim_anchor_digest,
         "claim_class": result.claim_class,
@@ -140,6 +141,11 @@ def _canonical_record(body: ClaimRecordCreateRequest) -> dict[str, Any]:
         ],
         "limitation_codes": list(result.limitation_codes),
         "user_safe_summary": result.user_safe_summary,
+        "support": (
+            body.support.model_dump(mode="json")
+            if body.support is not None
+            else None
+        ),
     }
 
 
@@ -201,15 +207,18 @@ def validate_claim_record_association(
         if retained_manifest_id != acquisition_manifest_id:
             raise ClaimRecordError("acquisition_manifest_association_mismatch")
         message_content = message.get("content")
-        normalized_claim_anchor = " ".join(record["claim_anchor"].split())
-        if (
+        association_invalid = (
             manifest.get("assistant_message_id") != record["assistant_message_id"]
             or not isinstance(message_content, str)
             or manifest.get("response_digest")
             != _assistant_response_digest(message_content)
-            or _normalized_first_response_paragraph(message_content)
-            != normalized_claim_anchor
-        ):
+        )
+        if record["schema_version"] == "claim-record.v1":
+            association_invalid = association_invalid or (
+                _normalized_first_response_paragraph(message_content)
+                != " ".join(record["claim_anchor"].split())
+            )
+        if association_invalid:
             raise ClaimRecordError("acquisition_manifest_association_mismatch")
 
         accepted_statuses = {
@@ -224,7 +233,7 @@ def validate_claim_record_association(
             if isinstance(sufficiency, dict)
             else None
         )
-        if (
+        if record["schema_version"] == "claim-record.v1" and (
             manifest.get("attempted") is not True
             or not isinstance(plan, dict)
             or plan.get("plan_status") not in {"ready", "ready_with_limitations"}
@@ -233,6 +242,24 @@ def validate_claim_record_association(
             or top_level_status != nested_status
         ):
             raise ClaimRecordError("acquisition_manifest_not_eligible")
+
+    if record["schema_version"] == "claim-record.v2":
+        prompt = trace.get("prompt")
+        reasoning = (
+            prompt.get("general_evidence_reasoning")
+            if isinstance(prompt, dict)
+            else None
+        )
+        support = record.get("support")
+        if (
+            not isinstance(reasoning, dict)
+            or not isinstance(support, dict)
+            or reasoning.get("claim_digest") != record["claim_anchor_digest"]
+            or reasoning.get("runtime_session_id") != record["runtime_session_id"]
+            or reasoning.get("runtime_turn_id") != record["runtime_turn_id"]
+            or reasoning.get("presented_to_user") is not False
+        ):
+            raise ClaimRecordError("shadow_claim_not_in_trace")
 
     traced_identities = {
         identity

@@ -22,7 +22,8 @@ from services.memory_lifecycle import bounded_transition_reason
 _CLAIM_RECORD_COLUMNS = """
     claim_id, schema_version, owner_id, conversation_id, request_id,
     assistant_message_id, surface, runtime_session_id, runtime_turn_id,
-    acquisition_manifest_id, claim_anchor, claim_anchor_digest, claim_class, calibration_status,
+    acquisition_manifest_id, presented_to_user, support_json,
+    claim_anchor, claim_anchor_digest, claim_class, calibration_status,
     evidence_strength, confidence, strongest_authority, freshness_summary,
     uncertainty_disclosure_required, evidence_references_json,
     limitation_codes_json, user_safe_summary, created_at
@@ -104,19 +105,21 @@ def _claim_record_from_row(row: tuple[Any, ...]) -> dict[str, Any]:
         "runtime_session_id": row[7],
         "runtime_turn_id": row[8],
         "acquisition_manifest_id": row[9],
-        "claim_anchor": row[10],
-        "claim_anchor_digest": row[11],
-        "claim_class": row[12],
-        "calibration_status": row[13],
-        "evidence_strength": row[14],
-        "confidence": row[15],
-        "strongest_authority": row[16],
-        "freshness_summary": row[17],
-        "uncertainty_disclosure_required": row[18],
-        "validated_evidence_references": row[19] or [],
-        "limitation_codes": row[20] or [],
-        "user_safe_summary": row[21],
-        "created_at": str(row[22]),
+        "presented_to_user": row[10],
+        "support": row[11],
+        "claim_anchor": row[12],
+        "claim_anchor_digest": row[13],
+        "claim_class": row[14],
+        "calibration_status": row[15],
+        "evidence_strength": row[16],
+        "confidence": row[17],
+        "strongest_authority": row[18],
+        "freshness_summary": row[19],
+        "uncertainty_disclosure_required": row[20],
+        "validated_evidence_references": row[21] or [],
+        "limitation_codes": row[22] or [],
+        "user_safe_summary": row[23],
+        "created_at": str(row[24]),
     }
 
 
@@ -4644,14 +4647,15 @@ class PostgresStore:
                         INSERT INTO claim_records (
                             claim_id, schema_version, owner_id, conversation_id, request_id,
                             assistant_message_id, surface, runtime_session_id, runtime_turn_id,
-                            acquisition_manifest_id,
+                            acquisition_manifest_id, presented_to_user, support_json,
                             claim_anchor, claim_anchor_digest, claim_class, calibration_status,
                             evidence_strength, confidence, strongest_authority, freshness_summary,
                             uncertainty_disclosure_required, evidence_references_json,
                             limitation_codes_json, user_safe_summary
                         ) VALUES (
                             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s
                         )
                         RETURNING
                         """
@@ -4667,6 +4671,12 @@ class PostgresStore:
                             record["runtime_session_id"],
                             record["runtime_turn_id"],
                             record["acquisition_manifest_id"],
+                            record["presented_to_user"],
+                            (
+                                Json(record["support"])
+                                if record["support"] is not None
+                                else None
+                            ),
                             record["claim_anchor"],
                             record["claim_anchor_digest"],
                             record["claim_class"],

@@ -219,6 +219,7 @@ _CLAIM_RECORD_ERROR_STATUS = {
     "acquisition_manifest_not_in_trace": 422,
     "acquisition_manifest_association_mismatch": 422,
     "acquisition_manifest_not_eligible": 422,
+    "shadow_claim_not_in_trace": 422,
 }
 
 

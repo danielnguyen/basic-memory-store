@@ -327,6 +327,125 @@ def _pure_manifest_record_and_association(
     return record, association
 
 
+def _pure_v2_record_and_association() -> tuple[dict, dict]:
+    conversation_id = str(uuid4())
+    assistant_message_id = str(uuid4())
+    anchor = "The bounded inputs have a mechanically derived mean."
+    digest = "sha256:" + sha256(anchor.encode()).hexdigest()
+    body = ClaimRecordCreateRequest.model_validate(
+        {
+            "schema_version": "claim-record.v2",
+            "request_id": "request-shadow-v2",
+            "owner_id": "owner-shadow-v2",
+            "conversation_id": conversation_id,
+            "assistant_message_id": assistant_message_id,
+            "surface": "desktop_private",
+            "runtime_session_id": "session-shadow-v2",
+            "runtime_turn_id": "turn-shadow-v2",
+            "presented_to_user": False,
+            "calibration_result": {
+                **_calibration(
+                    claim_id="claim_shadow_v2",
+                    anchor=anchor,
+                    references=[
+                        _reference(
+                            ref_type="external_source",
+                            ref_id="external-neutral-v2",
+                            owner_id="owner-shadow-v2",
+                            conversation_id=None,
+                        )
+                    ],
+                ),
+                "calibration_status": "limited",
+                "claim_class": "runtime_inference",
+                "confidence": "unknown",
+                "uncertainty_disclosure_required": True,
+            },
+            "support": {
+                "claim_digest": digest,
+                "supporting_evidence_ref_ids": ["external-neutral-v2"],
+                "counterevidence_ref_ids": [],
+                "material_exclusions": [],
+                "executed_derivations": [
+                    {
+                        "derivation_id": "derivation-v2",
+                        "operation": "divide",
+                        "canonical_inputs": ["5", "8"],
+                        "canonical_result": "0.625",
+                        "execution_digest": "sha256:" + "4" * 64,
+                        "executor_version": "decimal-v1",
+                        "supporting_evidence_ref_ids": ["external-neutral-v2"],
+                        "input_basis": "model_interpreted",
+                    }
+                ],
+                "material_scope_limitations": ["interpretation-dependent-input"],
+                "calibration_status": "limited",
+                "conclusion_disposition": "qualified",
+                "qualification_required": True,
+                "limitation_codes": ["interpretation-dependent-derivation"],
+            },
+        }
+    )
+    record = _canonical_record(body)
+    association = {
+        "existing": None,
+        "conversation": {"owner_id": body.owner_id},
+        "assistant_message": {
+            "owner_id": body.owner_id,
+            "conversation_id": conversation_id,
+            "role": "assistant",
+            "metadata": {"request_id": body.request_id},
+            "content": "A separate visible response.",
+        },
+        "trace": {
+            "owner_id": body.owner_id,
+            "conversation_id": conversation_id,
+            "surface": body.surface,
+            "status": "ok",
+            "references": [
+                {"ref_type": "external_source", "ref_id": "external-neutral-v2"}
+            ],
+            "prompt": {
+                "general_evidence_reasoning": {
+                    "claim_digest": digest,
+                    "runtime_session_id": body.runtime_session_id,
+                    "runtime_turn_id": body.runtime_turn_id,
+                    "presented_to_user": False,
+                }
+            },
+        },
+        "local_references": {},
+    }
+    return record, association
+
+
+def test_v2_shadow_association_is_replayable_without_visible_claim_equivalence():
+    record, association = _pure_v2_record_and_association()
+
+    assert validate_claim_record_association(record, association) is None
+    stored = ClaimRecord(**{**record, "created_at": "2026-08-22T12:00:00+00:00"})
+    round_trip = stored.model_dump(mode="json")
+    assert round_trip["presented_to_user"] is False
+    assert round_trip["support"]["executed_derivations"][0]["input_basis"] == (
+        "model_interpreted"
+    )
+    assert "A separate visible response" not in str(round_trip)
+
+    retry = validate_claim_record_association(
+        record,
+        {**association, "existing": {**record, "created_at": stored.created_at}},
+    )
+    assert retry["claim_id"] == record["claim_id"]
+
+    changed = deepcopy(record)
+    changed["support"]["conclusion_disposition"] = "withheld"
+    with pytest.raises(ClaimRecordError, match="claim_record_conflict"):
+        validate_claim_record_association(
+            changed,
+            {**association, "existing": {**record, "created_at": stored.created_at}},
+        )
+
+
 @pytest.mark.parametrize(
     ("sufficiency_status", "plan_status"),
     [
@@ -560,6 +679,8 @@ def test_claim_record_column_decoder_preserves_manifest_position():
         "session-decoder",
         "turn-decoder",
         "evidence_manifest_55555555555555555555555555555555",
+        True,
+        None,
         DEFAULT_ANCHOR,
         DEFAULT_ANCHOR_DIGEST,
         "source_backed_fact",
@@ -584,6 +705,8 @@ def test_claim_record_column_decoder_preserves_manifest_position():
         decoded["acquisition_manifest_id"]
         == "evidence_manifest_55555555555555555555555555555555"
     )
+    assert decoded["presented_to_user"] is True
+    assert decoded["support"] is None
     assert decoded["claim_anchor"] == DEFAULT_ANCHOR
     assert decoded["user_safe_summary"] == "Bounded decoder summary."
 
