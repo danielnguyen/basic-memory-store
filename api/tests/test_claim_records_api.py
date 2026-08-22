@@ -183,13 +183,17 @@ def _v2_body() -> dict:
     ).hexdigest()
     result["claim_class"] = "runtime_inference"
     result["calibration_status"] = "limited"
+    result["evidence_strength"] = "weak"
     result["confidence"] = "unknown"
-    result["strongest_authority"] = "runtime_inference"
+    result["strongest_authority"] = "unknown"
+    result["freshness_summary"] = "unknown"
+    result["uncertainty_disclosure_required"] = True
     result["validated_evidence_references"][0].update(
         {
             "ref_id": "source-neutral-1",
-            "authority": "trusted_integration",
-            "support_kind": "direct",
+            "authority": "unknown",
+            "support_kind": "contextual",
+            "freshness_state": "unknown_freshness",
         }
     )
     result["limitation_codes"] = ["inference_dominant"]
@@ -344,6 +348,46 @@ def test_v2_shadow_support_record_round_trips_bounded_authority_skeleton(
     assert record["support"] == body["support"]
     assert record["support"]["executed_derivations"][0]["input_basis"] == "model_interpreted"
     assert "The visible legacy answer" not in str(record)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_fragment"),
+    [
+        (
+            lambda result: result.update(confidence="medium"),
+            "v2_compatibility_projection_not_neutral",
+        ),
+        (
+            lambda result: result.update(strongest_authority="trusted_integration"),
+            "v2_compatibility_projection_not_neutral",
+        ),
+        (
+            lambda result: result["validated_evidence_references"][0].update(
+                support_kind="direct"
+            ),
+            "v2_evidence_projection_not_neutral",
+        ),
+        (
+            lambda result: result["validated_evidence_references"][0].update(
+                authority="trusted_integration"
+            ),
+            "v2_evidence_projection_not_neutral",
+        ),
+    ],
+)
+def test_v2_rejects_authority_escalation_through_legacy_projection(
+    client_and_store,
+    mutation,
+    expected_fragment,
+):
+    client, _ = client_and_store
+    body = _v2_body()
+    mutation(body["calibration_result"])
+
+    response = _create(client, body)
+
+    assert response.status_code == 422
+    assert expected_fragment in response.text
 
 
 @pytest.mark.parametrize(

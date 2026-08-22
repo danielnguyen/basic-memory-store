@@ -358,8 +358,22 @@ def _pure_v2_record_and_association() -> tuple[dict, dict]:
                 ),
                 "calibration_status": "limited",
                 "claim_class": "runtime_inference",
+                "evidence_strength": "weak",
                 "confidence": "unknown",
+                "strongest_authority": "unknown",
+                "freshness_summary": "unknown",
                 "uncertainty_disclosure_required": True,
+                "validated_evidence_references": [
+                    {
+                        "ref_type": "external_source",
+                        "ref_id": "external-neutral-v2",
+                        "owner_id": "owner-shadow-v2",
+                        "conversation_id": None,
+                        "support_kind": "contextual",
+                        "authority": "unknown",
+                        "freshness_state": "unknown_freshness",
+                    }
+                ],
             },
             "support": {
                 "claim_digest": digest,

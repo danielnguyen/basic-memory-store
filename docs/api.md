@@ -475,6 +475,14 @@ When an acquisition manifest is linked to v2, BMS validates the manifest and
 message association but does not reuse legacy task-specific sufficiency as the
 generic conclusion authority.
 
+For v2, the bounded `support` object and Cognitive Runtime disposition are the
+authority record. The older calibration columns are only a non-escalating
+compatibility projection: runtime inference, unknown confidence/authority/
+freshness, and contextual evidence references with unknown authority and
+freshness. BMS rejects v2 callers that attempt to encode direct, trusted, or
+confidence-bearing authority through those legacy fields. V1 semantics are
+unchanged.
+
 The support object is closed and bounded. Derivation records retain canonical
 inputs/results, executor identity and digest, evidence identities, and whether
 the input basis was system-established or model-interpreted. That distinction

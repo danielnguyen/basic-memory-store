@@ -1631,6 +1631,30 @@ class ClaimRecordCalibrationResult(BaseModel):
         return self
 
 
+def _validate_v2_compatibility_projection(
+    calibration: ClaimRecordCalibrationResult,
+) -> None:
+    expected_strength = (
+        "weak" if calibration.validated_evidence_references else "none"
+    )
+    if (
+        calibration.claim_class != "runtime_inference"
+        or calibration.evidence_strength != expected_strength
+        or calibration.confidence != "unknown"
+        or calibration.strongest_authority != "unknown"
+        or calibration.freshness_summary != "unknown"
+        or calibration.uncertainty_disclosure_required is not True
+    ):
+        raise ValueError("v2_compatibility_projection_not_neutral")
+    if any(
+        reference.support_kind != "contextual"
+        or reference.authority != "unknown"
+        or reference.freshness_state != "unknown_freshness"
+        for reference in calibration.validated_evidence_references
+    ):
+        raise ValueError("v2_evidence_projection_not_neutral")
+
+
 class ClaimSupportMaterialExclusion(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1764,6 +1788,7 @@ class ClaimRecordCreateRequest(BaseModel):
             return self
         if self.presented_to_user or self.support is None:
             raise ValueError("v2_shadow_support_required")
+        _validate_v2_compatibility_projection(self.calibration_result)
         if self.support.claim_digest != self.calibration_result.claim_anchor_digest:
             raise ValueError("support_claim_digest_mismatch")
         if (
@@ -1831,6 +1856,28 @@ class ClaimRecord(BaseModel):
                 raise ValueError("v1_support_fields_forbidden")
         elif self.presented_to_user or self.support is None:
             raise ValueError("v2_shadow_support_required")
+        else:
+            _validate_v2_compatibility_projection(
+                ClaimRecordCalibrationResult(
+                    claim_id=self.claim_id,
+                    claim_anchor=self.claim_anchor,
+                    claim_anchor_digest=self.claim_anchor_digest,
+                    claim_class=self.claim_class,
+                    calibration_status=self.calibration_status,
+                    evidence_strength=self.evidence_strength,
+                    confidence=self.confidence,
+                    strongest_authority=self.strongest_authority,
+                    freshness_summary=self.freshness_summary,
+                    uncertainty_disclosure_required=(
+                        self.uncertainty_disclosure_required
+                    ),
+                    validated_evidence_references=(
+                        self.validated_evidence_references
+                    ),
+                    limitation_codes=self.limitation_codes,
+                    user_safe_summary=self.user_safe_summary,
+                )
+            )
         return self
 
 
