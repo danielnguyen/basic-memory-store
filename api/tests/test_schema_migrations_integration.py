@@ -837,7 +837,9 @@ def test_prior_baseline_advances_conversation_lifecycle_without_rewriting_data(
     temp_db_dir: Path,
 ) -> None:
     current_baseline = (SOURCE_DB_DIR / "baseline.sql").read_text(encoding="utf-8")
-    prior_baseline = without_conversation_lifecycle(current_baseline)
+    prior_baseline = without_claim_support(
+        without_conversation_lifecycle(current_baseline)
+    )
     prior_path = temp_db_dir / "baseline.sql"
     prior_path.write_text(prior_baseline, encoding="utf-8")
     assert schema_migrations.compute_sha256(prior_path) == PRE_CONVERSATION_LIFECYCLE_BASELINE_CHECKSUM
@@ -1707,6 +1709,7 @@ def test_derivation_version_cleanup_migrates_only_exact_legacy_values_and_defaul
         "20260714230000_claim_records.sql",
         "20260717120000_claim_acquisition_manifest.sql",
         "20260731120000_conversation_lifecycle.sql",
+        "20260822120000_claim_support_record.sql",
     ]
     assert repeated["applied_migrations"] == []
     assert column_default(pg_database, "memory_items", "derivation_version") == f"'{MEMORY_ITEM_DERIVATION_VERSION}'::text"
