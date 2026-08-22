@@ -11,6 +11,9 @@ ALTER TABLE claim_records
   );
 
 ALTER TABLE claim_records
+  DROP CONSTRAINT IF EXISTS claim_records_support_version_check;
+
+ALTER TABLE claim_records
   ADD CONSTRAINT claim_records_support_version_check CHECK (
     (
       schema_version = 'claim-record.v1'
