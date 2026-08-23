@@ -4,6 +4,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import re
 import types
 from uuid import UUID, uuid4
 
@@ -370,6 +371,27 @@ def _presented_claim_record(
     return record
 
 
+def _bind_presented_candidate(
+    candidate: dict,
+    record: dict,
+    visible_content: str,
+) -> None:
+    candidate["message_content"] = visible_content
+    first_paragraph = re.split(r"\r?\n[ \t]*\r?\n", visible_content, maxsplit=1)[0]
+    normalized = " ".join(first_paragraph.split())
+    candidate["trace_prompt"]["general_evidence_reasoning"] = {
+        "claim_digest": record["claim_anchor_digest"],
+        "runtime_session_id": record["runtime_session_id"],
+        "runtime_turn_id": record["runtime_turn_id"],
+        "presented_to_user": True,
+        "presentation": {
+            "enabled": True,
+            "status": "presented",
+            "visible_claim_digest": _digest(normalized),
+        },
+    }
+
+
 def _immediate_request(
     *,
     conversation_id: str,
@@ -685,6 +707,96 @@ def test_immediate_support_resolves_presented_v2_record(monkeypatch):
     assert result["resolution_status"] == "resolved"
     assert result["match_count"] == 1
     assert result["record"]["support_record"] == presented
+
+
+def test_immediate_support_resolves_trace_bound_formatted_v2_record(monkeypatch):
+    conversation_id = str(uuid4())
+    candidate = _candidate(conversation_id=conversation_id)
+    presented = _presented_claim_record(
+        conversation_id=conversation_id,
+        message_id=candidate["message_id"],
+        request_id=candidate["message_request_id"],
+    )
+    exact_claim = "The exact computed value is 0.4635416666666666666666666667."
+    presented["claim_anchor"] = exact_claim
+    presented["claim_anchor_digest"] = _digest(exact_claim)
+    presented["support"]["claim_digest"] = presented["claim_anchor_digest"]
+    visible_content = (
+        "The computed   value\nis 0.4635.\r\n \t\r\n"
+        "PRIVATE QUALIFICATION SENTINEL"
+    )
+    _bind_presented_candidate(candidate, presented, visible_content)
+    store = ImmediateHistoryFakePG([candidate], [presented])
+
+    response = _post_immediate(
+        monkeypatch,
+        store,
+        _immediate_request(
+            conversation_id=conversation_id,
+            explanation_kind="support",
+        ),
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["resolution_status"] == "resolved"
+    assert result["record"]["support_record"]["claim_anchor"] == exact_claim
+    assert "PRIVATE QUALIFICATION SENTINEL" not in response.text
+    assert "unrelated_prompt_metadata" not in response.text
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda reasoning: reasoning.pop("presentation"),
+        lambda reasoning: reasoning["presentation"].update(
+            visible_claim_digest="sha256:bad"
+        ),
+        lambda reasoning: reasoning["presentation"].update(
+            visible_claim_digest="sha256:" + "f" * 64
+        ),
+        lambda reasoning: reasoning["presentation"].update(enabled=False),
+        lambda reasoning: reasoning["presentation"].update(status="withheld"),
+    ],
+)
+def test_immediate_support_rejects_invalid_formatted_v2_trace_binding(
+    monkeypatch,
+    mutation,
+):
+    conversation_id = str(uuid4())
+    candidate = _candidate(conversation_id=conversation_id)
+    presented = _presented_claim_record(
+        conversation_id=conversation_id,
+        message_id=candidate["message_id"],
+        request_id=candidate["message_request_id"],
+    )
+    exact_claim = "The exact computed value is 0.4635416666666666666666666667."
+    presented["claim_anchor"] = exact_claim
+    presented["claim_anchor_digest"] = _digest(exact_claim)
+    presented["support"]["claim_digest"] = presented["claim_anchor_digest"]
+    _bind_presented_candidate(
+        candidate,
+        presented,
+        "The computed value is 0.4635.\n\nPRIVATE TRACE SENTINEL",
+    )
+    reasoning = candidate["trace_prompt"]["general_evidence_reasoning"]
+    mutation(reasoning)
+    store = ImmediateHistoryFakePG([candidate], [presented])
+
+    response = _post_immediate(
+        monkeypatch,
+        store,
+        _immediate_request(
+            conversation_id=conversation_id,
+            explanation_kind="support",
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["resolution_status"] == "invalid"
+    assert response.json()["reason_code"] == "support_record_invalid"
+    assert response.json()["record"] is None
+    assert "PRIVATE TRACE SENTINEL" not in response.text
 
 
 def test_immediate_support_does_not_choose_between_two_visible_records(monkeypatch):

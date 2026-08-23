@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from hashlib import sha256
+import re
 import types
 from uuid import uuid4
 
@@ -261,6 +262,19 @@ def _v2_association(body: dict) -> dict:
     }
 
 
+def _bind_visible_claim(association: dict, visible_content: str) -> None:
+    association["assistant_message"]["content"] = visible_content
+    first_paragraph = re.split(r"\r?\n[ \t]*\r?\n", visible_content, maxsplit=1)[0]
+    normalized = " ".join(first_paragraph.split())
+    reasoning = association["trace"]["prompt"]["general_evidence_reasoning"]
+    reasoning["presentation"] = {
+        "enabled": True,
+        "status": "presented",
+        "visible_claim_digest": "sha256:"
+        + sha256(normalized.encode("utf-8")).hexdigest(),
+    }
+
+
 def _manifest_association(body: dict, assistant_content: str) -> dict:
     manifest_id = body["acquisition_manifest_id"]
     return {
@@ -370,6 +384,91 @@ def test_v2_presented_support_record_requires_visible_claim_association(
     assert record["presented_to_user"] is True
     assert record["claim_anchor"] == body["calibration_result"]["claim_anchor"]
     assert record["support"] == body["support"]
+
+
+def test_v2_presented_support_record_accepts_trace_bound_visible_claim(
+    client_and_store,
+):
+    client, store = client_and_store
+    body = _v2_body()
+    body["presented_to_user"] = True
+    store.association = _v2_association(body)
+    visible_content = (
+        "The bounded mean is 0.4635.\n\n"
+        "Some source values had to be interpreted."
+    )
+    _bind_visible_claim(store.association, visible_content)
+
+    response = _create(client, body)
+
+    assert response.status_code == 200, response.text
+    record = response.json()["record"]
+    assert record["claim_anchor"] == body["calibration_result"]["claim_anchor"]
+    assert record["claim_anchor_digest"] == body["support"]["claim_digest"]
+    assert visible_content not in str(record)
+    assert "visible_claim_digest" not in str(record)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda presentation: presentation.pop("visible_claim_digest"),
+        lambda presentation: presentation.update(visible_claim_digest="sha256:bad"),
+        lambda presentation: presentation.update(
+            visible_claim_digest="sha256:" + "f" * 64
+        ),
+        lambda presentation: presentation.update(enabled=False),
+        lambda presentation: presentation.update(status="not_presented"),
+    ],
+)
+def test_v2_presented_visible_claim_rejects_invalid_trace_binding(
+    client_and_store,
+    mutation,
+):
+    client, store = client_and_store
+    body = _v2_body()
+    body["presented_to_user"] = True
+    store.association = _v2_association(body)
+    _bind_visible_claim(store.association, "The bounded mean is 0.4635.")
+    presentation = store.association["trace"]["prompt"][
+        "general_evidence_reasoning"
+    ]["presentation"]
+    mutation(presentation)
+
+    response = _create(client, body)
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "shadow_claim_not_in_trace"
+    assert "0.4635" not in response.text
+
+
+def test_v2_visible_claim_digest_tracks_only_normalized_first_paragraph(
+    client_and_store,
+):
+    client, store = client_and_store
+    body = _v2_body()
+    body["presented_to_user"] = True
+    store.association = _v2_association(body)
+    _bind_visible_claim(
+        store.association,
+        "The bounded   mean\nis 0.4635.\r\n \t\r\nPRIVATE QUALIFICATION A",
+    )
+    store.association["assistant_message"]["content"] = (
+        "The bounded mean is 0.4635.\n\nPRIVATE QUALIFICATION B"
+    )
+
+    response = _create(client, body)
+
+    assert response.status_code == 200, response.text
+    serialized = response.text
+    assert "PRIVATE QUALIFICATION" not in serialized
+
+    store.association["assistant_message"]["content"] = (
+        "The bounded mean is 0.4636.\n\nPRIVATE QUALIFICATION B"
+    )
+    changed = _create(client, body)
+    assert changed.status_code == 422
+    assert changed.json()["detail"] == "shadow_claim_not_in_trace"
 
 
 @pytest.mark.parametrize(

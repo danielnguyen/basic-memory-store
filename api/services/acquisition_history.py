@@ -22,6 +22,7 @@ from models import (
     ImmediateHistoryResolveResponseV1,
     ImmediateHistoryResolveResponseV2,
 )
+from services.claim_records import _presented_v2_response_matches
 
 
 class AcquisitionHistoryStore(Protocol):
@@ -561,6 +562,7 @@ def _support_record_matches(
     message_id: str,
     original_request_id: str,
     message_content: str,
+    trace_prompt: Any = None,
 ) -> bool:
     expected_anchor = _normalized_first_paragraph(message_content)
     if (
@@ -570,7 +572,26 @@ def _support_record_matches(
         or record.assistant_message_id != message_id
         or record.request_id != original_request_id
         or record.surface != surface
-        or record.claim_anchor != expected_anchor
+    ):
+        return False
+    if record.schema_version == "claim-record.v2":
+        reasoning = (
+            trace_prompt.get("general_evidence_reasoning")
+            if isinstance(trace_prompt, dict)
+            else None
+        )
+        if not _presented_v2_response_matches(
+            claim_anchor=record.claim_anchor,
+            claim_anchor_digest=record.claim_anchor_digest,
+            runtime_session_id=record.runtime_session_id,
+            runtime_turn_id=record.runtime_turn_id,
+            record_presented_to_user=record.presented_to_user,
+            assistant_content=message_content,
+            reasoning=reasoning,
+        ):
+            return False
+    elif (
+        record.claim_anchor != expected_anchor
         or record.claim_anchor_digest != _response_digest(expected_anchor)
     ):
         return False
@@ -593,6 +614,7 @@ def evaluate_support_records(
     message_id: str,
     original_request_id: str,
     message_content: str,
+    trace_prompt: Any = None,
 ) -> tuple[str, int, ClaimRecord | None, str | None]:
     if not isinstance(records, list):
         return "invalid", 0, None, "association"
@@ -624,6 +646,7 @@ def evaluate_support_records(
         message_id=message_id,
         original_request_id=original_request_id,
         message_content=message_content,
+        trace_prompt=trace_prompt,
     ):
         return "invalid", 1, record, "association"
     return "resolved", 1, record, None
@@ -636,6 +659,7 @@ async def _load_support_evaluation(
     message_id: str,
     original_request_id: str,
     message_content: str,
+    trace_prompt: Any = None,
 ) -> tuple[str, int, ClaimRecord | None, str | None]:
     try:
         records = await store.list_claim_records(
@@ -655,6 +679,7 @@ async def _load_support_evaluation(
         message_id=message_id,
         original_request_id=original_request_id,
         message_content=message_content,
+        trace_prompt=trace_prompt,
     )
 
 
@@ -737,6 +762,7 @@ async def _resolve_immediate_history_v1(
             message_id=message_id,
             original_request_id=original_request_id,
             message_content=candidate["message_content"],
+            trace_prompt=candidate.get("trace_prompt"),
         )
         reasons = {
             "resolved": "support_record_resolved",
@@ -864,6 +890,7 @@ async def _resolve_immediate_history_v2(
             message_id=message_id,
             original_request_id=original_request_id,
             message_content=candidate["message_content"],
+            trace_prompt=candidate.get("trace_prompt"),
         )
         if direct_status == "resolved" and direct_claim is not None:
             lineage = HistoryRootLineage(
@@ -1038,6 +1065,7 @@ async def _resolve_immediate_history_v2(
             message_id=root_message_id,
             original_request_id=root_request_id,
             message_content=root["message_content"],
+            trace_prompt=root.get("trace_prompt"),
         )
         if root_status == "resolved" and root_claim is not None:
             return _immediate_response_v2(
