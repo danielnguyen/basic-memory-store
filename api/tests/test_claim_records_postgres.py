@@ -327,7 +327,9 @@ def _pure_manifest_record_and_association(
     return record, association
 
 
-def _pure_v2_record_and_association() -> tuple[dict, dict]:
+def _pure_v2_record_and_association(
+    *, presented_to_user: bool = False
+) -> tuple[dict, dict]:
     conversation_id = str(uuid4())
     assistant_message_id = str(uuid4())
     anchor = "The bounded inputs have a mechanically derived mean."
@@ -342,7 +344,7 @@ def _pure_v2_record_and_association() -> tuple[dict, dict]:
             "surface": "desktop_private",
             "runtime_session_id": "session-shadow-v2",
             "runtime_turn_id": "turn-shadow-v2",
-            "presented_to_user": False,
+            "presented_to_user": presented_to_user,
             "calibration_result": {
                 **_calibration(
                     claim_id="claim_shadow_v2",
@@ -409,7 +411,9 @@ def _pure_v2_record_and_association() -> tuple[dict, dict]:
             "conversation_id": conversation_id,
             "role": "assistant",
             "metadata": {"request_id": body.request_id},
-            "content": "A separate visible response.",
+            "content": (
+                anchor if presented_to_user else "A separate visible response."
+            ),
         },
         "trace": {
             "owner_id": body.owner_id,
@@ -424,7 +428,7 @@ def _pure_v2_record_and_association() -> tuple[dict, dict]:
                     "claim_digest": digest,
                     "runtime_session_id": body.runtime_session_id,
                     "runtime_turn_id": body.runtime_turn_id,
-                    "presented_to_user": False,
+                    "presented_to_user": presented_to_user,
                 }
             },
         },
@@ -458,6 +462,18 @@ def test_v2_shadow_association_is_replayable_without_visible_claim_equivalence()
             changed,
             {**association, "existing": {**record, "created_at": stored.created_at}},
         )
+
+
+def test_v2_presented_association_round_trips_visible_claim_equivalence():
+    record, association = _pure_v2_record_and_association(presented_to_user=True)
+
+    assert validate_claim_record_association(record, association) is None
+    stored = ClaimRecord(**{**record, "created_at": "2026-08-22T12:00:00+00:00"})
+    round_trip = stored.model_dump(mode="json")
+
+    assert round_trip["presented_to_user"] is True
+    assert association["assistant_message"]["content"] == record["claim_anchor"]
+    assert round_trip["support"]["conclusion_disposition"] == "qualified"
 
 
 @pytest.mark.parametrize(

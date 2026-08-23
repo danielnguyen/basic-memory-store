@@ -1087,15 +1087,25 @@ def test_claim_support_migration_retains_v1_and_accepts_bounded_v2(
         )
         conn.commit()
 
-    migration = SOURCE_DB_DIR / "migrations" / "managed" / (
+    claim_support_migration = SOURCE_DB_DIR / "migrations" / "managed" / (
         "20260822120000_claim_support_record.sql"
     )
-    shutil.copy2(migration, temp_db_dir / "migrations" / "managed" / migration.name)
+    presented_support_migration = SOURCE_DB_DIR / "migrations" / "managed" / (
+        "20260822163000_presented_claim_support.sql"
+    )
+    for migration in (claim_support_migration, presented_support_migration):
+        shutil.copy2(
+            migration,
+            temp_db_dir / "migrations" / "managed" / migration.name,
+        )
 
     upgraded = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
     repeated = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
 
-    assert upgraded["applied_migrations"] == [migration.name]
+    assert upgraded["applied_migrations"] == [
+        claim_support_migration.name,
+        presented_support_migration.name,
+    ]
     assert repeated["applied_migrations"] == []
     with psycopg.connect(pg_database) as conn:
         retained = conn.execute(
@@ -1143,6 +1153,36 @@ def test_claim_support_migration_retains_v1_and_accepts_bounded_v2(
         ).fetchone() == (
             "sha256:71b594e3398f39d83211e0626eb98a5c74b197b03cc18fd97a597a3052599d38",
         )
+        conn.execute(
+            """
+            INSERT INTO claim_records (
+              claim_id, schema_version, owner_id, conversation_id, request_id,
+              assistant_message_id, surface, runtime_session_id, runtime_turn_id,
+              presented_to_user, support_json, claim_anchor, claim_anchor_digest,
+              claim_class, calibration_status, evidence_strength, confidence,
+              strongest_authority, freshness_summary, uncertainty_disclosure_required,
+              evidence_references_json, limitation_codes_json, user_safe_summary
+            )
+            SELECT
+              'claim-presented-v2', schema_version, owner_id, conversation_id,
+              'request-v2-presented', assistant_message_id, surface,
+              'session-v2-presented', 'turn-v2-presented', true, support_json,
+              claim_anchor, claim_anchor_digest, claim_class, calibration_status,
+              evidence_strength, confidence, strongest_authority, freshness_summary,
+              uncertainty_disclosure_required, evidence_references_json,
+              limitation_codes_json, user_safe_summary
+            FROM claim_records WHERE claim_id = 'claim-new-v2'
+            """
+        )
+        conn.commit()
+        assert conn.execute(
+            """
+            SELECT presented_to_user, jsonb_typeof(support_json)
+            FROM claim_records
+            WHERE claim_id IN ('claim-new-v2', 'claim-presented-v2')
+            ORDER BY presented_to_user
+            """
+        ).fetchall() == [(False, "object"), (True, "object")]
 
 
 def test_prior_enrolled_baseline_advances_through_claim_record_migration(
@@ -1710,6 +1750,7 @@ def test_derivation_version_cleanup_migrates_only_exact_legacy_values_and_defaul
         "20260717120000_claim_acquisition_manifest.sql",
         "20260731120000_conversation_lifecycle.sql",
         "20260822120000_claim_support_record.sql",
+        "20260822163000_presented_claim_support.sql",
     ]
     assert repeated["applied_migrations"] == []
     assert column_default(pg_database, "memory_items", "derivation_version") == f"'{MEMORY_ITEM_DERIVATION_VERSION}'::text"

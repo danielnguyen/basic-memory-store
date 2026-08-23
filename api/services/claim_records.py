@@ -251,14 +251,21 @@ def validate_claim_record_association(
             else None
         )
         support = record.get("support")
-        if (
+        association_invalid = (
             not isinstance(reasoning, dict)
             or not isinstance(support, dict)
             or reasoning.get("claim_digest") != record["claim_anchor_digest"]
             or reasoning.get("runtime_session_id") != record["runtime_session_id"]
             or reasoning.get("runtime_turn_id") != record["runtime_turn_id"]
-            or reasoning.get("presented_to_user") is not False
-        ):
+            or reasoning.get("presented_to_user")
+            is not record["presented_to_user"]
+        )
+        if record["presented_to_user"]:
+            association_invalid = association_invalid or (
+                _normalized_first_response_paragraph(message.get("content"))
+                != " ".join(record["claim_anchor"].split())
+            )
+        if association_invalid:
             raise ClaimRecordError("shadow_claim_not_in_trace")
 
     traced_identities = {

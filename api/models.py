@@ -1786,8 +1786,8 @@ class ClaimRecordCreateRequest(BaseModel):
             if not self.presented_to_user or self.support is not None:
                 raise ValueError("v1_support_fields_forbidden")
             return self
-        if self.presented_to_user or self.support is None:
-            raise ValueError("v2_shadow_support_required")
+        if self.support is None:
+            raise ValueError("v2_support_required")
         _validate_v2_compatibility_projection(self.calibration_result)
         if self.support.claim_digest != self.calibration_result.claim_anchor_digest:
             raise ValueError("support_claim_digest_mismatch")
@@ -1854,8 +1854,8 @@ class ClaimRecord(BaseModel):
         if self.schema_version == "claim-record.v1":
             if not self.presented_to_user or self.support is not None:
                 raise ValueError("v1_support_fields_forbidden")
-        elif self.presented_to_user or self.support is None:
-            raise ValueError("v2_shadow_support_required")
+        elif self.support is None:
+            raise ValueError("v2_support_required")
         else:
             _validate_v2_compatibility_projection(
                 ClaimRecordCalibrationResult(
