@@ -1047,7 +1047,7 @@ def _seed_presented_v2_history_root(
                         "freshness_state": "unknown_freshness",
                     }
                 ],
-                "limitation_codes": ["interpretation-dependent-derivation"],
+                "limitation_codes": ["inference_dominant"],
                 "user_safe_summary": "The bounded result depends on interpreted input.",
             },
             "support": {
