@@ -531,6 +531,7 @@ class PostgresStore:
                 message_id=str(root_message_id),
                 original_request_id=root_request_id,
                 message_content=candidate["message_content"],
+                trace_prompt=candidate.get("trace_prompt"),
             )
         elif record_kind == "acquisition":
             stored_surface = candidate.get("trace_surface")
