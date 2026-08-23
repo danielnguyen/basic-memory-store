@@ -471,9 +471,16 @@ derivation records, material scope limitations, and the Cognitive Runtime
 calibration/disposition/qualification result. Its same-request trace must retain
 the matching claim digest, runtime session and turn identifiers, and exact
 presentation status under `prompt.general_evidence_reasoning`. A presented v2
-record additionally requires the normalized first assistant-response paragraph
-to equal its claim anchor. An unpresented v2 record retains the shadow
-association without pretending the visible assistant message contained it.
+record may retain the existing association in which the normalized first
+assistant-response paragraph equals its exact claim anchor. When bounded display
+formatting makes those texts differ, the system-owned reasoning presentation
+trace may instead bind the visible first paragraph with its normalized SHA-256
+digest. Basic Memory Store independently normalizes and hashes the persisted
+assistant response before accepting that association; a client, model, or
+provider cannot supply the authoritative binding. The visible digest grants no
+claim authority and does not replace the exact claim anchor or claim digest. An
+unpresented v2 record retains the shadow association without pretending the
+visible assistant message contained it.
 When an acquisition manifest is linked to v2, BMS validates the manifest and
 message association but does not reuse legacy task-specific sufficiency as the
 generic conclusion authority.

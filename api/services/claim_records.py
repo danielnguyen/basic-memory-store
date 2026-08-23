@@ -45,6 +45,7 @@ class ClaimRecordStore(Protocol):
 
 
 _PARAGRAPH_SEPARATOR = re.compile(r"\r?\n[ \t]*\r?\n")
+_SHA256_IDENTIFIER = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def _assistant_response_digest(content: str) -> str:
@@ -57,6 +58,48 @@ def _normalized_first_response_paragraph(content: Any) -> str | None:
     first_paragraph = _PARAGRAPH_SEPARATOR.split(content, maxsplit=1)[0]
     normalized = " ".join(first_paragraph.split())
     return normalized or None
+
+
+def _presented_v2_response_matches(
+    *,
+    claim_anchor: str,
+    claim_anchor_digest: str,
+    runtime_session_id: str,
+    runtime_turn_id: str,
+    record_presented_to_user: bool,
+    assistant_content: Any,
+    reasoning: Any,
+) -> bool:
+    visible_claim = _normalized_first_response_paragraph(assistant_content)
+    exact_claim = " ".join(claim_anchor.split())
+    expected_claim_digest = "sha256:" + sha256(
+        claim_anchor.encode("utf-8")
+    ).hexdigest()
+    if visible_claim is None or claim_anchor_digest != expected_claim_digest:
+        return False
+    if visible_claim == exact_claim:
+        return True
+    if not record_presented_to_user or not isinstance(reasoning, dict):
+        return False
+    presentation = reasoning.get("presentation")
+    if (
+        reasoning.get("claim_digest") != claim_anchor_digest
+        or reasoning.get("runtime_session_id") != runtime_session_id
+        or reasoning.get("runtime_turn_id") != runtime_turn_id
+        or reasoning.get("presented_to_user") is not True
+        or not isinstance(presentation, dict)
+        or presentation.get("enabled") is not True
+        or presentation.get("status") != "presented"
+    ):
+        return False
+    visible_claim_digest = presentation.get("visible_claim_digest")
+    if (
+        not isinstance(visible_claim_digest, str)
+        or _SHA256_IDENTIFIER.fullmatch(visible_claim_digest) is None
+    ):
+        return False
+    expected_digest = "sha256:" + sha256(visible_claim.encode("utf-8")).hexdigest()
+    return visible_claim_digest == expected_digest
 
 
 def normalize_trace_reference_identity(value: Any) -> tuple[str, str] | None:
@@ -261,10 +304,16 @@ def validate_claim_record_association(
             is not record["presented_to_user"]
         )
         if record["presented_to_user"]:
-            association_invalid = association_invalid or (
-                _normalized_first_response_paragraph(message.get("content"))
-                != " ".join(record["claim_anchor"].split())
+            visible_claim_matches = _presented_v2_response_matches(
+                claim_anchor=record["claim_anchor"],
+                claim_anchor_digest=record["claim_anchor_digest"],
+                runtime_session_id=record["runtime_session_id"],
+                runtime_turn_id=record["runtime_turn_id"],
+                record_presented_to_user=record["presented_to_user"],
+                assistant_content=message.get("content"),
+                reasoning=reasoning,
             )
+            association_invalid = association_invalid or not visible_claim_matches
         if association_invalid:
             raise ClaimRecordError("shadow_claim_not_in_trace")
 

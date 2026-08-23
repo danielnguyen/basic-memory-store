@@ -476,6 +476,30 @@ def test_v2_presented_association_round_trips_visible_claim_equivalence():
     assert round_trip["support"]["conclusion_disposition"] == "qualified"
 
 
+def test_v2_presented_association_accepts_trace_bound_formatted_claim():
+    record, association = _pure_v2_record_and_association(presented_to_user=True)
+    visible_first_paragraph = "The bounded inputs have a mean of 0.4635."
+    association["assistant_message"]["content"] = (
+        f"{visible_first_paragraph}\n\nA bounded qualification follows."
+    )
+    reasoning = association["trace"]["prompt"]["general_evidence_reasoning"]
+    reasoning["presentation"] = {
+        "enabled": True,
+        "status": "presented",
+        "visible_claim_digest": "sha256:"
+        + sha256(visible_first_paragraph.encode("utf-8")).hexdigest(),
+    }
+
+    assert validate_claim_record_association(record, association) is None
+
+    association["assistant_message"]["content"] = (
+        "The bounded inputs have a mean of 0.4636.\n\n"
+        "A bounded qualification follows."
+    )
+    with pytest.raises(ClaimRecordError, match="shadow_claim_not_in_trace"):
+        validate_claim_record_association(record, association)
+
+
 @pytest.mark.parametrize(
     ("sufficiency_status", "plan_status"),
     [
