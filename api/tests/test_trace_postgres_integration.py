@@ -12,7 +12,8 @@ import psycopg
 import pytest
 
 import main as main_module
-from services.claim_records import validate_claim_record_association
+from models import ClaimRecordCreateRequest
+from services.claim_records import _canonical_record, validate_claim_record_association
 from storage.postgres import (
     HistoryRootLineageValidationError,
     MessageAppendConflictError,
@@ -983,6 +984,160 @@ def _seed_history_root(
     }
 
 
+def _seed_presented_v2_history_root(
+    postgres_database: str,
+    *,
+    formatted_visible_claim: bool = True,
+) -> dict:
+    owner_id = f"owner-lineage-v2-{uuid4().hex[:8]}"
+    conversation_id = uuid4()
+    message_id = uuid4()
+    request_id = f"root-request-v2-{uuid4().hex}"
+    surface = "telegram"
+    runtime_session_id = "runtime-session-lineage-v2"
+    runtime_turn_id = "runtime-turn-lineage-v2"
+    exact_claim = "The bounded mean is 0.4635416666666666666666666667."
+    visible_claim = "The bounded mean is 0.4635." if formatted_visible_claim else exact_claim
+    content = f"{visible_claim}\n\nThis bounded result includes a qualification."
+    claim_digest = "sha256:" + hashlib.sha256(exact_claim.encode()).hexdigest()
+    visible_digest = "sha256:" + hashlib.sha256(visible_claim.encode()).hexdigest()
+    evidence_ref_id = "external-neutral-lineage-v2"
+    presentation = {"enabled": True, "status": "presented"}
+    if formatted_visible_claim:
+        presentation["visible_claim_digest"] = visible_digest
+    prompt = {
+        "general_evidence_reasoning": {
+            "claim_digest": claim_digest,
+            "runtime_session_id": runtime_session_id,
+            "runtime_turn_id": runtime_turn_id,
+            "presented_to_user": True,
+            "presentation": presentation,
+        }
+    }
+    body = ClaimRecordCreateRequest.model_validate(
+        {
+            "schema_version": "claim-record.v2",
+            "request_id": request_id,
+            "owner_id": owner_id,
+            "conversation_id": str(conversation_id),
+            "assistant_message_id": str(message_id),
+            "surface": surface,
+            "runtime_session_id": runtime_session_id,
+            "runtime_turn_id": runtime_turn_id,
+            "presented_to_user": True,
+            "calibration_result": {
+                "claim_id": f"claim_lineage_v2_{uuid4().hex}",
+                "claim_anchor": exact_claim,
+                "claim_anchor_digest": claim_digest,
+                "claim_class": "runtime_inference",
+                "calibration_status": "limited",
+                "evidence_strength": "weak",
+                "confidence": "unknown",
+                "strongest_authority": "unknown",
+                "freshness_summary": "unknown",
+                "uncertainty_disclosure_required": True,
+                "validated_evidence_references": [
+                    {
+                        "ref_type": "external_source",
+                        "ref_id": evidence_ref_id,
+                        "owner_id": owner_id,
+                        "conversation_id": None,
+                        "support_kind": "contextual",
+                        "authority": "unknown",
+                        "freshness_state": "unknown_freshness",
+                    }
+                ],
+                "limitation_codes": ["inference_dominant"],
+                "user_safe_summary": "The bounded result depends on interpreted input.",
+            },
+            "support": {
+                "claim_digest": claim_digest,
+                "supporting_evidence_ref_ids": [evidence_ref_id],
+                "counterevidence_ref_ids": [],
+                "material_exclusions": [],
+                "executed_derivations": [
+                    {
+                        "derivation_id": "mean-lineage-v2",
+                        "operation": "mean",
+                        "canonical_inputs": ["0.375", "0.5520833333333333333333333334"],
+                        "canonical_result": "0.4635416666666666666666666667",
+                        "execution_digest": "sha256:" + ("4" * 64),
+                        "executor_version": "decimal-v1",
+                        "supporting_evidence_ref_ids": [evidence_ref_id],
+                        "input_basis": "model_interpreted",
+                    }
+                ],
+                "material_scope_limitations": ["interpretation-dependent-input"],
+                "calibration_status": "limited",
+                "conclusion_disposition": "qualified",
+                "qualification_required": True,
+                "limitation_codes": ["interpretation-dependent-derivation"],
+            },
+        }
+    )
+    with psycopg.connect(postgres_database) as conn:
+        conn.execute(
+            """
+            INSERT INTO conversations (id, owner_id, client_id, title)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (
+                conversation_id,
+                owner_id,
+                "telegram:lineage-v2-fixture",
+                "Presented v2 history root lineage",
+            ),
+        )
+        conn.commit()
+
+    async def seed():
+        store = PostgresStore(postgres_database)
+        await store.open()
+        try:
+            await store.add_message(
+                message_id=message_id,
+                conversation_id=conversation_id,
+                owner_id=owner_id,
+                role="assistant",
+                content=content,
+                client_id="telegram:lineage-v2-fixture",
+                metadata={"request_id": request_id},
+            )
+            await store.create_trace(
+                {
+                    "request_id": request_id,
+                    "conversation_id": conversation_id,
+                    "owner_id": owner_id,
+                    "surface": surface,
+                    "status": "ok",
+                    "prompt": prompt,
+                    "references": [
+                        {"ref_type": "external_source", "ref_id": evidence_ref_id}
+                    ],
+                }
+            )
+            await store.create_claim_record(
+                record=_canonical_record(body),
+                validate_association=validate_claim_record_association,
+            )
+        finally:
+            await store.close()
+
+    asyncio.run(seed())
+    return {
+        "owner_id": owner_id,
+        "conversation_id": conversation_id,
+        "message_id": message_id,
+        "request_id": request_id,
+        "content": content,
+        "surface": surface,
+        "record_kind": "support",
+        "exact_claim": exact_claim,
+        "visible_claim": visible_claim,
+        "visible_digest": visible_digest,
+    }
+
+
 def _lineage_payload(root: dict, *, record_kind: str | None = None) -> dict:
     return {
         "schema_version": "history-root-lineage.v1",
@@ -1165,6 +1320,92 @@ def test_valid_lineage_append_is_private_durable_and_resolvable_after_reopen(
     assert result["lineage_dereference_count"] == 1
     assert result["record"]["assistant_message_id"] == str(root["message_id"])
     assert result["history_root_lineage"] == lineage
+
+
+@pytest.mark.parametrize("formatted_visible_claim", [True, False])
+def test_presented_v2_lineage_append_reuses_root_trace_association(
+    monkeypatch,
+    postgres_database,
+    formatted_visible_claim,
+):
+    root = _seed_presented_v2_history_root(
+        postgres_database,
+        formatted_visible_claim=formatted_visible_claim,
+    )
+    lineage = _lineage_payload(root)
+    response, qdrant = _append_through_api(
+        monkeypatch,
+        postgres_database,
+        conversation_id=root["conversation_id"],
+        body={
+            "owner_id": root["owner_id"],
+            "role": "assistant",
+            "content": "A bounded historical explanation backed by the root.",
+            "client_id": "telegram:lineage-v2-fixture",
+            "metadata": {
+                "request_id": f"presented-v2-explanation-{formatted_visible_claim}",
+                "response_kind": "claim_explanation",
+            },
+            "history_root_lineage": lineage,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert set(response.json()) == {"message_id"}
+    assert len(qdrant.upserts) == 1
+    with psycopg.connect(postgres_database) as conn:
+        stored_lineage = conn.execute(
+            "SELECT metadata->'history_root_lineage' FROM messages WHERE id = %s",
+            (response.json()["message_id"],),
+        ).fetchone()[0]
+    assert stored_lineage == lineage
+
+
+@pytest.mark.parametrize("trace_mutation", ["missing_digest", "wrong_digest"])
+def test_presented_v2_lineage_append_rejects_invalid_visible_trace_association(
+    monkeypatch,
+    postgres_database,
+    trace_mutation,
+):
+    root = _seed_presented_v2_history_root(postgres_database)
+    with psycopg.connect(postgres_database) as conn:
+        prompt = conn.execute(
+            "SELECT prompt_json FROM traces WHERE request_id = %s",
+            (root["request_id"],),
+        ).fetchone()[0]
+        presentation = prompt["general_evidence_reasoning"]["presentation"]
+        if trace_mutation == "missing_digest":
+            presentation.pop("visible_claim_digest")
+        else:
+            presentation["visible_claim_digest"] = "sha256:" + ("f" * 64)
+        conn.execute(
+            "UPDATE traces SET prompt_json = %s::jsonb WHERE request_id = %s",
+            (json.dumps(prompt), root["request_id"]),
+        )
+        before_count = conn.execute("SELECT count(*) FROM messages").fetchone()[0]
+        conn.commit()
+
+    response, qdrant = _append_through_api(
+        monkeypatch,
+        postgres_database,
+        conversation_id=root["conversation_id"],
+        body={
+            "owner_id": root["owner_id"],
+            "role": "assistant",
+            "content": "This explanation must not persist.",
+            "metadata": {"request_id": f"rejected-v2-{trace_mutation}"},
+            "history_root_lineage": _lineage_payload(root),
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "history_root_lineage_invalid"}
+    assert root["visible_claim"] not in response.text
+    assert root["visible_digest"] not in response.text
+    assert qdrant.upserts == []
+    with psycopg.connect(postgres_database) as conn:
+        after_count = conn.execute("SELECT count(*) FROM messages").fetchone()[0]
+    assert after_count == before_count
 
 
 def test_supplied_identity_lineage_retry_and_mismatch_are_bounded(
