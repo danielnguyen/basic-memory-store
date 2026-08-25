@@ -419,6 +419,11 @@ def test_v2_external_source_descriptor_round_trips_without_changing_support(
             "display_name": "Vehicle Maintenance Log",
             "source_type": " ",
         },
+        {
+            "source_id": "vehicle_records",
+            "display_name": "Vehicle\nMaintenance Log",
+            "source_type": "google_sheets",
+        },
     ],
 )
 def test_v2_source_descriptor_rejects_unknown_or_malformed_values(
