@@ -369,6 +369,90 @@ def test_v2_shadow_support_record_round_trips_bounded_authority_skeleton(
     assert "The visible legacy answer" not in str(record)
 
 
+def test_v2_external_source_descriptor_round_trips_without_changing_support(
+    client_and_store,
+):
+    client, store = client_and_store
+    body = _v2_body()
+    descriptor = {
+        "source_id": "vehicle_records",
+        "display_name": "Vehicle Maintenance Log",
+        "source_type": "google_sheets",
+    }
+    body["calibration_result"]["validated_evidence_references"][0][
+        "source_descriptor"
+    ] = descriptor
+    store.association = _v2_association(body)
+
+    response = _create(client, body)
+
+    assert response.status_code == 200, response.text
+    reference = response.json()["record"]["validated_evidence_references"][0]
+    assert reference["source_descriptor"] == descriptor
+    assert response.json()["record"]["support"] == body["support"]
+    assert store.create_calls[0]["validated_evidence_references"][0][
+        "source_descriptor"
+    ] == descriptor
+
+
+@pytest.mark.parametrize(
+    "descriptor",
+    [
+        {
+            "source_id": "vehicle_records",
+            "display_name": "Vehicle Maintenance Log",
+            "source_type": "google_sheets",
+            "raw_source_ref": "PRIVATE_INTERNAL_REF",
+        },
+        {
+            "source_id": "vehicle_records",
+            "display_name": " ",
+            "source_type": "google_sheets",
+        },
+        {
+            "source_id": "vehicle_records",
+            "display_name": "x" * 121,
+            "source_type": "google_sheets",
+        },
+        {
+            "source_id": "vehicle_records",
+            "display_name": "Vehicle Maintenance Log",
+            "source_type": " ",
+        },
+    ],
+)
+def test_v2_source_descriptor_rejects_unknown_or_malformed_values(
+    client_and_store,
+    descriptor,
+):
+    client, _ = client_and_store
+    body = _v2_body()
+    body["calibration_result"]["validated_evidence_references"][0][
+        "source_descriptor"
+    ] = descriptor
+
+    response = _create(client, body)
+
+    assert response.status_code == 422
+
+
+def test_source_descriptor_is_v2_external_source_metadata_only(client_and_store):
+    client, _ = client_and_store
+    body = _v2_body()
+    reference = body["calibration_result"]["validated_evidence_references"][0]
+    reference["ref_type"] = "artifact"
+    reference["source_descriptor"] = {
+        "source_id": "vehicle_records",
+        "display_name": "Vehicle Maintenance Log",
+        "source_type": "google_sheets",
+    }
+
+    response = _create(client, body)
+
+    assert response.status_code == 422
+    assert "source_descriptor_ref_type_invalid" in response.text
+
+
 def test_v2_presented_support_record_requires_visible_claim_association(
     client_and_store,
 ):

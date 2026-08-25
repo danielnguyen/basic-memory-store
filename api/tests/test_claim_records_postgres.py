@@ -464,6 +464,101 @@ def test_v2_shadow_association_is_replayable_without_visible_claim_equivalence()
         )
 
 
+def test_v2_source_descriptor_persists_and_reopens_from_postgres(
+    postgres_database,
+):
+    record, association = _pure_v2_record_and_association()
+    descriptor = {
+        "source_id": "vehicle_records",
+        "display_name": "Vehicle Maintenance Log",
+        "source_type": "google_sheets",
+    }
+    record["validated_evidence_references"][0]["source_descriptor"] = descriptor
+    with psycopg.connect(postgres_database) as conn:
+        conn.execute(
+            "INSERT INTO conversations (id, owner_id, title) VALUES (%s, %s, %s)",
+            (record["conversation_id"], record["owner_id"], "Descriptor record"),
+        )
+        conn.execute(
+            """
+            INSERT INTO messages (
+              id, conversation_id, owner_id, role, content, metadata
+            ) VALUES (%s, %s, %s, 'assistant', %s, %s::jsonb)
+            """,
+            (
+                record["assistant_message_id"],
+                record["conversation_id"],
+                record["owner_id"],
+                association["assistant_message"]["content"],
+                psycopg.types.json.Json(association["assistant_message"]["metadata"]),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO traces (
+              request_id, conversation_id, owner_id, surface, profile_json,
+              retrieval_json, router_decision_json, model_call_json,
+              references_json, cost_json, status, prompt_json
+            ) VALUES (
+              %s, %s, %s, %s, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+              '{}'::jsonb, %s::jsonb, '{}'::jsonb, %s, %s::jsonb
+            )
+            """,
+            (
+                record["request_id"],
+                record["conversation_id"],
+                record["owner_id"],
+                record["surface"],
+                psycopg.types.json.Json(association["trace"]["references"]),
+                association["trace"]["status"],
+                psycopg.types.json.Json(association["trace"]["prompt"]),
+            ),
+        )
+        conn.commit()
+
+    async def persist_and_reopen():
+        first_store = PostgresStore(postgres_database)
+        await first_store.open()
+        try:
+            created = await first_store.create_claim_record(
+                record=record,
+                validate_association=validate_claim_record_association,
+            )
+        finally:
+            await first_store.close()
+
+        reopened_store = PostgresStore(postgres_database)
+        await reopened_store.open()
+        try:
+            loaded = await reopened_store.get_claim_record(
+                claim_id=record["claim_id"],
+                owner_id=record["owner_id"],
+                conversation_id=record["conversation_id"],
+            )
+        finally:
+            await reopened_store.close()
+        return created, loaded
+
+    created, loaded = asyncio.run(persist_and_reopen())
+
+    assert created["created"] is True
+    assert loaded["validated_evidence_references"][0]["source_descriptor"] == (
+        descriptor
+    )
+    assert loaded["support"] == record["support"]
+
+
+def test_historical_v2_without_source_descriptor_keeps_original_json_shape():
+    record, _ = _pure_v2_record_and_association()
+    stored = ClaimRecord(**{**record, "created_at": "2026-08-25T12:00:00+00:00"})
+
+    round_trip = stored.model_dump(mode="json")
+
+    reference = round_trip["validated_evidence_references"][0]
+    assert "source_descriptor" not in reference
+    assert reference == record["validated_evidence_references"][0]
+
+
 def test_v2_presented_association_round_trips_visible_claim_equivalence():
     record, association = _pure_v2_record_and_association(presented_to_user=True)
 

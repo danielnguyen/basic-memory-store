@@ -1564,6 +1564,26 @@ ClaimSupportInputBasis = Literal["system_established", "model_interpreted"]
 ClaimSupportOperation = Literal["divide", "mean"]
 
 
+class ClaimSourceDescriptor(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: ClaimRecordIdentifier | None = None
+    display_name: Annotated[str, Field(min_length=1, max_length=120)]
+    source_type: Annotated[
+        str,
+        Field(
+            min_length=1,
+            max_length=64,
+            pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+        ),
+    ]
+
+    @field_validator("source_id", "display_name", "source_type", mode="before")
+    @classmethod
+    def strip_descriptor_values(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
+
+
 class ClaimEvidenceReference(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1574,6 +1594,20 @@ class ClaimEvidenceReference(BaseModel):
     support_kind: ClaimEvidenceSupportKind
     authority: ClaimEvidenceAuthority
     freshness_state: ClaimEvidenceFreshnessState
+    source_descriptor: ClaimSourceDescriptor | None = None
+
+    @model_validator(mode="after")
+    def validate_source_descriptor_scope(self):
+        if self.source_descriptor is not None and self.ref_type != "external_source":
+            raise ValueError("source_descriptor_ref_type_invalid")
+        return self
+
+    @model_serializer(mode="wrap")
+    def omit_absent_source_descriptor(self, serializer):
+        serialized = serializer(self)
+        if self.source_descriptor is None:
+            serialized.pop("source_descriptor", None)
+        return serialized
 
 
 class ClaimRecordCalibrationResult(BaseModel):
@@ -1783,6 +1817,11 @@ class ClaimRecordCreateRequest(BaseModel):
             ):
                 raise ValueError("evidence_conversation_mismatch")
         if self.schema_version == "claim-record.v1":
+            if any(
+                reference.source_descriptor is not None
+                for reference in self.calibration_result.validated_evidence_references
+            ):
+                raise ValueError("v1_source_descriptor_forbidden")
             if not self.presented_to_user or self.support is not None:
                 raise ValueError("v1_support_fields_forbidden")
             return self
@@ -1852,6 +1891,11 @@ class ClaimRecord(BaseModel):
     @model_validator(mode="after")
     def validate_version_payload(self):
         if self.schema_version == "claim-record.v1":
+            if any(
+                reference.source_descriptor is not None
+                for reference in self.validated_evidence_references
+            ):
+                raise ValueError("v1_source_descriptor_forbidden")
             if not self.presented_to_user or self.support is not None:
                 raise ValueError("v1_support_fields_forbidden")
         elif self.support is None:
