@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import re
 from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional
 from uuid import UUID
 
@@ -1582,6 +1583,13 @@ class ClaimSourceDescriptor(BaseModel):
     @classmethod
     def strip_descriptor_values(cls, value: Any) -> Any:
         return value.strip() if isinstance(value, str) else value
+
+    @field_validator("display_name")
+    @classmethod
+    def reject_unsafe_display_name(cls, value: str) -> str:
+        if re.search(r"[\x00-\x1f\x7f]", value):
+            raise ValueError("unsafe_source_display_name")
+        return value
 
 
 class ClaimEvidenceReference(BaseModel):
