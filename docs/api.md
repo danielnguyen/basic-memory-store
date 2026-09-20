@@ -608,17 +608,26 @@ reclaim, or retry policy is implied by these endpoints.
 
 Exact lookups require both owner and conversation. Missing or mismatched work
 returns the same `404 work_not_found`. Work operations validate the durable
-conversation owner and require an open conversation; retired conversations are
-not reopened. Creation on a retired conversation returns
+conversation owner. Only new work admission requires an open conversation;
+creation on a retired conversation returns
 `409 work_conversation_not_open`. Invalid completion references return
 `422 work_result_invalid`; unavailable storage returns bounded
 `503 work_unavailable`.
+
+Already-admitted work remains readable and may follow its existing lifecycle
+after its conversation is closed or superseded. Pending/running work can fail
+honestly; completion requires a valid canonical assistant message already
+persisted in the same owner/conversation. These operations do not reopen the
+conversation, permit ordinary continuation, or authorize appending a new
+message to a retired conversation. Missing conversations and inconsistent
+owner/result associations still fail closed.
 
 The current-work locator is one explicit association per owner/client.
 Setting it checks the work's owner and originating client. A later explicit set
 may replace it. Creating newer work never changes it. Resolution revalidates
 the work and conversation and returns no record on owner/client mismatch;
 a dangling or inconsistent stored association returns `404 work_not_found`.
-There is no recency search or semantic selection. Terminal work remains
-resolvable while its conversation remains eligible. No broad work-list API is
-provided.
+There is no recency search or semantic selection. Existing work, including
+terminal work, remains resolvable after conversation retirement. The locator
+may also be explicitly set or replaced after retirement, subject to the same
+owner/client/work checks. No broad work-list API is provided.

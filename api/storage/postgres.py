@@ -286,12 +286,11 @@ class PostgresStore:
         self, cur: Any, *, work_id: UUID, owner_id: str,
         conversation_id: UUID | None = None,
     ) -> dict[str, Any] | None:
-        # Revalidate canonical associations on every exact/current lookup.
+        # Revalidate associations, not resumability: already-admitted work survives retirement.
         await cur.execute(
             f"""SELECT {", ".join("w." + name for name in _WORK_FIELDS)}
                 FROM work_items w JOIN conversations c ON c.id = w.conversation_id
                 WHERE w.work_id = %s AND w.owner_id = %s AND c.owner_id = w.owner_id
-                  AND c.lifecycle_state = 'open'
                   AND (%s::uuid IS NULL OR w.conversation_id = %s)
                   AND (w.assistant_message_id IS NULL OR EXISTS (
                     SELECT 1 FROM messages m WHERE m.id = w.assistant_message_id
@@ -329,7 +328,7 @@ class PostgresStore:
                     (body.conversation_id, body.owner_id),
                 )
                 conversation = await cur.fetchone()
-                if conversation is None or conversation[0] != "open":
+                if conversation is None:
                     raise WorkError("work_not_found")
                 await cur.execute(
                     f"""SELECT {_WORK_COLUMNS} FROM work_items
