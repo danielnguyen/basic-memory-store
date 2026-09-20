@@ -21,6 +21,7 @@ from psycopg.rows import dict_row
 
 BASELINE_VERSION = "schema_baseline_20260620"
 COMPATIBLE_BASELINE_CHECKSUMS = {
+    "f5bdb1b7e1fbcd163526a07658bacd4806a7bd143d70f78f18f6b281a3c90fae",
     "b58b64403a770a256b6e074dcaa0db764aa9c589f7a28c2f49f48587233302e6",
     "b88f055be2b0ed998e9438fdbbbb3f2c8ec4c669921d7bcbbf7e1f1b93adc3eb",
     "b68542ad271358abdc077a604b0ac90c295ef9e3a5fdb10f7548a40f835b27d8",

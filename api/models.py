@@ -299,6 +299,79 @@ class RetrievalOptions(BaseModel):
     )
 
 
+# ---- Durable work ----
+
+WorkIdentifier = Annotated[
+    str, Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
+]
+WorkSurface = Annotated[
+    str, Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
+]
+WorkState = Literal["pending", "running", "completed", "failed"]
+WorkFailureCode = Literal[
+    "interrupted", "execution_failed", "dependency_unavailable", "authority_unavailable"
+]
+
+
+class WorkCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    owner_id: WorkIdentifier
+    conversation_id: UUID
+    request_id: WorkIdentifier
+    client_id: WorkIdentifier | None = None
+    surface: WorkSurface
+
+
+class WorkTransitionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    owner_id: WorkIdentifier
+    conversation_id: UUID
+    state: WorkState
+    assistant_message_id: UUID | None = None
+    failure_code: WorkFailureCode | None = None
+
+    @model_validator(mode="after")
+    def validate_result(self) -> WorkTransitionRequest:
+        if (self.state == "completed") != (self.assistant_message_id is not None):
+            raise ValueError("work_result_reference_invalid")
+        if (self.state == "failed") != (self.failure_code is not None):
+            raise ValueError("work_failure_code_invalid")
+        return self
+
+
+class WorkProjection(WorkCreateRequest):
+    work_id: UUID
+    state: WorkState
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    assistant_message_id: UUID | None
+    failure_code: WorkFailureCode | None
+
+
+class CurrentWorkSetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    owner_id: WorkIdentifier
+    client_id: WorkIdentifier
+    work_id: UUID
+
+
+class CurrentWorkResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["resolved", "none"]
+    work: WorkProjection | None
+
+    @model_validator(mode="after")
+    def validate_resolution(self) -> CurrentWorkResponse:
+        if (self.status == "resolved") != (self.work is not None):
+            raise ValueError("current_work_resolution_invalid")
+        return self
+
+
 # ---- Conversations ----
 
 class ConversationCreateRequest(BaseModel):

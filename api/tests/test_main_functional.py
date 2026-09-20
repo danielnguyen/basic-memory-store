@@ -1,5 +1,6 @@
 import uuid
 import types
+from unittest.mock import AsyncMock
 from datetime import datetime
 from pathlib import Path
 import anyio
@@ -15,6 +16,7 @@ from storage.postgres import (
     ConversationNotOpenError,
     ConversationReplacementError,
     MessageAppendConflictError,
+    WorkError,
 )
 
 
@@ -682,6 +684,191 @@ def client(monkeypatch):
 
 def auth_headers():
     return {"X-API-Key": "testkey"}
+
+
+def _work_payload():
+    return {
+        "owner_id": "owner-work", "conversation_id": str(uuid.uuid4()),
+        "request_id": "request-work", "client_id": "client-work", "surface": "web",
+    }
+
+
+def _work_projection(payload):
+    return {
+        **payload, "work_id": str(uuid.uuid4()), "state": "pending",
+        "created_at": "2026-09-20T12:00:00Z", "started_at": None, "completed_at": None,
+        "assistant_message_id": None, "failure_code": None,
+    }
+
+
+def test_work_api_forwards_exact_scope_and_returns_only_bounded_fields(client, monkeypatch):
+    payload = _work_payload()
+    projection = _work_projection(payload)
+    create = AsyncMock(return_value=projection)
+    monkeypatch.setattr(main_module.pg, "create_work", create, raising=False)
+    response = client.post("/v1/internal/work-items", json=payload, headers=auth_headers())
+    assert response.status_code == 200
+    assert response.json() == projection
+    create.assert_awaited_once_with(**{
+        **payload, "conversation_id": uuid.UUID(payload["conversation_id"]),
+    })
+    lookup = AsyncMock(return_value=projection)
+    monkeypatch.setattr(main_module.pg, "get_work", lookup, raising=False)
+    response = client.get(
+        "/v1/internal/work-items/" + projection["work_id"],
+        params={"owner_id": payload["owner_id"], "conversation_id": payload["conversation_id"]},
+        headers=auth_headers(),
+    )
+    assert response.status_code == 200
+    assert set(response.json()) == set(projection)
+    lookup.assert_awaited_once_with(
+        work_id=uuid.UUID(projection["work_id"]), owner_id=payload["owner_id"],
+        conversation_id=uuid.UUID(payload["conversation_id"]),
+    )
+    assert main_module.pg.messages == []
+    assert main_module.litellm.calls == []
+
+
+@pytest.mark.parametrize("field,value", [
+    ("owner_id", ""), ("owner_id", " "), ("owner_id", "x" * 121),
+    ("request_id", ""), ("request_id", "bad/id"), ("client_id", ""),
+    ("client_id", "x" * 121), ("surface", ""), ("surface", "x" * 65),
+    ("conversation_id", "not-a-uuid"), ("work_id", str(uuid.uuid4())),
+    ("prompt", "prompt-sentinel"), ("source_payload", "source-sentinel"),
+    ("answer", "answer-sentinel"), ("metadata", {"credential": "credential-sentinel"}),
+])
+def test_work_api_rejects_unbounded_or_content_fields(client, monkeypatch, field, value):
+    create = AsyncMock()
+    monkeypatch.setattr(main_module.pg, "create_work", create, raising=False)
+    response = client.post(
+        "/v1/internal/work-items", json=_work_payload() | {field: value}, headers=auth_headers(),
+    )
+    assert response.status_code == 422
+    create.assert_not_awaited()
+
+
+@pytest.mark.parametrize("result", [
+    {"state": "completed"}, {"state": "failed"}, {"state": "unknown"},
+    {"state": "running", "assistant_message_id": str(uuid.uuid4())},
+    {"state": "failed", "failure_code": "arbitrary-private-error"},
+    {"state": "completed", "assistant_message_id": str(uuid.uuid4()), "failure_code": "interrupted"},
+    {"state": "failed", "failure_code": "interrupted", "assistant_message_id": str(uuid.uuid4())},
+])
+def test_work_transition_model_rejects_invalid_result_fields(client, monkeypatch, result):
+    transition = AsyncMock()
+    monkeypatch.setattr(main_module.pg, "transition_work", transition, raising=False)
+    response = client.patch(
+        "/v1/internal/work-items/" + str(uuid.uuid4()),
+        json={"owner_id": "owner-work", "conversation_id": str(uuid.uuid4()), **result},
+        headers=auth_headers(),
+    )
+    assert response.status_code == 422
+    transition.assert_not_awaited()
+
+
+@pytest.mark.parametrize("state", ["running", "completed", "failed"])
+def test_work_api_returns_valid_transition_projection(client, monkeypatch, state):
+    projection = _work_projection(_work_payload())
+    projection.update(state=state, started_at="2026-09-20T12:00:01Z")
+    result = {}
+    if state == "completed":
+        result = {"assistant_message_id": str(uuid.uuid4())}
+    elif state == "failed":
+        result = {"failure_code": "interrupted"}
+    if state in {"completed", "failed"}:
+        projection["completed_at"] = "2026-09-20T12:00:02Z"
+    projection.update(result)
+    transition = AsyncMock(return_value=projection)
+    monkeypatch.setattr(main_module.pg, "transition_work", transition, raising=False)
+    response = client.patch(
+        "/v1/internal/work-items/" + projection["work_id"],
+        json={"owner_id": projection["owner_id"],
+              "conversation_id": projection["conversation_id"], "state": state, **result},
+        headers=auth_headers(),
+    )
+    assert response.status_code == 200
+    assert response.json() == projection
+    transition.assert_awaited_once_with(
+        work_id=uuid.UUID(projection["work_id"]), owner_id=projection["owner_id"],
+        conversation_id=uuid.UUID(projection["conversation_id"]), state=state,
+        assistant_message_id=(
+            uuid.UUID(projection["assistant_message_id"]) if state == "completed" else None
+        ),
+        failure_code=projection["failure_code"],
+    )
+    assert main_module.pg.messages == []
+    assert main_module.litellm.calls == []
+
+
+@pytest.mark.parametrize("error,status,detail", [
+    (WorkError("work_not_found"), 404, "work_not_found"),
+    (WorkError("work_conflict"), 409, "work_conflict"),
+    (WorkError("work_conversation_not_open"), 409, "work_conversation_not_open"),
+    (WorkError("work_result_invalid"), 422, "work_result_invalid"),
+    (WorkError("credential-sentinel"), 503, "work_unavailable"),
+    (RuntimeError("credential-sentinel prompt-sentinel source-sentinel answer-sentinel"),
+     503, "work_unavailable"),
+])
+def test_work_api_errors_are_bounded(client, monkeypatch, error, status, detail):
+    monkeypatch.setattr(main_module.pg, "transition_work", AsyncMock(side_effect=error), raising=False)
+    response = client.patch(
+        "/v1/internal/work-items/" + str(uuid.uuid4()),
+        json={"owner_id": "owner-work", "conversation_id": str(uuid.uuid4()), "state": "running"},
+        headers=auth_headers(),
+    )
+    assert response.status_code == status
+    assert response.json() == {"detail": detail}
+
+
+def test_work_current_none_and_explicit_set_contract(client, monkeypatch):
+    get_current = AsyncMock(return_value=None)
+    monkeypatch.setattr(main_module.pg, "get_current_work", get_current, raising=False)
+    params = {"owner_id": "owner-work", "client_id": "client-work"}
+    response = client.get("/v1/internal/current-work", params=params, headers=auth_headers())
+    assert response.json() == {"status": "none", "work": None}
+    get_current.assert_awaited_once_with(**params)
+    projection = _work_projection(_work_payload())
+    setter = AsyncMock(return_value=projection)
+    monkeypatch.setattr(main_module.pg, "set_current_work", setter, raising=False)
+    response = client.put(
+        "/v1/internal/current-work",
+        json={**params, "work_id": projection["work_id"]}, headers=auth_headers(),
+    )
+    assert response.json() == {"status": "resolved", "work": projection}
+    setter.assert_awaited_once_with(**params, work_id=uuid.UUID(projection["work_id"]))
+    for bad_client in ["", " ", None, "x" * 121]:
+        response = client.put(
+            "/v1/internal/current-work",
+            json={**params, "client_id": bad_client, "work_id": projection["work_id"]},
+            headers=auth_headers(),
+        )
+        assert response.status_code == 422
+    assert setter.await_count == 1
+
+
+@pytest.mark.parametrize("method,path", [
+    ("post", "/v1/internal/work-items"),
+    ("patch", "/v1/internal/work-items/" + str(uuid.uuid4())),
+    ("get", "/v1/internal/work-items/" + str(uuid.uuid4())),
+    ("get", "/v1/internal/current-work"), ("put", "/v1/internal/current-work"),
+])
+def test_work_endpoints_require_service_authentication(client, method, path):
+    assert getattr(client, method)(path).status_code == 401
+
+
+def test_work_exact_missing_and_scope_validation(client, monkeypatch):
+    lookup = AsyncMock(return_value=None)
+    monkeypatch.setattr(main_module.pg, "get_work", lookup, raising=False)
+    path = "/v1/internal/work-items/" + str(uuid.uuid4())
+    response = client.get(
+        path, params={"owner_id": "owner-work", "conversation_id": str(uuid.uuid4())},
+        headers=auth_headers(),
+    )
+    assert response.status_code == 404
+    assert response.json() == {"detail": "work_not_found"}
+    for params in ({}, {"owner_id": "owner-work"}, {"conversation_id": str(uuid.uuid4())}):
+        assert client.get(path, params=params, headers=auth_headers()).status_code == 422
+    assert lookup.await_count == 1
 
 
 def _system_prompt_text() -> str:

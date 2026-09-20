@@ -13,3 +13,7 @@ Rules:
 
 `db/migrations/legacy/` remains historical evidence only and is never replayed
 automatically by the migration runner.
+
+`20260920120000_work_items.sql` adds bounded work lifecycle records and an
+explicit owner/client current-work locator. The refreshed baseline contains the
+same schema; the runner recognizes the previous enrolled baseline checksum.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
@@ -16,7 +17,306 @@ from storage.postgres import (
     ConversationReplacementError,
     MessageAppendConflictError,
     PostgresStore,
+    WorkError,
 )
+
+
+async def _new_work(store, *, owner="owner-work", client="client-work", request="request-work"):
+    conversation = await store.create_conversation(owner, client, "private-title-sentinel")
+    work = await store.create_work(
+        owner_id=owner, conversation_id=conversation, request_id=request,
+        client_id=client, surface="web",
+    )
+    return work
+
+
+async def _change_work(store, work, state, **result):
+    return await store.transition_work(
+        work_id=work["work_id"], owner_id=work["owner_id"],
+        conversation_id=work["conversation_id"], state=state, **result,
+    )
+
+
+def test_work_create_replay_and_restart_preserve_exact_associations(postgres_database):
+    async def exercise(store):
+        work = await _new_work(store, client=None)
+        replay = await store.create_work(**{
+            key: work[key] for key in
+            ("owner_id", "conversation_id", "request_id", "client_id", "surface")
+        })
+        assert replay == work
+        assert work["state"] == "pending"
+        assert work["client_id"] is None
+        assert work["started_at"] is work["completed_at"] is None
+        assert work["assistant_message_id"] is work["failure_code"] is None
+        for changes in (
+            {"client_id": "another-client"}, {"surface": "voice"},
+            {"conversation_id": await store.create_conversation("owner-work")},
+        ):
+            values = {key: work[key] for key in
+                      ("owner_id", "conversation_id", "request_id", "client_id", "surface")}
+            with pytest.raises(WorkError, match="work_conflict"):
+                await store.create_work(**(values | changes))
+        return work
+
+    work = _run(postgres_database, exercise)
+    loaded = _run(postgres_database, lambda store: store.get_work(
+        work_id=work["work_id"], owner_id=work["owner_id"],
+        conversation_id=work["conversation_id"],
+    ))
+    assert loaded == work
+    assert _message_count(postgres_database, work["conversation_id"]) == 0
+
+
+@pytest.mark.parametrize("invalid", ["missing", "owner", "closed"])
+def test_work_creation_rejects_invalid_conversation(postgres_database, invalid):
+    async def exercise(store):
+        cid = await store.create_conversation("owner-work")
+        if invalid == "closed":
+            await store.transition_conversation_lifecycle(
+                conversation_id=cid, owner_id="owner-work", lifecycle_state="closed",
+                superseded_by_conversation_id=None,
+            )
+        with pytest.raises(WorkError):
+            await store.create_work(
+                owner_id="wrong-owner" if invalid == "owner" else "owner-work",
+                conversation_id=uuid4() if invalid == "missing" else cid,
+                request_id="request-work", client_id=None, surface="web",
+            )
+    _run(postgres_database, exercise)
+
+
+@pytest.mark.parametrize("start", ["pending", "running", "completed", "failed"])
+@pytest.mark.parametrize("target", ["pending", "running", "completed", "failed"])
+def test_work_transition_matrix(postgres_database, start, target):
+    async def exercise(store):
+        work = await _new_work(store)
+        message = await store.add_message(
+            work["conversation_id"], work["owner_id"], "assistant", "answer-body-sentinel",
+        )
+        if start in {"running", "completed"}:
+            work = await _change_work(store, work, "running")
+        if start == "completed":
+            work = await _change_work(store, work, start, assistant_message_id=message)
+        elif start == "failed":
+            work = await _change_work(store, work, start, failure_code="interrupted")
+        result = (
+            {"assistant_message_id": message} if target == "completed"
+            else {"failure_code": "interrupted"} if target == "failed" else {}
+        )
+        allowed = start == target or (start, target) in {
+            ("pending", "running"), ("pending", "failed"),
+            ("running", "completed"), ("running", "failed"),
+        }
+        if not allowed:
+            with pytest.raises(WorkError, match="work_conflict"):
+                await _change_work(store, work, target, **result)
+        else:
+            updated = await _change_work(store, work, target, **result)
+            assert updated["state"] == target
+            if start == target:
+                assert updated == work
+            if target in {"completed", "failed"}:
+                assert updated["completed_at"] >= updated["created_at"]
+            assert "answer-body-sentinel" not in str(updated)
+    _run(postgres_database, exercise)
+
+
+@pytest.mark.parametrize("invalid", ["missing", "user", "owner", "conversation"])
+def test_work_completion_validates_canonical_assistant(postgres_database, invalid):
+    async def exercise(store):
+        work = await _new_work(store)
+        await _change_work(store, work, "running")
+        owner = "other-owner" if invalid == "owner" else work["owner_id"]
+        cid = work["conversation_id"]
+        if invalid in {"owner", "conversation"}:
+            cid = await store.create_conversation(owner)
+        message = await store.add_message(
+            cid, owner, "user" if invalid == "user" else "assistant", "private-answer-sentinel",
+        )
+        with pytest.raises(WorkError, match="work_result_invalid"):
+            await _change_work(
+                store, work, "completed",
+                assistant_message_id=uuid4() if invalid == "missing" else message,
+            )
+        loaded = await store.get_work(
+            work_id=work["work_id"], owner_id=work["owner_id"],
+            conversation_id=work["conversation_id"],
+        )
+        assert loaded["state"] == "running"
+    _run(postgres_database, exercise)
+
+
+def test_work_concurrent_creation_and_conflicting_finalization(postgres_database):
+    async def exercise(store):
+        cid = await store.create_conversation("owner-work", "client-work")
+        values = {
+            "owner_id": "owner-work", "conversation_id": cid, "request_id": "same-request",
+            "client_id": "client-work", "surface": "web",
+        }
+        created = await asyncio.gather(*(store.create_work(**values) for _ in range(8)))
+        assert len({work["work_id"] for work in created}) == 1
+        work = created[0]
+        await _change_work(store, work, "running")
+        messages = [
+            await store.add_message(cid, "owner-work", "assistant", "canonical-answer-sentinel")
+            for _ in range(2)
+        ]
+        results = await asyncio.gather(*(
+            _change_work(store, work, "completed", assistant_message_id=message)
+            for message in messages
+        ), return_exceptions=True)
+        winners = [result for result in results if isinstance(result, dict)]
+        assert len(winners) == 1
+        assert sum(isinstance(result, WorkError) for result in results) == 1
+        winner = winners[0]
+        assert await _change_work(
+            store, work, "completed", assistant_message_id=winner["assistant_message_id"],
+        ) == winner
+        with pytest.raises(WorkError, match="work_conflict"):
+            await _change_work(store, work, "failed", failure_code="execution_failed")
+        return winner
+    winner = _run(postgres_database, exercise)
+    with psycopg.connect(postgres_database) as conn:
+        row = conn.execute(
+            "SELECT row_to_json(w) FROM work_items w WHERE work_id = %s",
+            (winner["work_id"],),
+        ).fetchone()[0]
+    assert set(row) == {
+        "work_id", "owner_id", "conversation_id", "request_id", "client_id", "surface",
+        "state", "created_at", "started_at", "completed_at", "assistant_message_id", "failure_code",
+    }
+    assert "canonical-answer-sentinel" not in str(row)
+
+
+def test_work_terminal_timestamp_uses_update_time_not_transaction_start(postgres_database, monkeypatch):
+    async def exercise(store):
+        work = await _new_work(store)
+        async with store.pool.connection() as waiting_conn, waiting_conn.transaction():
+            await waiting_conn.execute("SELECT now()")
+            running = await _change_work(store, work, "running")
+
+            @asynccontextmanager
+            async def waiting_connection():
+                yield waiting_conn
+
+            with monkeypatch.context() as patch:
+                patch.setattr(store.pool, "connection", waiting_connection)
+                failed = await _change_work(store, work, "failed", failure_code="interrupted")
+            assert failed["completed_at"] >= running["started_at"]
+    _run(postgres_database, exercise)
+
+
+def test_work_failed_replay_conflicts_and_result_cannot_be_reused(postgres_database):
+    async def exercise(store):
+        work = await _new_work(store)
+        failed = await _change_work(store, work, "failed", failure_code="interrupted")
+        assert await _change_work(store, work, "failed", failure_code="interrupted") == failed
+        with pytest.raises(WorkError, match="work_conflict"):
+            await _change_work(store, work, "failed", failure_code="execution_failed")
+        values = {key: work[key] for key in
+                  ("owner_id", "conversation_id", "request_id", "client_id", "surface")}
+        assert await store.create_work(**values) == failed
+        message = await store.add_message(
+            work["conversation_id"], work["owner_id"], "assistant", "one canonical result",
+        )
+        for request in ["request-one", "request-two"]:
+            other = await store.create_work(**(values | {"request_id": request}))
+            await _change_work(store, other, "running")
+            if request == "request-one":
+                await _change_work(store, other, "completed", assistant_message_id=message)
+            else:
+                with pytest.raises(WorkError, match="work_conflict"):
+                    await _change_work(store, other, "completed", assistant_message_id=message)
+    _run(postgres_database, exercise)
+
+
+def test_work_exact_lookup_isolation_and_retirement(postgres_database):
+    async def exercise(store):
+        work = await _new_work(store)
+        for owner, cid in [("other-owner", work["conversation_id"]), ("owner-work", uuid4())]:
+            assert await store.get_work(
+                work_id=work["work_id"], owner_id=owner, conversation_id=cid,
+            ) is None
+            with pytest.raises(WorkError, match="work_not_found"):
+                await store.transition_work(
+                    work_id=work["work_id"], owner_id=owner, conversation_id=cid, state="running",
+                )
+        await store.transition_conversation_lifecycle(
+            conversation_id=work["conversation_id"], owner_id="owner-work",
+            lifecycle_state="closed", superseded_by_conversation_id=None,
+        )
+        assert await store.get_work(
+            work_id=work["work_id"], owner_id="owner-work",
+            conversation_id=work["conversation_id"],
+        ) is None
+    _run(postgres_database, exercise)
+
+
+@pytest.mark.parametrize("terminal_state", ["completed", "failed"])
+def test_current_work_explicit_locator_survives_restart_and_terminal_state(
+    postgres_database, terminal_state,
+):
+    async def seed(store):
+        first = await _new_work(store)
+        assert await store.get_current_work(owner_id="owner-work", client_id="client-work") is None
+        await store.set_current_work(
+            owner_id="owner-work", client_id="client-work", work_id=first["work_id"],
+        )
+        newer = await _new_work(store, request="newer-request")
+        resolved = await store.get_current_work(owner_id="owner-work", client_id="client-work")
+        assert resolved == first  # Creating newer work does not change the explicit locator.
+        for owner, client in [("other-owner", "client-work"), ("owner-work", "other-client")]:
+            assert await store.get_current_work(owner_id=owner, client_id=client) is None
+            with pytest.raises(WorkError, match="work_not_found"):
+                await store.set_current_work(owner_id=owner, client_id=client, work_id=first["work_id"])
+        await store.set_current_work(
+            owner_id="owner-work", client_id="client-work", work_id=newer["work_id"],
+        )
+        if terminal_state == "completed":
+            await _change_work(store, newer, "running")
+            message = await store.add_message(
+                newer["conversation_id"], newer["owner_id"], "assistant", "private-result-sentinel",
+            )
+            return await _change_work(store, newer, "completed", assistant_message_id=message)
+        return await _change_work(store, newer, "failed", failure_code="interrupted")
+    terminal = _run(postgres_database, seed)
+    assert _run(postgres_database, lambda store: store.get_current_work(
+        owner_id="owner-work", client_id="client-work",
+    )) == terminal
+
+
+def test_work_without_client_cannot_be_current_work(postgres_database):
+    async def exercise(store):
+        work = await _new_work(store, client=None)
+        with pytest.raises(WorkError, match="work_not_found"):
+            await store.set_current_work(
+                owner_id=work["owner_id"], client_id="client-work", work_id=work["work_id"],
+            )
+    _run(postgres_database, exercise)
+
+
+@pytest.mark.parametrize("corruption", ["owner", "client", "conversation", "dangling"])
+def test_current_work_invalid_association_fails_closed(postgres_database, corruption):
+    work = _run(postgres_database, lambda store: _new_work(store))
+    _run(postgres_database, lambda store: store.set_current_work(
+        owner_id="owner-work", client_id="client-work", work_id=work["work_id"],
+    ))
+    with psycopg.connect(postgres_database) as conn:
+        if corruption == "dangling":
+            conn.execute("ALTER TABLE current_work DROP CONSTRAINT current_work_work_id_fkey")
+            conn.execute("UPDATE current_work SET work_id = %s", (uuid4(),))
+        elif corruption == "conversation":
+            conn.execute("UPDATE conversations SET owner_id = 'other-owner' WHERE id = %s",
+                         (work["conversation_id"],))
+        elif corruption == "client":
+            conn.execute("UPDATE work_items SET client_id = 'other-client'")
+        else:
+            conn.execute("UPDATE work_items SET owner_id = 'other-owner'")
+    with pytest.raises(WorkError, match="work_not_found"):
+        _run(postgres_database, lambda store: store.get_current_work(
+            owner_id="owner-work", client_id="client-work",
+        ))
 
 
 async def _use_store(
