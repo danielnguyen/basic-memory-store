@@ -23,6 +23,7 @@ from storage.postgres import (
     HistoryRootLineageValidationError,
     MessageAppendConflictError,
     PostgresStore,
+    WorkError,
 )
 from storage.qdrant import QdrantStore, RetrievalHit as QdrantHit
 from storage.object_store import ObjectStoreClient
@@ -66,6 +67,12 @@ from services.acquisition_history import (
 )
 
 from models import (
+    CurrentWorkResponse,
+    CurrentWorkSetRequest,
+    WorkCreateRequest,
+    WorkIdentifier,
+    WorkProjection,
+    WorkTransitionRequest,
     ArtifactCompleteRequest,
     ArtifactInitRequest,
     ArtifactInitResponse,
@@ -202,6 +209,23 @@ async def require_api_key(api_key: str | None = Security(api_key_header)) -> Non
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
+async def _work_operation(operation):
+    try:
+        return await operation
+    except WorkError as exc:
+        statuses = {
+            "work_not_found": 404,
+            "work_conflict": 409,
+            "work_conversation_not_open": 409,
+            "work_result_invalid": 422,
+        }
+        code = exc.code if exc.code in statuses else "work_unavailable"
+        raise HTTPException(status_code=statuses.get(code, 503), detail=code) from None
+    except Exception:  # noqa: BLE001 - fail closed without exposing storage exception text
+        # Work errors never expose payloads, SQL, credentials, or exception text.
+        raise HTTPException(status_code=503, detail="work_unavailable") from None
+
+
 _CLAIM_RECORD_ERROR_STATUS = {
     "claim_record_not_found": 404,
     "claim_record_conflict": 409,
@@ -252,6 +276,53 @@ app = FastAPI(
         "displayRequestDuration": True,
     },
 )
+
+
+@app.post(
+    "/v1/internal/work-items", response_model=WorkProjection,
+    tags=["work"], dependencies=[Depends(require_api_key)],
+)
+async def create_work(body: WorkCreateRequest):
+    return await _work_operation(pg.create_work(**body.model_dump()))
+
+
+@app.get(
+    "/v1/internal/work-items/{work_id}", response_model=WorkProjection,
+    tags=["work"], dependencies=[Depends(require_api_key)],
+)
+async def get_work(work_id: UUID, owner_id: WorkIdentifier, conversation_id: UUID):
+    work = await _work_operation(pg.get_work(
+        work_id=work_id, owner_id=owner_id, conversation_id=conversation_id,
+    ))
+    if work is None:
+        raise HTTPException(status_code=404, detail="work_not_found")
+    return work
+
+
+@app.patch(
+    "/v1/internal/work-items/{work_id}", response_model=WorkProjection,
+    tags=["work"], dependencies=[Depends(require_api_key)],
+)
+async def transition_work(work_id: UUID, body: WorkTransitionRequest):
+    return await _work_operation(pg.transition_work(work_id=work_id, **body.model_dump()))
+
+
+@app.put(
+    "/v1/internal/current-work", response_model=CurrentWorkResponse,
+    tags=["work"], dependencies=[Depends(require_api_key)],
+)
+async def set_current_work(body: CurrentWorkSetRequest):
+    work = await _work_operation(pg.set_current_work(**body.model_dump()))
+    return CurrentWorkResponse(status="resolved", work=work)
+
+
+@app.get(
+    "/v1/internal/current-work", response_model=CurrentWorkResponse,
+    tags=["work"], dependencies=[Depends(require_api_key)],
+)
+async def get_current_work(owner_id: WorkIdentifier, client_id: WorkIdentifier):
+    work = await _work_operation(pg.get_current_work(owner_id=owner_id, client_id=client_id))
+    return CurrentWorkResponse(status="resolved" if work is not None else "none", work=work)
 
 
 @app.middleware("http")

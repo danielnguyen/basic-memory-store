@@ -9,8 +9,15 @@ from uuid import UUID, uuid4
 from pydantic import TypeAdapter, ValidationError
 from psycopg_pool import AsyncConnectionPool
 from psycopg.types.json import Json
+from psycopg.errors import UniqueViolation
 
-from models import AcquisitionHistoryIdentifier
+from models import (
+    AcquisitionHistoryIdentifier,
+    CurrentWorkSetRequest,
+    WorkCreateRequest,
+    WorkProjection,
+    WorkTransitionRequest,
+)
 from services.acquisition_history import (
     evaluate_acquisition_candidate,
     evaluate_support_records,
@@ -30,6 +37,23 @@ _CLAIM_RECORD_COLUMNS = """
 """
 _HISTORY_ROOT_LINEAGE_METADATA_KEY = "history_root_lineage"
 _HISTORY_REQUEST_ID_ADAPTER = TypeAdapter(AcquisitionHistoryIdentifier)
+
+_WORK_FIELDS = (
+    "work_id", "owner_id", "conversation_id", "request_id", "client_id", "surface",
+    "state", "created_at", "started_at", "completed_at", "assistant_message_id",
+    "failure_code",
+)
+_WORK_COLUMNS = ", ".join(_WORK_FIELDS)
+
+
+class WorkError(Exception):
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+def _work_from_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    return WorkProjection.model_validate(dict(zip(_WORK_FIELDS, row))).model_dump()
 
 
 class HistoryRootLineageValidationError(Exception):
@@ -218,6 +242,183 @@ class PostgresStore:
 
     async def close(self) -> None:
         await self.pool.close()
+
+    async def create_work(self, **values: Any) -> dict[str, Any]:
+        body = WorkCreateRequest.model_validate(values)
+        async with (
+            self.pool.connection() as conn,
+            conn.transaction(),
+            conn.cursor() as cur,
+        ):
+            await cur.execute(
+                """SELECT lifecycle_state FROM conversations
+                   WHERE id = %s AND owner_id = %s FOR UPDATE""",
+                (body.conversation_id, body.owner_id),
+            )
+            conversation = await cur.fetchone()
+            if conversation is None:
+                raise WorkError("work_not_found")
+            if conversation[0] != "open":
+                raise WorkError("work_conversation_not_open")
+            await cur.execute(
+                f"""INSERT INTO work_items
+                    (owner_id, conversation_id, request_id, client_id, surface)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (owner_id, request_id) DO NOTHING
+                    RETURNING {_WORK_COLUMNS}""",
+                (body.owner_id, body.conversation_id, body.request_id,
+                 body.client_id, body.surface),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                await cur.execute(
+                    f"""SELECT {_WORK_COLUMNS} FROM work_items
+                        WHERE owner_id = %s AND request_id = %s FOR UPDATE""",
+                    (body.owner_id, body.request_id),
+                )
+                row = await cur.fetchone()
+            work = _work_from_row(row)
+            if any(work[key] != value for key, value in body.model_dump().items()):
+                raise WorkError("work_conflict")
+            return work
+
+    async def _read_work(
+        self, cur: Any, *, work_id: UUID, owner_id: str,
+        conversation_id: UUID | None = None,
+    ) -> dict[str, Any] | None:
+        # Revalidate associations, not resumability: already-admitted work survives retirement.
+        await cur.execute(
+            f"""SELECT {", ".join("w." + name for name in _WORK_FIELDS)}
+                FROM work_items w JOIN conversations c ON c.id = w.conversation_id
+                WHERE w.work_id = %s AND w.owner_id = %s AND c.owner_id = w.owner_id
+                  AND (%s::uuid IS NULL OR w.conversation_id = %s)
+                  AND (w.assistant_message_id IS NULL OR EXISTS (
+                    SELECT 1 FROM messages m WHERE m.id = w.assistant_message_id
+                      AND m.owner_id = w.owner_id AND m.conversation_id = w.conversation_id
+                      AND m.role = 'assistant'
+                  ))""",
+            (work_id, owner_id, conversation_id, conversation_id),
+        )
+        row = await cur.fetchone()
+        return _work_from_row(row) if row is not None else None
+
+    async def get_work(
+        self, *, work_id: UUID, owner_id: str, conversation_id: UUID,
+    ) -> dict[str, Any] | None:
+        async with (
+            self.pool.connection() as conn,
+            conn.cursor() as cur,
+        ):
+            return await self._read_work(
+                cur, work_id=work_id, owner_id=owner_id, conversation_id=conversation_id,
+            )
+
+    async def transition_work(self, *, work_id: UUID, **values: Any) -> dict[str, Any]:
+        body = WorkTransitionRequest.model_validate(values)
+        try:
+            async with (
+                self.pool.connection() as conn,
+                conn.transaction(),
+                conn.cursor() as cur,
+            ):
+                # Match the conversation-before-record lock order used by message writes.
+                await cur.execute(
+                    """SELECT lifecycle_state FROM conversations
+                       WHERE id = %s AND owner_id = %s FOR UPDATE""",
+                    (body.conversation_id, body.owner_id),
+                )
+                conversation = await cur.fetchone()
+                if conversation is None:
+                    raise WorkError("work_not_found")
+                await cur.execute(
+                    f"""SELECT {_WORK_COLUMNS} FROM work_items
+                        WHERE work_id = %s AND owner_id = %s
+                          AND conversation_id = %s FOR UPDATE""",
+                    (work_id, body.owner_id, body.conversation_id),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    raise WorkError("work_not_found")
+                work = _work_from_row(row)
+                if work["state"] == body.state:
+                    if (
+                        work["assistant_message_id"] != body.assistant_message_id
+                        or work["failure_code"] != body.failure_code
+                    ):
+                        raise WorkError("work_conflict")
+                    validated = await self._read_work(
+                        cur, work_id=work_id, owner_id=body.owner_id,
+                        conversation_id=body.conversation_id,
+                    )
+                    if validated is None:
+                        raise WorkError("work_not_found")
+                    return validated
+                if (work["state"], body.state) not in {
+                    ("pending", "running"), ("pending", "failed"),
+                    ("running", "completed"), ("running", "failed"),
+                }:
+                    raise WorkError("work_conflict")
+                if body.state == "completed":
+                    await cur.execute(
+                        """SELECT id FROM messages WHERE id = %s
+                           AND owner_id = %s AND conversation_id = %s
+                           AND role = 'assistant' FOR SHARE""",
+                        (body.assistant_message_id, body.owner_id, body.conversation_id),
+                    )
+                    if await cur.fetchone() is None:
+                        raise WorkError("work_result_invalid")
+                # The update can follow a lock wait; do not use transaction-start time.
+                await cur.execute(
+                    f"""UPDATE work_items SET state = %s,
+                        started_at = CASE WHEN %s = 'running' THEN statement_timestamp()
+                                          ELSE started_at END,
+                        completed_at = CASE WHEN %s IN ('completed', 'failed')
+                                            THEN statement_timestamp()
+                                            ELSE NULL END,
+                        assistant_message_id = %s, failure_code = %s
+                        WHERE work_id = %s RETURNING {_WORK_COLUMNS}""",
+                    (body.state, body.state, body.state, body.assistant_message_id,
+                     body.failure_code, work_id),
+                )
+                return _work_from_row(await cur.fetchone())
+        except UniqueViolation:
+            raise WorkError("work_conflict") from None
+
+    async def set_current_work(self, **values: Any) -> dict[str, Any]:
+        body = CurrentWorkSetRequest.model_validate(values)
+        async with (
+            self.pool.connection() as conn,
+            conn.transaction(),
+            conn.cursor() as cur,
+        ):
+            work = await self._read_work(cur, work_id=body.work_id, owner_id=body.owner_id)
+            if work is None or work["client_id"] != body.client_id:
+                raise WorkError("work_not_found")
+            await cur.execute(
+                """INSERT INTO current_work (owner_id, client_id, work_id)
+                   VALUES (%s, %s, %s)
+                   ON CONFLICT (owner_id, client_id)
+                   DO UPDATE SET work_id = EXCLUDED.work_id""",
+                (body.owner_id, body.client_id, body.work_id),
+            )
+            return work
+
+    async def get_current_work(self, *, owner_id: str, client_id: str) -> dict[str, Any] | None:
+        async with (
+            self.pool.connection() as conn,
+            conn.cursor() as cur,
+        ):
+            await cur.execute(
+                "SELECT work_id FROM current_work WHERE owner_id = %s AND client_id = %s",
+                (owner_id, client_id),
+            )
+            association = await cur.fetchone()
+            if association is None:
+                return None
+            work = await self._read_work(cur, work_id=association[0], owner_id=owner_id)
+            if work is None or work["client_id"] != client_id:
+                raise WorkError("work_not_found")
+            return work
 
     async def create_conversation(
         self,

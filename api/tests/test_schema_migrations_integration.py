@@ -78,7 +78,87 @@ CREATE INDEX IF NOT EXISTS idx_comparator_child_parent_active
 """
 
 
+PRE_WORK_BASELINE_CHECKSUM = "f5bdb1b7e1fbcd163526a07658bacd4806a7bd143d70f78f18f6b281a3c90fae"
+
+
+def test_pre_work_baseline_checksum_is_explicitly_compatible():
+    prior = without_work((SOURCE_DB_DIR / "baseline.sql").read_text())
+    assert sha256(prior.encode()).hexdigest() == PRE_WORK_BASELINE_CHECKSUM
+    assert PRE_WORK_BASELINE_CHECKSUM in schema_migrations.COMPATIBLE_BASELINE_CHECKSUMS
+
+
+def test_work_migration_from_current_enrolled_baseline_converges(pg_database, temp_db_dir):
+    from psycopg.rows import dict_row
+
+    current = (SOURCE_DB_DIR / "baseline.sql").read_text()
+    prior = without_work(current)
+    baseline = temp_db_dir / "baseline.sql"
+    baseline.write_text(prior)
+    # Enroll using the actual pre-change baseline, then refresh the packaged schema.
+    run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
+    cid, mid = uuid4(), uuid4()
+    with psycopg.connect(pg_database) as conn:
+        conn.execute("INSERT INTO conversations (id, owner_id) VALUES (%s, 'owner-work')", (cid,))
+        conn.execute(
+            """INSERT INTO messages (id, conversation_id, owner_id, role, content)
+               VALUES (%s, %s, 'owner-work', 'assistant', 'preserved-answer-sentinel')""",
+            (mid, cid),
+        )
+    baseline.write_text(current)
+    migration = SOURCE_DB_DIR / "migrations/managed/20260920120000_work_items.sql"
+    shutil.copy2(migration, temp_db_dir / "migrations/managed" / migration.name)
+    result = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
+    assert result["applied_migrations"] == [migration.name]
+    assert result["baseline_checksum_status"] == "compatible_prior"
+    assert run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)["applied_migrations"] == []
+    with psycopg.connect(pg_database, row_factory=dict_row) as conn:
+        assert schema_migrations.validate_schema_against_baseline(
+            conn, baseline_path=baseline, target_schema="public",
+        ) == []
+    with psycopg.connect(pg_database) as conn:
+        assert conn.execute("SELECT content FROM messages WHERE id = %s", (mid,)).fetchone() == (
+            "preserved-answer-sentinel",
+        )
+        assert conn.execute("SELECT count(*) FROM work_items").fetchone() == (0,)
+        columns = conn.execute(
+            """SELECT column_name FROM information_schema.columns
+               WHERE table_schema = 'public' AND table_name = 'work_items'"""
+        ).fetchall()
+    assert {row[0] for row in columns} == {
+        "work_id", "owner_id", "conversation_id", "request_id", "client_id", "surface",
+        "state", "created_at", "started_at", "completed_at", "assistant_message_id", "failure_code",
+    }
+
+
+def test_work_database_constraints_reject_invalid_rows(pg_database, temp_db_dir):
+    run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
+    cid = uuid4()
+    with psycopg.connect(pg_database) as conn:
+        conn.execute("INSERT INTO conversations (id, owner_id) VALUES (%s, 'owner-work')", (cid,))
+    for state, failure in [
+        ("completed", None), ("running", None), ("failed", None),
+        ("pending", "interrupted"), ("failed", "raw-private-error"), ("unknown", None),
+    ]:
+        with psycopg.connect(pg_database) as conn, pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute(
+                """INSERT INTO work_items
+                   (owner_id, conversation_id, request_id, surface, state, failure_code)
+                   VALUES ('owner-work', %s, 'request-work', 'web', %s, %s)""",
+                (cid, state, failure),
+            )
+
+
+def without_work(sql_text: str) -> str:
+    marker = "-- Durable work tracks references, never canonical answer content."
+    if marker not in sql_text:
+        return sql_text
+    start = sql_text.index(marker)
+    end = sql_text.index("-- Artifact metadata", start)
+    return sql_text[:start] + sql_text[end:]
+
+
 def without_conversation_lifecycle(sql_text: str) -> str:
+    sql_text = without_work(sql_text)
     start = sql_text.index("CREATE TABLE IF NOT EXISTS conversations")
     end = sql_text.index("CREATE TABLE IF NOT EXISTS messages", start)
     prior_conversations = """CREATE TABLE IF NOT EXISTS conversations (
@@ -95,6 +175,7 @@ def without_conversation_lifecycle(sql_text: str) -> str:
 
 
 def without_claim_support(sql_text: str) -> str:
+    sql_text = without_work(sql_text)
     normalized = sql_text.replace(
         "  schema_version TEXT NOT NULL CHECK (schema_version IN ('claim-record.v1', 'claim-record.v2')),\n",
         "  schema_version TEXT NOT NULL CHECK (schema_version = 'claim-record.v1'),\n",
@@ -1751,6 +1832,7 @@ def test_derivation_version_cleanup_migrates_only_exact_legacy_values_and_defaul
         "20260731120000_conversation_lifecycle.sql",
         "20260822120000_claim_support_record.sql",
         "20260822163000_presented_claim_support.sql",
+        "20260920120000_work_items.sql",
     ]
     assert repeated["applied_migrations"] == []
     assert column_default(pg_database, "memory_items", "derivation_version") == f"'{MEMORY_ITEM_DERIVATION_VERSION}'::text"

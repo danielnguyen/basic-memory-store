@@ -554,3 +554,80 @@ The local API defaults to `http://127.0.0.1:4321`.
 Most data endpoints use the configured API-key boundary. Consult
 [`api/.env.example`](../api/.env.example) for current configuration names and
 defaults.
+
+## Durable work (internal service API)
+
+These endpoints require the existing BMS `X-API-Key`. As with other internal
+BMS APIs, the trusted caller must supply the authenticated principal's
+`owner_id`; the service key is not an end-user identity token. Adapters must
+access work through Chat Orchestrator, which performs admission and owner
+authentication. A work ID or current-work association never grants access.
+
+| Method/path | Request | Result |
+|---|---|---|
+| `POST /v1/internal/work-items` | `owner_id`, `conversation_id`, `request_id`, nullable `client_id`, `surface` | One work projection |
+| `GET /v1/internal/work-items/{work_id}` | Required query `owner_id`, `conversation_id` | Exact authorized work projection |
+| `PATCH /v1/internal/work-items/{work_id}` | `owner_id`, `conversation_id`, `state`, optional terminal fields below | Updated work projection |
+| `PUT /v1/internal/current-work` | `owner_id`, non-empty `client_id`, `work_id` | `{"status":"resolved","work":{...}}` |
+| `GET /v1/internal/current-work` | Required query `owner_id`, non-empty `client_id` | Exact associated projection, or `{"status":"none","work":null}` |
+
+All bodies reject extra fields. Work, conversation, and assistant-message IDs
+are UUIDs. Owner, request, and client identifiers are 1–120 characters using
+the existing identifier alphabet `[A-Za-z0-9][A-Za-z0-9._:-]*`; surface uses
+that alphabet with a 64-character maximum. A genuinely absent originating
+client may be null on creation, but cannot have a current-work locator.
+
+The projection contains only `work_id`, `owner_id`, `conversation_id`,
+`request_id`, `client_id`, `surface`, `state`, `created_at`,
+`started_at`, `completed_at`, `assistant_message_id`, and `failure_code`.
+Timestamps are server-owned. `completed_at` marks either terminal state.
+There is no prompt, evidence, answer body, credential, or arbitrary metadata
+field. Pending work does not write an assistant message or invoke a provider.
+
+Creation is unique by `owner_id + request_id`. Identical replay returns the
+original work, including its current lifecycle state. Changing conversation,
+client, or surface on replay returns `409 work_conflict`. The originating
+client need not equal the conversation's original client: truthful cross-client
+provenance is preserved.
+
+Allowed changes are `pending -> running`, `pending -> failed`,
+`running -> completed`, and `running -> failed`. Repeating the same state
+and exact result is idempotent, without changing timestamps. Conflicting
+terminal results and all other state changes return `409 work_conflict`.
+Transactional row locking serializes finalization; a canonical assistant
+message may be associated with at most one work item.
+
+Completion requires `assistant_message_id` naming an existing assistant
+message in the same owner and conversation. It stores only that reference.
+The caller remains responsible for ordinary governed message/trace/support
+persistence and mandatory runtime authority before finalizing work.
+Failure requires exactly one closed `failure_code`: `interrupted`,
+`execution_failed`, `dependency_unavailable`, or `authority_unavailable`.
+Failed work cannot carry an assistant result reference. No worker, claiming,
+reclaim, or retry policy is implied by these endpoints.
+
+Exact lookups require both owner and conversation. Missing or mismatched work
+returns the same `404 work_not_found`. Work operations validate the durable
+conversation owner. Only new work admission requires an open conversation;
+creation on a retired conversation returns
+`409 work_conversation_not_open`. Invalid completion references return
+`422 work_result_invalid`; unavailable storage returns bounded
+`503 work_unavailable`.
+
+Already-admitted work remains readable and may follow its existing lifecycle
+after its conversation is closed or superseded. Pending/running work can fail
+honestly; completion requires a valid canonical assistant message already
+persisted in the same owner/conversation. These operations do not reopen the
+conversation, permit ordinary continuation, or authorize appending a new
+message to a retired conversation. Missing conversations and inconsistent
+owner/result associations still fail closed.
+
+The current-work locator is one explicit association per owner/client.
+Setting it checks the work's owner and originating client. A later explicit set
+may replace it. Creating newer work never changes it. Resolution revalidates
+the work and conversation and returns no record on owner/client mismatch;
+a dangling or inconsistent stored association returns `404 work_not_found`.
+There is no recency search or semantic selection. Existing work, including
+terminal work, remains resolvable after conversation retirement. The locator
+may also be explicitly set or replaced after retirement, subject to the same
+owner/client/work checks. No broad work-list API is provided.
