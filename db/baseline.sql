@@ -83,6 +83,26 @@ CREATE TABLE IF NOT EXISTS work_items (
   CHECK (completed_at IS NULL OR completed_at >= COALESCE(started_at, created_at))
 );
 
+-- Internal reverse binding; lifecycle remains owned by work_items.
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS work_id UUID;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'messages'::regclass
+                 AND conname = 'messages_work_id_fkey') THEN
+    ALTER TABLE messages ADD CONSTRAINT messages_work_id_fkey
+      FOREIGN KEY (work_id) REFERENCES work_items(work_id) ON DELETE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'messages'::regclass
+                 AND conname = 'messages_work_id_key') THEN
+    ALTER TABLE messages ADD CONSTRAINT messages_work_id_key UNIQUE (work_id);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'messages'::regclass
+                 AND conname = 'messages_work_assistant_check') THEN
+    ALTER TABLE messages ADD CONSTRAINT messages_work_assistant_check
+      CHECK (work_id IS NULL OR role = 'assistant');
+  END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS current_work (
   owner_id TEXT NOT NULL CHECK (
     char_length(owner_id) BETWEEN 1 AND 120 AND owner_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]*$'

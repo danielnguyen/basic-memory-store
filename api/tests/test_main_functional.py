@@ -202,6 +202,18 @@ class FakePG:
                 out.append({"role": m["role"], "content": m["content"]})
         return out
 
+    async def get_indexable_message(self, message_id):
+        row = next((m for m in self.messages if m["message_id"] == str(message_id)), None)
+        if row is None:
+            return None
+        result = {key: row.get(key) for key in (
+            "message_id", "owner_id", "conversation_id", "client_id", "role", "content",
+            "policy_metadata",
+        )}
+        result["message_id"] = uuid.UUID(result["message_id"])
+        result["conversation_id"] = uuid.UUID(result["conversation_id"])
+        return result
+
     async def get_message_snippets_by_ids(self, ids):
         idset = {str(i) for i in ids}
         out = []
@@ -699,6 +711,61 @@ def _work_projection(payload):
         "created_at": "2026-09-20T12:00:00Z", "started_at": None, "completed_at": None,
         "assistant_message_id": None, "failure_code": None,
     }
+
+
+@pytest.mark.parametrize("terminal,index_failure", [("completed", False), ("completed", True), ("failed", False)])
+def test_work_publication_indexes_only_completed_exact_result(client, monkeypatch, terminal, index_failure):
+    payload = _work_payload()
+    cid = uuid.UUID(payload["conversation_id"])
+    main_module.pg.conversations.add(cid)
+    main_module.pg.conversation_rows[cid] = {
+        "conversation_id": str(cid), "owner_id": payload["owner_id"], "client_id": payload["client_id"],
+        "lifecycle_state": "open",
+    }
+    work = _work_projection(payload) | {"state": "running", "started_at": "2026-09-20T12:00:01Z"}
+    original_lookup = main_module.pg.get_indexable_message
+
+    async def lookup(mid):
+        row = next(m for m in main_module.pg.messages if m["message_id"] == str(mid))
+        if row["metadata"].get("request_id") == payload["request_id"] and work["state"] != "completed":
+            return None
+        return await original_lookup(mid)
+    monkeypatch.setattr(main_module.pg, "get_indexable_message", lookup)
+
+    def append(content, metadata):
+        return client.post(f"/v1/conversations/{cid}/messages", headers=auth_headers(), json={
+            "owner_id": payload["owner_id"], "client_id": payload["client_id"],
+            "role": "assistant", "content": content, "metadata": metadata,
+        })
+    ordinary = append("Ordinary canonical assistant content remains indexable.", {})
+    assert ordinary.status_code == 200
+    assert len(main_module.qdrant.upserts) == 1
+    pending = append("Provisional assistant content waits for exact work completion.",
+                     {"request_id": payload["request_id"]})
+    assert pending.status_code == 200
+    assert set(pending.json()) == {"message_id"}
+    mid = pending.json()["message_id"]
+    assert len(main_module.qdrant.upserts) == 1
+
+    async def transition(**values):
+        assert values["work_id"] == uuid.UUID(work["work_id"])
+        work.update(state=terminal, completed_at="2026-09-20T12:00:02Z",
+                    assistant_message_id=mid if terminal == "completed" else None,
+                    failure_code=None if terminal == "completed" else "interrupted")
+        return dict(work)
+    monkeypatch.setattr(main_module.pg, "transition_work", transition, raising=False)
+    index = AsyncMock(side_effect=RuntimeError("index unavailable") if index_failure else None)
+    monkeypatch.setattr(main_module.qdrant, "upsert_message_vector", index)
+    body = {"owner_id": payload["owner_id"], "conversation_id": str(cid), "state": terminal}
+    body.update({"assistant_message_id": mid} if terminal == "completed" else {"failure_code": "interrupted"})
+    for _ in range(2):
+        response = client.patch("/v1/internal/work-items/" + work["work_id"], headers=auth_headers(), json=body)
+        assert response.status_code == 200
+        assert response.json()["state"] == terminal
+    assert index.await_count == (2 if terminal == "completed" else 0)
+    assert all(str(call.kwargs["message_id"]) == mid for call in index.await_args_list)
+    assert len(main_module.pg.messages) == 2
+    assert main_module.litellm.calls == []
 
 
 def test_work_api_forwards_exact_scope_and_returns_only_bounded_fields(client, monkeypatch):

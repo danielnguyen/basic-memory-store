@@ -46,6 +46,18 @@ _WORK_FIELDS = (
 _WORK_COLUMNS = ", ".join(_WORK_FIELDS)
 
 
+def _canonical_message_sql(alias: str = "messages") -> str:
+    # Internal SQL aliases only. Publication is derived from the exact work result.
+    return f"""({alias}.work_id IS NULL OR EXISTS (
+        SELECT 1 FROM work_items published_work
+        WHERE published_work.work_id = {alias}.work_id
+          AND published_work.owner_id = {alias}.owner_id
+          AND published_work.conversation_id = {alias}.conversation_id
+          AND published_work.state = 'completed'
+          AND published_work.assistant_message_id = {alias}.id
+    ))"""
+
+
 class WorkError(Exception):
     def __init__(self, code: str) -> None:
         self.code = code
@@ -296,6 +308,7 @@ class PostgresStore:
                     SELECT 1 FROM messages m WHERE m.id = w.assistant_message_id
                       AND m.owner_id = w.owner_id AND m.conversation_id = w.conversation_id
                       AND m.role = 'assistant'
+                      AND (m.work_id IS NULL OR m.work_id = w.work_id)
                   ))""",
             (work_id, owner_id, conversation_id, conversation_id),
         )
@@ -362,11 +375,17 @@ class PostgresStore:
                     await cur.execute(
                         """SELECT id FROM messages WHERE id = %s
                            AND owner_id = %s AND conversation_id = %s
-                           AND role = 'assistant' FOR SHARE""",
-                        (body.assistant_message_id, body.owner_id, body.conversation_id),
+                           AND role = 'assistant' AND (work_id IS NULL OR work_id = %s)
+                           AND NOT EXISTS (SELECT 1 FROM messages competing
+                               WHERE competing.work_id = %s AND competing.id <> %s)
+                           FOR SHARE""",
+                        (body.assistant_message_id, body.owner_id, body.conversation_id,
+                         work_id, work_id, body.assistant_message_id),
                     )
                     if await cur.fetchone() is None:
                         raise WorkError("work_result_invalid")
+                if body.state == "failed":
+                    await self._delete_provisional_work_message(cur, work)
                 # The update can follow a lock wait; do not use transaction-start time.
                 await cur.execute(
                     f"""UPDATE work_items SET state = %s,
@@ -430,6 +449,7 @@ class PostgresStore:
                         and work["started_at"] < work["created_at"])
                 ):
                     raise WorkError("work_unavailable")
+                await self._delete_provisional_work_message(cur, work)
                 await cur.execute(
                     """UPDATE work_items SET state = 'failed', failure_code = 'interrupted',
                        completed_at = statement_timestamp()
@@ -440,6 +460,20 @@ class PostgresStore:
                     raise WorkError("work_unavailable")
                 interrupted_count += 1
             return {"interrupted_count": interrupted_count}
+
+    @staticmethod
+    async def _delete_provisional_work_message(cur, work: dict[str, Any]) -> None:
+        await cur.execute(
+            "SELECT id, owner_id, conversation_id, role FROM messages WHERE work_id = %s FOR UPDATE",
+            (work["work_id"],),
+        )
+        rows = await cur.fetchall()
+        if len(rows) > 1 or any(
+            row[1:] != (work["owner_id"], work["conversation_id"], "assistant") for row in rows
+        ):
+            raise WorkError("work_unavailable")
+        # The caller holds the nonterminal work lock. Completed results are never deleted.
+        await cur.execute("DELETE FROM messages WHERE work_id = %s", (work["work_id"],))
 
     async def set_current_work(self, **values: Any) -> dict[str, Any]:
         body = CurrentWorkSetRequest.model_validate(values)
@@ -534,18 +568,18 @@ class PostgresStore:
         message_id: UUID | None = None,
     ) -> UUID:
         q_insert_generated = """
-        INSERT INTO messages (conversation_id, owner_id, client_id, role, content, metadata, policy_metadata)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO messages (conversation_id, owner_id, client_id, role, content, metadata, policy_metadata, work_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id;
         """
         q_insert_supplied = """
-        INSERT INTO messages (id, conversation_id, owner_id, client_id, role, content, metadata, policy_metadata)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO messages (id, conversation_id, owner_id, client_id, role, content, metadata, policy_metadata, work_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (id) DO NOTHING
         RETURNING id;
         """
         q_existing = """
-        SELECT conversation_id, owner_id, client_id, role, content, metadata, policy_metadata
+        SELECT conversation_id, owner_id, client_id, role, content, metadata, policy_metadata, work_id
         FROM messages
         WHERE id = %s;
         """
@@ -582,6 +616,25 @@ class PostgresStore:
                     conversation = await cur.fetchone()
                     if conversation is None:
                         raise ConversationNotFoundError()
+                    work = None
+                    request_id = (metadata or {}).get("request_id")
+                    if role == "assistant":
+                        try:
+                            request_id = _HISTORY_REQUEST_ID_ADAPTER.validate_python(
+                                request_id, strict=True,
+                            )
+                        except ValidationError:
+                            request_id = None
+                        if request_id is not None:
+                            await cur.execute(
+                                """SELECT work_id, conversation_id, state FROM work_items
+                                   WHERE owner_id = %s AND request_id = %s FOR UPDATE""",
+                                (owner_id, request_id),
+                            )
+                            work = await cur.fetchone()
+                            if work is not None and work[1] != conversation_id:
+                                raise MessageAppendConflictError()
+                    work_id = work[0] if work is not None else None
                     if message_id is not None:
                         await cur.execute(q_existing, (message_id,))
                         existing = await cur.fetchone()
@@ -595,8 +648,15 @@ class PostgresStore:
                                 content=content,
                                 metadata=canonical_metadata,
                                 policy_metadata=canonical_policy_metadata,
+                                work_id=work_id,
                             ):
                                 return message_id
+                            raise MessageAppendConflictError()
+                    if work is not None:
+                        if work[2] not in {"pending", "running"}:
+                            raise MessageAppendConflictError()
+                        await cur.execute("SELECT id FROM messages WHERE work_id = %s", (work_id,))
+                        if await cur.fetchone() is not None:
                             raise MessageAppendConflictError()
                     if conversation[0] != "open":
                         raise ConversationNotOpenError()
@@ -625,6 +685,7 @@ class PostgresStore:
                                 content,
                                 meta_param,
                                 policy_param,
+                                work_id,
                             ),
                         )
                         row = await cur.fetchone()
@@ -640,6 +701,7 @@ class PostgresStore:
                                 content,
                                 meta_param,
                                 policy_param,
+                                work_id,
                             ),
                         )
                         row = await cur.fetchone()
@@ -655,6 +717,7 @@ class PostgresStore:
                                 content=content,
                                 metadata=canonical_metadata,
                                 policy_metadata=canonical_policy_metadata,
+                                work_id=work_id,
                             ):
                                 return message_id
                             raise MessageAppendConflictError()
@@ -673,8 +736,10 @@ class PostgresStore:
         content: str,
         metadata: dict[str, Any] | None,
         policy_metadata: dict[str, Any] | None,
+        work_id: UUID | None,
     ) -> bool:
-        return row == (
+        # Migrated ordinary messages retain exact append replay without retroactive binding.
+        return (row[7] is None or row[7] == work_id) and row[:7] == (
             conversation_id,
             owner_id,
             client_id,
@@ -731,7 +796,7 @@ class PostgresStore:
             raise HistoryRootLineageValidationError() from None
 
         await cur.execute(
-            """
+            f"""
             SELECT m.id, m.owner_id, m.conversation_id, m.role, m.content,
                    m.metadata->'request_id', m.metadata->'history_root_lineage',
                    m.created_at,
@@ -740,7 +805,7 @@ class PostgresStore:
             FROM messages m
             LEFT JOIN traces t
               ON t.request_id = m.metadata->>'request_id'
-            WHERE m.id = %s
+            WHERE m.id = %s AND {_canonical_message_sql('m')}
             LIMIT 1
             FOR SHARE OF m;
             """,
@@ -813,10 +878,10 @@ class PostgresStore:
         Returns messages in chronological order (oldest -> newest) for prompt assembly.
         Includes created_at for debugging and future ordering guarantees.
         """
-        q = """
+        q = f"""
         SELECT role, content, created_at
         FROM messages
-        WHERE conversation_id = %s
+        WHERE conversation_id = %s AND {_canonical_message_sql()}
         ORDER BY created_at DESC
         LIMIT %s;
         """
@@ -842,10 +907,10 @@ class PostgresStore:
 
         id_strs = [str(i) for i in ids]
 
-        q = """
+        q = f"""
         SELECT id, conversation_id, role, content, metadata, policy_metadata, created_at
         FROM messages
-        WHERE id = ANY(%s);
+        WHERE id = ANY(%s) AND {_canonical_message_sql()};
         """
         async with self.pool.connection() as conn:
             async with conn.cursor() as cur:
@@ -868,11 +933,11 @@ class PostgresStore:
         return [by_id[mid] for mid in id_strs if mid in by_id]
 
     async def get_message_owner(self, message_id: UUID) -> str | None:
-        q = """
+        q = f"""
         SELECT c.owner_id
         FROM messages m
         JOIN conversations c ON c.id = m.conversation_id
-        WHERE m.id = %s
+        WHERE m.id = %s AND {_canonical_message_sql('m')}
         LIMIT 1;
         """
         async with self.pool.connection() as conn:
@@ -880,6 +945,21 @@ class PostgresStore:
                 await cur.execute(q, (message_id,))
                 row = await cur.fetchone()
         return str(row[0]) if row else None
+
+    async def get_indexable_message(self, message_id: UUID) -> dict[str, Any] | None:
+        query = f"""
+        SELECT id, owner_id, conversation_id, client_id, role, content, policy_metadata
+        FROM messages WHERE id = %s AND {_canonical_message_sql()}
+        """
+        async with self.pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(query, (message_id,))
+            row = await cur.fetchone()
+        if row is None:
+            return None
+        return dict(zip(
+            ("message_id", "owner_id", "conversation_id", "client_id", "role", "content",
+             "policy_metadata"), row,
+        ))
 
     async def list_conversations(
         self,
@@ -2010,7 +2090,7 @@ class PostgresStore:
         limit: int = 1000,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        where = ["owner_id = %s", "role IN ('user','assistant')"]
+        where = ["owner_id = %s", "role IN ('user','assistant')", _canonical_message_sql()]
         params: list[Any] = [owner_id]
 
         if since is not None:
@@ -2756,7 +2836,7 @@ class PostgresStore:
         limit: int = 10,
         owner_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        where = ["conversation_id = %s"]
+        where = ["conversation_id = %s", _canonical_message_sql()]
         params: list[Any] = [conversation_id]
         if owner_id is not None:
             where.append("owner_id = %s")
@@ -3076,7 +3156,7 @@ class PostgresStore:
         policy_filter: dict[str, Any] | None = None,
         owner_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        where = ["conversation_id = %s"]
+        where = ["conversation_id = %s", _canonical_message_sql()]
         params: list[Any] = [conversation_id]
         if owner_id is not None:
             where.append("owner_id = %s")
@@ -4820,10 +4900,10 @@ class PostgresStore:
 
                         if ref_type == "message":
                             await cur.execute(
-                                """
+                                f"""
                                 SELECT owner_id, conversation_id
                                 FROM messages
-                                WHERE id = %s
+                                WHERE id = %s AND {_canonical_message_sql()}
                                 LIMIT 1;
                                 """,
                                 (ref_id,),
@@ -4968,6 +5048,8 @@ class PostgresStore:
         SELECT {_CLAIM_RECORD_COLUMNS}
         FROM claim_records
         WHERE claim_id = %s AND owner_id = %s AND conversation_id = %s
+          AND EXISTS (SELECT 1 FROM messages m WHERE m.id = claim_records.assistant_message_id
+                      AND {_canonical_message_sql('m')})
         LIMIT 1;
         """
         async with self.pool.connection() as conn:
@@ -4990,7 +5072,7 @@ class PostgresStore:
             scoped_message_id = UUID(assistant_message_id) if assistant_message_id else None
         except (TypeError, ValueError):
             return []
-        filters = ["cr.owner_id = %s", "cr.conversation_id = %s"]
+        filters = ["cr.owner_id = %s", "cr.conversation_id = %s", _canonical_message_sql('m')]
         parameters: list[Any] = [owner_id, scoped_conversation_id]
         if scoped_message_id is not None:
             filters.append("cr.assistant_message_id = %s")
@@ -5021,7 +5103,7 @@ class PostgresStore:
         limit: int,
     ) -> list[dict[str, Any]]:
         bounded_limit = min(max(int(limit), 1), 50)
-        query = """
+        query = f"""
         SELECT m.id, m.owner_id, m.conversation_id, m.role, m.content,
                m.metadata->'request_id', m.metadata->'history_root_lineage',
                m.created_at,
@@ -5033,6 +5115,7 @@ class PostgresStore:
         WHERE m.owner_id = %s
           AND m.conversation_id = %s
           AND m.role = 'assistant'
+          AND {_canonical_message_sql('m')}
         ORDER BY m.created_at DESC, m.id DESC
         LIMIT %s;
         """
@@ -5073,7 +5156,7 @@ class PostgresStore:
         *,
         message_id: UUID,
     ) -> dict[str, Any] | None:
-        query = """
+        query = f"""
         SELECT m.id, m.owner_id, m.conversation_id, m.role, m.content,
                m.metadata->'request_id', m.metadata->'history_root_lineage',
                m.created_at,
@@ -5082,7 +5165,7 @@ class PostgresStore:
         FROM messages m
         LEFT JOIN traces t
           ON t.request_id = m.metadata->>'request_id'
-        WHERE m.id = %s
+        WHERE m.id = %s AND {_canonical_message_sql('m')}
         LIMIT 1;
         """
         async with self.pool.connection() as conn:

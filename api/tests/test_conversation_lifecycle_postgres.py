@@ -711,6 +711,276 @@ def test_reconcile_interrupted_work_concurrent_connections_transition_once(postg
     assert all(row[3] is not None and row[4] is None for row in rows)
 
 
+async def _publication_fixture(store, request="publication-request"):
+    from test_claim_records_postgres import DEFAULT_ANCHOR, _reference, _request
+    from services.claim_records import create_claim_record
+
+    work = await _new_work(store, request=request)
+    cid, owner = work["conversation_id"], work["owner_id"]
+    prior = await store.add_message(cid, owner, "assistant", "prior-canonical-sentinel")
+    work = await _change_work(store, work, "running")
+    mid = await store.add_message(
+        cid, owner, "assistant", DEFAULT_ANCHOR,
+        metadata={"request_id": request}, message_id=uuid4(),
+    )
+    await store.create_trace({
+        "request_id": request, "owner_id": owner, "conversation_id": cid,
+        "surface": "desktop_private", "status": "ok",
+        "references": [{"ref_type": "external_source", "ref_id": "neutral-source"}],
+    })
+    body = _request(
+        claim_id=f"claim-{request}", owner_id=owner, conversation_id=cid,
+        assistant_message_id=mid, request_id=request,
+        references=[_reference(ref_type="external_source", ref_id="neutral-source",
+                               owner_id=owner, conversation_id=None)],
+    )
+    created, claim = await create_claim_record(store, body)
+    assert created
+    await store.set_current_work(owner_id=owner, client_id=work["client_id"], work_id=work["work_id"])
+    return work, prior, mid, claim.model_dump(mode="json")
+
+
+async def _assert_publication_visibility(store, fixture, visible):
+    work, prior, mid, claim = fixture
+    cid, owner = work["conversation_id"], work["owner_id"]
+    expected = {str(prior), str(mid)} if visible else {str(prior)}
+    reads = [
+        await store.get_message_snippets_by_ids([prior, mid]),
+        await store.get_recent_message_snippets(cid),
+        await store.get_recent_message_items(cid),
+        await store.get_messages_for_reindex(owner, conversation_id=cid),
+        await store.list_assistant_trace_candidates(owner_id=owner, conversation_id=cid, limit=10),
+    ]
+    for rows in reads:
+        assert {str(row["message_id"]) for row in rows} == expected
+        assert str(work["work_id"]) not in json.dumps(rows, default=str)
+    recent = await store.get_recent_messages(cid)
+    assert len(recent) == (2 if visible else 1)
+    assert recent[0]["content"] == "prior-canonical-sentinel"
+    assert (await store.get_assistant_history_root(message_id=mid) is not None) == visible
+    assert (await store.get_indexable_message(mid) is not None) == visible
+    assert (await store.get_message_owner(mid) is not None) == visible
+    if not visible and (await store.get_conversation(cid))["lifecycle_state"] == "open":
+        from storage.postgres import HistoryRootLineageValidationError
+        with pytest.raises(HistoryRootLineageValidationError):
+            await store.add_message(
+                cid, owner, "assistant", "Not an eligible historical root.",
+                metadata={"request_id": "lineage-attempt"},
+                history_root_lineage={"schema_version": "history-root-lineage.v1",
+                                      "root_assistant_message_id": str(mid), "record_kind": "support"},
+            )
+    immediate = await store.list_assistant_trace_candidates(owner_id=owner, conversation_id=cid, limit=1)
+    assert immediate[0]["message_id"] == str(mid if visible else prior)
+    stored = await store.get_claim_record(
+        claim_id=claim["claim_id"], owner_id=owner, conversation_id=str(cid),
+    )
+    assert (stored is not None) == visible
+    listed = await store.list_claim_records(
+        owner_id=owner, conversation_id=str(cid), assistant_message_id=str(mid), request_id=None,
+        limit=10,
+    )
+    assert len(listed) == int(visible)
+    assert await store.list_assistant_trace_candidates(
+        owner_id="other-owner", conversation_id=cid, limit=1,
+    ) == []
+
+
+@pytest.mark.parametrize("retirement", [None, "closed", "superseded"])
+@pytest.mark.parametrize("terminal", ["completed", "failed", "interrupted"])
+def test_work_bound_publication_visibility_and_cleanup(postgres_database, retirement, terminal):
+    fixture = _run(postgres_database, _publication_fixture)
+    work, prior, mid, claim = fixture
+    with psycopg.connect(postgres_database) as conn:
+        assert conn.execute("SELECT work_id FROM messages WHERE id = %s", (mid,)).fetchone() == (
+            work["work_id"],
+        )
+        assert conn.execute("SELECT count(*) FROM claim_records WHERE claim_id = %s",
+                            (claim["claim_id"],)).fetchone() == (1,)
+    _run(postgres_database, lambda store: _assert_publication_visibility(store, fixture, False))
+
+    async def finish(store):
+        if retirement:
+            await _retire_work_conversation(store, work, retirement)
+        if terminal == "completed":
+            result = await _change_work(store, work, "completed", assistant_message_id=mid)
+            assert result == await _change_work(store, work, "completed", assistant_message_id=mid)
+        elif terminal == "failed":
+            await _change_work(store, work, "failed", failure_code="execution_failed")
+        else:
+            assert await store.reconcile_interrupted_work() == {"interrupted_count": 1}
+        await _assert_publication_visibility(store, fixture, terminal == "completed")
+        resolved = await store.get_current_work(owner_id=work["owner_id"], client_id=work["client_id"])
+        assert resolved["work_id"] == work["work_id"]
+        assert resolved["state"] == ("completed" if terminal == "completed" else "failed")
+        assert resolved["assistant_message_id"] == (mid if terminal == "completed" else None)
+        if retirement:
+            assert (await store.get_conversation(work["conversation_id"]))["lifecycle_state"] == retirement
+            with pytest.raises(ConversationNotOpenError):
+                await store.add_message(work["conversation_id"], work["owner_id"], "assistant", "new")
+    _run(postgres_database, finish)
+    with psycopg.connect(postgres_database) as conn:
+        assert conn.execute("SELECT count(*) FROM messages WHERE id = %s", (mid,)).fetchone() == (
+            int(terminal == "completed"),
+        )
+        assert conn.execute("SELECT count(*) FROM claim_records WHERE claim_id = %s",
+                            (claim["claim_id"],)).fetchone() == (int(terminal == "completed"),)
+        assert conn.execute("SELECT content FROM messages WHERE id = %s", (prior,)).fetchone() == (
+            "prior-canonical-sentinel",
+        )
+
+
+def test_work_bound_publication_isolation_and_binding_conflicts(postgres_database):
+    async def exercise(store):
+        first = await _publication_fixture(store, "first-publication")
+        second = await _publication_fixture(store, "second-publication")
+        work, _, mid, _ = first
+        with pytest.raises(MessageAppendConflictError):
+            await store.add_message(work["conversation_id"], work["owner_id"], "assistant", "duplicate",
+                                    metadata={"request_id": work["request_id"]})
+        with pytest.raises(MessageAppendConflictError):
+            await store.add_message(second[0]["conversation_id"], work["owner_id"], "assistant", "wrong",
+                                    metadata={"request_id": work["request_id"]})
+        with pytest.raises(WorkError, match="work_result_invalid"):
+            await _change_work(store, work, "completed", assistant_message_id=second[2])
+        await _change_work(store, work, "completed", assistant_message_id=mid)
+        await _assert_publication_visibility(store, first, True)
+        await _assert_publication_visibility(store, second, False)
+        await _change_work(store, second[0], "failed", failure_code="interrupted")
+        await _assert_publication_visibility(store, first, True)
+        with pytest.raises(MessageAppendConflictError):
+            await store.add_message(work["conversation_id"], work["owner_id"], "assistant", "late",
+                                    metadata={"request_id": work["request_id"]})
+    _run(postgres_database, exercise)
+
+
+@pytest.mark.parametrize("winner", ["completion", "interruption"])
+def test_work_bound_publication_terminal_race(postgres_database, winner):
+    fixture = _run(postgres_database, _publication_fixture)
+    work, _, mid, _ = fixture
+
+    async def race():
+        # Hold the existing lock order in the chosen winner; the independent loser waits.
+        first, second = PostgresStore(postgres_database), PostgresStore(postgres_database)
+        await first.open()
+        await second.open()
+        try:
+            async with first.pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+                await cur.execute("SELECT id FROM conversations WHERE id = %s FOR UPDATE",
+                                  (work["conversation_id"],))
+                async def lose():
+                    if winner == "completion":
+                        return await second.reconcile_interrupted_work()
+                    with pytest.raises(WorkError, match="work_conflict"):
+                        await _change_work(second, work, "completed", assistant_message_id=mid)
+                task = asyncio.create_task(lose())
+                await asyncio.sleep(0)
+                # Use the locked connection for the winner's operation through the existing pool seam.
+                original = first.pool.connection
+                @asynccontextmanager
+                async def same_connection():
+                    yield conn
+                first.pool.connection = same_connection
+                try:
+                    if winner == "completion":
+                        await _change_work(first, work, "completed", assistant_message_id=mid)
+                    else:
+                        await first.reconcile_interrupted_work()
+                finally:
+                    first.pool.connection = original
+            result = await task
+            if winner == "completion":
+                assert result == {"interrupted_count": 0}
+            await _assert_publication_visibility(first, fixture, winner == "completion")
+        finally:
+            await first.close()
+            await second.close()
+    asyncio.run(race())
+
+
+@pytest.mark.parametrize("terminal", ["completed", "failed", "interrupted"])
+def test_work_publication_v2_support_assembly_visibility_and_cascade(postgres_database, terminal):
+    from test_claim_records_postgres import _pure_v2_record_and_association
+    from services.claim_records import validate_claim_record_association
+
+    async def exercise(store):
+        record, association = _pure_v2_record_and_association(presented_to_user=True)
+        work = await _new_work(store, owner=record["owner_id"], request=record["request_id"])
+        await _change_work(store, work, "running")
+        cid = work["conversation_id"]
+        mid = await store.add_message(cid, work["owner_id"], "assistant", record["claim_anchor"],
+                                     metadata={"request_id": work["request_id"]})
+        record.update(conversation_id=str(cid), assistant_message_id=str(mid))
+        await store.create_trace({
+            **association["trace"], "request_id": record["request_id"], "conversation_id": cid,
+        })
+        result = await store.create_claim_record(record=record, validate_association=validate_claim_record_association)
+        assert result["created"] and result["record"]["presented_to_user"]
+        args = {"claim_id": record["claim_id"], "owner_id": record["owner_id"], "conversation_id": str(cid)}
+        assert await store.get_claim_record(**args) is None
+        assert (await store.create_claim_record(record=record, validate_association=validate_claim_record_association))["created"] is False
+        if terminal == "completed":
+            await _change_work(store, work, "completed", assistant_message_id=mid)
+        elif terminal == "failed":
+            await _change_work(store, work, "failed", failure_code="execution_failed")
+        else:
+            await store.reconcile_interrupted_work()
+        loaded = await store.get_claim_record(**args)
+        assert (loaded is not None) == (terminal == "completed")
+        if loaded:
+            assert loaded["support"] == record["support"]
+        return record["claim_id"]
+    claim_id = _run(postgres_database, exercise)
+    with psycopg.connect(postgres_database) as conn:
+        assert conn.execute("SELECT count(*) FROM claim_records WHERE claim_id = %s", (claim_id,)).fetchone() == (int(terminal == "completed"),)
+
+
+def test_work_publication_cleanup_corruption_rolls_back(postgres_database):
+    async def seed(store):
+        await _publication_fixture(store, "rollback-first")
+        await _publication_fixture(store, "rollback-second")
+    _run(postgres_database, seed)
+    with psycopg.connect(postgres_database) as conn:
+        mid = conn.execute("""SELECT m.id FROM work_items w JOIN messages m ON m.work_id = w.work_id
+                              ORDER BY w.conversation_id DESC, w.work_id DESC LIMIT 1""").fetchone()[0]
+        conn.execute("UPDATE messages SET owner_id = 'wrong-owner' WHERE id = %s", (mid,))
+        before = [conn.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
+                  for table in ("work_items", "messages", "claim_records")]
+    with pytest.raises(WorkError, match="work_unavailable"):
+        _run(postgres_database, lambda store: store.reconcile_interrupted_work())
+    with psycopg.connect(postgres_database) as conn:
+        assert [conn.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
+                for table in ("work_items", "messages", "claim_records")] == before
+
+
+def test_work_publication_exact_append_replay_and_ordinary_compatibility(postgres_database):
+    async def exercise(store):
+        work = await _new_work(store)
+        cid, owner = work["conversation_id"], work["owner_id"]
+        args = {"conversation_id": cid, "owner_id": owner, "role": "assistant", "content": "bound-result",
+                "metadata": {"request_id": work["request_id"]}, "message_id": uuid4()}
+        mid = await store.add_message(**args)
+        assert await store.add_message(**args) == mid
+        assert await store.get_indexable_message(mid) is None
+        for role, metadata in [("user", args["metadata"]), ("tool", args["metadata"]),
+                               ("assistant", None), ("assistant", {"request_id": "untracked"}),
+                               ("assistant", {"request_id": ["invalid"]})]:
+            ordinary = await store.add_message(cid, owner, role, "ordinary", metadata=metadata)
+            assert await store.get_indexable_message(ordinary) is not None
+        await _change_work(store, work, "running")
+        await _change_work(store, work, "completed", assistant_message_id=mid)
+        assert await store.add_message(**args) == mid
+        with pytest.raises(MessageAppendConflictError):
+            await store.add_message(**(args | {"content": "conflicting"}))
+        legacy_args = args | {"message_id": uuid4(), "metadata": {"request_id": "legacy-request"}}
+        legacy_mid = await store.add_message(**legacy_args)
+        legacy_work = await store.create_work(owner_id=owner, conversation_id=cid,
+                                             request_id="legacy-request", client_id=None, surface="web")
+        await _change_work(store, legacy_work, "running")
+        await _change_work(store, legacy_work, "completed", assistant_message_id=legacy_mid)
+        assert await store.add_message(**legacy_args) == legacy_mid
+    _run(postgres_database, exercise)
+
+
 async def _use_store(
     dsn: str,
     operation: Callable[[PostgresStore], Awaitable[Any]],

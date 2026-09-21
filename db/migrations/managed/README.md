@@ -17,3 +17,9 @@ automatically by the migration runner.
 `20260920120000_work_items.sql` adds bounded work lifecycle records and an
 explicit owner/client current-work locator. The refreshed baseline contains the
 same schema; the runner recognizes the previous enrolled baseline checksum.
+
+`20260921190000_message_work_binding.sql` adds the internal nullable assistant
+message/work association, uniqueness, role constraint, and cascading work FK.
+Existing messages remain unbound. Canonical visibility derives from exact work
+completion, not another publication state. The refreshed baseline preserves
+upgrade recognition of the preceding baseline checksum.

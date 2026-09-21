@@ -634,7 +634,29 @@ operation with bounded `503 work_unavailable`; bad rows are not skipped or
 repaired. Terminal rows and current-work associations are unchanged. A repeated
 call returns zero; concurrent callers serialize transitions using row locks.
 Only the count is returned, never work or owner enumeration. This operation
-does not resume computation or address assistant-message publication.
+does not resume computation.
+
+Assistant messages whose metadata identifies an existing owner/request work item
+are internally bound to that exact work and conversation. Callers cannot supply
+the reverse binding through message request fields. Only one assistant result
+may be bound to a work item; terminal work rejects competing message appends.
+
+A bound message is provisional until that same work commits `completed` with
+its exact message ID. Normal message, history, claim/support, retrieval, and
+reindex reads exclude provisional rows. Internal claim assembly can validate its
+own provisional assistant row before completion. The work transition itself is
+the publication boundary; there is no separate publication API or status.
+
+Failure/interruption deletes the provisional message and cascading claim/support
+rows in the same PostgreSQL transaction, without changing ordinary messages or
+the current-work locator. Canonical completed messages are not deleted by this
+cleanup. Ordinary unbound messages retain their existing behavior.
+
+Provisional results are never semantically indexed. On successful completion,
+the exact canonical message is indexed under the existing indexing policy.
+Indexing remains non-fatal and outside the PostgreSQL transaction: a failure
+does not undo canonical completion, and normal reindex can repair it. Repeated
+exact completion may repeat the same idempotent vector upsert.
 
 The current-work locator is one explicit association per owner/client.
 Setting it checks the work's owner and originating client. A later explicit set
