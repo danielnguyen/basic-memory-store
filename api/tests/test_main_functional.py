@@ -729,6 +729,41 @@ def test_work_api_forwards_exact_scope_and_returns_only_bounded_fields(client, m
     assert main_module.litellm.calls == []
 
 
+@pytest.mark.parametrize("count", [0, 2])
+def test_work_reconcile_api_is_count_only_and_provider_free(client, monkeypatch, count):
+    reconcile = AsyncMock(return_value={"interrupted_count": count})
+    monkeypatch.setattr(main_module.pg, "reconcile_interrupted_work", reconcile, raising=False)
+    response = client.post("/v1/internal/work-items/reconcile-interrupted", headers=auth_headers())
+    assert response.status_code == 200
+    assert response.json() == {"interrupted_count": count}
+    reconcile.assert_awaited_once_with()
+    assert main_module.pg.messages == []
+    assert main_module.litellm.calls == []
+
+
+@pytest.mark.parametrize("error", [
+    WorkError("work_unavailable"),
+    RuntimeError("SQL owner/conversation/work prompt answer source credential sentinel"),
+])
+def test_work_reconcile_api_storage_failure_is_bounded(client, monkeypatch, error):
+    reconcile = AsyncMock(side_effect=error)
+    monkeypatch.setattr(main_module.pg, "reconcile_interrupted_work", reconcile, raising=False)
+    response = client.post("/v1/internal/work-items/reconcile-interrupted", headers=auth_headers())
+    assert response.status_code == 503
+    assert response.json() == {"detail": "work_unavailable"}
+    assert main_module.pg.messages == []
+    assert main_module.litellm.calls == []
+
+
+@pytest.mark.parametrize("headers", [{}, {"X-API-Key": "wrong-key"}])
+def test_work_reconcile_api_requires_service_key(client, monkeypatch, headers):
+    reconcile = AsyncMock()
+    monkeypatch.setattr(main_module.pg, "reconcile_interrupted_work", reconcile, raising=False)
+    response = client.post("/v1/internal/work-items/reconcile-interrupted", headers=headers)
+    assert response.status_code == 401
+    reconcile.assert_not_awaited()
+
+
 @pytest.mark.parametrize("field,value", [
     ("owner_id", ""), ("owner_id", " "), ("owner_id", "x" * 121),
     ("request_id", ""), ("request_id", "bad/id"), ("client_id", ""),

@@ -384,6 +384,63 @@ class PostgresStore:
         except UniqueViolation:
             raise WorkError("work_conflict") from None
 
+    async def reconcile_interrupted_work(self) -> dict[str, int]:
+        # Caller must stop the former sole executor before invoking this operation.
+        async with (
+            self.pool.connection() as conn,
+            conn.transaction(),
+            conn.cursor() as cur,
+        ):
+            await cur.execute(
+                """SELECT work_id, conversation_id FROM work_items
+                   WHERE state IN ('pending', 'running')
+                   ORDER BY conversation_id, work_id""",
+            )
+            candidates = await cur.fetchall()
+            interrupted_count = 0
+            for work_id, conversation_id in candidates:
+                # Preserve the lock order of normal work/message operations.
+                await cur.execute(
+                    "SELECT owner_id FROM conversations WHERE id = %s FOR UPDATE",
+                    (conversation_id,),
+                )
+                conversation = await cur.fetchone()
+                await cur.execute(
+                    f"SELECT {_WORK_COLUMNS} FROM work_items WHERE work_id = %s FOR UPDATE",
+                    (work_id,),
+                )
+                row = await cur.fetchone()
+                if conversation is None or row is None:
+                    raise WorkError("work_unavailable")
+                work = _work_from_row(row)
+                if (
+                    work["conversation_id"] != conversation_id
+                    or work["owner_id"] != conversation[0]
+                ):
+                    raise WorkError("work_unavailable")
+                # A concurrent reconciler/finalizer may have committed during the lock wait.
+                if work["state"] in {"completed", "failed"}:
+                    continue
+                if (
+                    (work["state"] == "running") != (work["started_at"] is not None)
+                    or work["completed_at"] is not None
+                    or work["assistant_message_id"] is not None
+                    or work["failure_code"] is not None
+                    or (work["started_at"] is not None
+                        and work["started_at"] < work["created_at"])
+                ):
+                    raise WorkError("work_unavailable")
+                await cur.execute(
+                    """UPDATE work_items SET state = 'failed', failure_code = 'interrupted',
+                       completed_at = statement_timestamp()
+                       WHERE work_id = %s AND state IN ('pending', 'running')""",
+                    (work_id,),
+                )
+                if cur.rowcount != 1:
+                    raise WorkError("work_unavailable")
+                interrupted_count += 1
+            return {"interrupted_count": interrupted_count}
+
     async def set_current_work(self, **values: Any) -> dict[str, Any]:
         body = CurrentWorkSetRequest.model_validate(values)
         async with (

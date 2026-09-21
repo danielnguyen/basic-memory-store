@@ -351,6 +351,12 @@ class WorkProjection(WorkCreateRequest):
     failure_code: WorkFailureCode | None
 
 
+class WorkReconcileResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    interrupted_count: int = Field(ge=0)
+
+
 class CurrentWorkSetRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

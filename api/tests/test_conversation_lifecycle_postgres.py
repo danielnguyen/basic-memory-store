@@ -570,6 +570,147 @@ def test_retired_work_corruption_remains_hidden(postgres_database, corruption):
     _run(postgres_database, verify)
 
 
+@pytest.mark.parametrize("lifecycle", ["open", "closed", "superseded"])
+def test_reconcile_interrupted_work_preserves_identity_terminals_and_locator(
+    postgres_database, lifecycle,
+):
+    async def seed(store):
+        pending = await _new_work(store, request="pending-request")
+        await store.set_current_work(
+            owner_id=pending["owner_id"], client_id=pending["client_id"],
+            work_id=pending["work_id"],
+        )
+        running = await _new_work(store, owner="other-owner", request="running-request")
+        running = await _change_work(store, running, "running")
+        completed = await _new_work(store, request="completed-request")
+        message = await store.add_message(
+            completed["conversation_id"], completed["owner_id"], "assistant", "canonical-sentinel",
+        )
+        await _change_work(store, completed, "running")
+        completed = await _change_work(store, completed, "completed", assistant_message_id=message)
+        failed = await _new_work(store, request="failed-request")
+        failed = await _change_work(store, failed, "failed", failure_code="execution_failed")
+        if lifecycle != "open":
+            for work in (pending, running):
+                await _retire_work_conversation(store, work, lifecycle)
+        return pending, running, completed, failed
+
+    works = _run(postgres_database, seed)
+    with psycopg.connect(postgres_database) as conn:
+        conversations = conn.execute("SELECT * FROM conversations ORDER BY id").fetchall()
+        messages = conn.execute("SELECT * FROM messages ORDER BY id").fetchall()
+        locators = conn.execute("SELECT * FROM current_work ORDER BY owner_id, client_id").fetchall()
+        before = conn.execute("SELECT clock_timestamp()").fetchone()[0]
+    assert _run(postgres_database, lambda store: store.reconcile_interrupted_work()) == {
+        "interrupted_count": 2,
+    }
+    with psycopg.connect(postgres_database) as conn:
+        after = conn.execute("SELECT clock_timestamp()").fetchone()[0]
+
+    async def readback(store):
+        loaded = []
+        for original in works:
+            work = await store.get_work(
+                work_id=original["work_id"], owner_id=original["owner_id"],
+                conversation_id=original["conversation_id"],
+            )
+            if original["state"] in {"pending", "running"}:
+                assert work == original | {
+                    "state": "failed", "failure_code": "interrupted",
+                    "completed_at": work["completed_at"],
+                }
+                assert before <= work["completed_at"] <= after
+                assert work["assistant_message_id"] is None
+            else:
+                assert work == original
+            loaded.append(work)
+        assert loaded[0]["started_at"] is None
+        assert loaded[1]["started_at"] == works[1]["started_at"]
+        assert await store.get_current_work(
+            owner_id=works[0]["owner_id"], client_id=works[0]["client_id"],
+        ) == loaded[0]
+        return loaded
+
+    first = _run(postgres_database, readback)  # New pool/connection after the transaction.
+    assert _run(postgres_database, lambda store: store.reconcile_interrupted_work()) == {
+        "interrupted_count": 0,
+    }
+    assert _run(postgres_database, readback) == first
+    with psycopg.connect(postgres_database) as conn:
+        assert conn.execute("SELECT * FROM conversations ORDER BY id").fetchall() == conversations
+        assert conn.execute("SELECT * FROM messages ORDER BY id").fetchall() == messages
+        assert conn.execute(
+            "SELECT * FROM current_work ORDER BY owner_id, client_id",
+        ).fetchall() == locators
+
+
+@pytest.mark.parametrize("corruption", ["owner", "missing_conversation", "started", "failure_code"])
+def test_reconcile_interrupted_work_corruption_rolls_back_every_row(postgres_database, corruption):
+    async def seed(store):
+        await _new_work(store, request="first")
+        await _new_work(store, request="second")
+    _run(postgres_database, seed)
+    with psycopg.connect(postgres_database) as conn:
+        # Corrupt the last processed row, so rollback must undo the earlier valid update.
+        work_id, conversation = conn.execute(
+            "SELECT work_id, conversation_id FROM work_items ORDER BY conversation_id, work_id",
+        ).fetchall()[-1]
+        if corruption == "owner":
+            conn.execute("UPDATE conversations SET owner_id = 'mismatch' WHERE id = %s",
+                         (conversation,))
+        elif corruption == "missing_conversation":
+            conn.execute("SET LOCAL session_replication_role = replica")
+            conn.execute("DELETE FROM conversations WHERE id = %s", (conversation,))
+        else:
+            conn.execute("ALTER TABLE work_items DROP CONSTRAINT work_items_state_fields_check")
+            if corruption == "started":
+                conn.execute("UPDATE work_items SET started_at = created_at WHERE work_id = %s",
+                             (work_id,))
+            else:
+                conn.execute("UPDATE work_items SET failure_code = 'interrupted' WHERE work_id = %s",
+                             (work_id,))
+        before = conn.execute("SELECT * FROM work_items ORDER BY work_id").fetchall()
+    with pytest.raises(WorkError, match="work_unavailable"):
+        _run(postgres_database, lambda store: store.reconcile_interrupted_work())
+    with psycopg.connect(postgres_database) as conn:
+        assert conn.execute("SELECT * FROM work_items ORDER BY work_id").fetchall() == before
+
+
+def test_reconcile_interrupted_work_concurrent_connections_transition_once(postgres_database):
+    async def seed(store):
+        pending = await _new_work(store, request="pending")
+        running = await _new_work(store, request="running")
+        await _change_work(store, running, "running")
+        return pending, running
+    works = _run(postgres_database, seed)
+
+    async def race():
+        ready = asyncio.Event()
+        entered = 0
+
+        async def reconcile(store):
+            nonlocal entered
+            entered += 1
+            if entered == 2:
+                ready.set()
+            await ready.wait()
+            return await store.reconcile_interrupted_work()
+
+        return await asyncio.gather(*[
+            _use_store(postgres_database, reconcile) for _ in range(2)
+        ])
+
+    results = asyncio.run(race())
+    assert sorted(result["interrupted_count"] for result in results) == [0, 2]
+    with psycopg.connect(postgres_database) as conn:
+        rows = conn.execute(
+            "SELECT work_id, state, failure_code, completed_at, assistant_message_id FROM work_items",
+        ).fetchall()
+    assert {row[0] for row in rows} == {work["work_id"] for work in works}
+    assert all(row[1:3] == ("failed", "interrupted") for row in rows)
+    assert all(row[3] is not None and row[4] is None for row in rows)
+
+
 async def _use_store(
     dsn: str,
     operation: Callable[[PostgresStore], Awaitable[Any]],
