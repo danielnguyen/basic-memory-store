@@ -79,6 +79,73 @@ CREATE INDEX IF NOT EXISTS idx_comparator_child_parent_active
 
 
 PRE_WORK_BASELINE_CHECKSUM = "f5bdb1b7e1fbcd163526a07658bacd4806a7bd143d70f78f18f6b281a3c90fae"
+PRE_MESSAGE_WORK_BASELINE_CHECKSUM = "fec5845fb58defef515f86b84ad7b893456c355ef3788f440530e2685c6995da"
+MESSAGE_WORK_MIGRATION = "20260921190000_message_work_binding.sql"
+
+
+def without_message_work(sql_text: str) -> str:
+    start = sql_text.index("-- Internal reverse binding; lifecycle remains owned by work_items.")
+    end = sql_text.index("CREATE TABLE IF NOT EXISTS current_work", start)
+    return sql_text[:start] + sql_text[end:]
+
+
+def test_message_work_migration_preserves_enrolled_state_and_converges(pg_database, temp_db_dir):
+    from psycopg.rows import dict_row
+    current = (SOURCE_DB_DIR / "baseline.sql").read_text()
+    prior = without_message_work(current)
+    assert sha256(prior.encode()).hexdigest() == PRE_MESSAGE_WORK_BASELINE_CHECKSUM
+    assert PRE_MESSAGE_WORK_BASELINE_CHECKSUM in schema_migrations.COMPATIBLE_BASELINE_CHECKSUMS
+    baseline = temp_db_dir / "baseline.sql"
+    baseline.write_text(prior)
+    run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
+    cid, mid, wid = uuid4(), uuid4(), uuid4()
+    with psycopg.connect(pg_database) as conn:
+        conn.execute("INSERT INTO conversations (id, owner_id) VALUES (%s, 'owner')", (cid,))
+        conn.execute("""INSERT INTO messages (id, owner_id, conversation_id, role, content)
+                     VALUES (%s, 'owner', %s, 'assistant', 'historical-content-sentinel')""", (mid, cid))
+        conn.execute("""INSERT INTO work_items (work_id, owner_id, conversation_id, request_id, client_id, surface)
+                     VALUES (%s, 'owner', %s, 'request', 'client', 'web')""", (wid, cid))
+        conn.execute("INSERT INTO current_work VALUES ('owner', 'client', %s)", (wid,))
+        messages = conn.execute("SELECT * FROM messages").fetchall()
+        works = conn.execute("SELECT * FROM work_items").fetchall()
+        locators = conn.execute("SELECT * FROM current_work").fetchall()
+    baseline.write_text(current)
+    shutil.copy2(SOURCE_DB_DIR / "migrations/managed" / MESSAGE_WORK_MIGRATION,
+                 temp_db_dir / "migrations/managed" / MESSAGE_WORK_MIGRATION)
+    result = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
+    assert result["applied_migrations"] == [MESSAGE_WORK_MIGRATION]
+    assert result["baseline_checksum_status"] == "compatible_prior"
+    with psycopg.connect(pg_database, row_factory=dict_row) as conn:
+        assert schema_migrations.validate_schema_against_baseline(conn, baseline_path=baseline,
+                                                                target_schema="public") == []
+    with psycopg.connect(pg_database) as conn:
+        assert conn.execute("SELECT * FROM messages").fetchall() == [row + (None,) for row in messages]
+        assert conn.execute("SELECT * FROM work_items").fetchall() == works
+        assert conn.execute("SELECT * FROM current_work").fetchall() == locators
+    assert run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)["applied_migrations"] == []
+
+
+def test_message_work_database_constraints_and_rollback(pg_database, temp_db_dir):
+    run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
+    cid, wid = uuid4(), uuid4()
+    with psycopg.connect(pg_database) as conn:
+        conn.execute("INSERT INTO conversations (id, owner_id) VALUES (%s, 'owner')", (cid,))
+        conn.execute("""INSERT INTO work_items (work_id, owner_id, conversation_id, request_id, surface)
+                     VALUES (%s, 'owner', %s, 'request', 'web')""", (wid, cid))
+        conn.execute("""INSERT INTO messages (owner_id, conversation_id, role, content, work_id)
+                     VALUES ('owner', %s, 'assistant', 'provisional', %s)""", (cid, wid))
+    for role, work_id, error in [
+        ('user', wid, psycopg.errors.CheckViolation),
+        ('assistant', wid, psycopg.errors.UniqueViolation),
+        ('assistant', uuid4(), psycopg.errors.ForeignKeyViolation),
+    ]:
+        with pytest.raises(error), psycopg.connect(pg_database) as conn:
+            conn.execute("""INSERT INTO messages (owner_id, conversation_id, role, content, work_id)
+                         VALUES ('owner', %s, %s, 'rejected', %s)""", (cid, role, work_id))
+    with psycopg.connect(pg_database) as conn:
+        assert conn.execute("SELECT content FROM messages").fetchall() == [("provisional",)]
+        conn.execute("DELETE FROM work_items WHERE work_id = %s", (wid,))
+        assert conn.execute("SELECT count(*) FROM messages").fetchone() == (0,)
 
 
 def test_pre_work_baseline_checksum_is_explicitly_compatible():
@@ -107,8 +174,10 @@ def test_work_migration_from_current_enrolled_baseline_converges(pg_database, te
     baseline.write_text(current)
     migration = SOURCE_DB_DIR / "migrations/managed/20260920120000_work_items.sql"
     shutil.copy2(migration, temp_db_dir / "migrations/managed" / migration.name)
+    shutil.copy2(SOURCE_DB_DIR / "migrations/managed" / MESSAGE_WORK_MIGRATION,
+                 temp_db_dir / "migrations/managed" / MESSAGE_WORK_MIGRATION)
     result = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
-    assert result["applied_migrations"] == [migration.name]
+    assert result["applied_migrations"] == [migration.name, MESSAGE_WORK_MIGRATION]
     assert result["baseline_checksum_status"] == "compatible_prior"
     assert run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)["applied_migrations"] == []
     with psycopg.connect(pg_database, row_factory=dict_row) as conn:
@@ -1833,6 +1902,7 @@ def test_derivation_version_cleanup_migrates_only_exact_legacy_values_and_defaul
         "20260822120000_claim_support_record.sql",
         "20260822163000_presented_claim_support.sql",
         "20260920120000_work_items.sql",
+        MESSAGE_WORK_MIGRATION,
     ]
     assert repeated["applied_migrations"] == []
     assert column_default(pg_database, "memory_items", "derivation_version") == f"'{MEMORY_ITEM_DERIVATION_VERSION}'::text"

@@ -313,7 +313,10 @@ async def get_work(work_id: UUID, owner_id: WorkIdentifier, conversation_id: UUI
     tags=["work"], dependencies=[Depends(require_api_key)],
 )
 async def transition_work(work_id: UUID, body: WorkTransitionRequest):
-    return await _work_operation(pg.transition_work(work_id=work_id, **body.model_dump()))
+    work = await _work_operation(pg.transition_work(work_id=work_id, **body.model_dump()))
+    if work["state"] == "completed":
+        await _index_canonical_message(work["assistant_message_id"])
+    return work
 
 
 @app.put(
@@ -904,24 +907,20 @@ async def add_message(conversation_id: str, body: MessageCreateRequest):
         logging.exception("message append failed")
         raise HTTPException(status_code=503, detail="message_append_unavailable") from None
 
-    if body.role in ("user", "assistant") and should_index_message(body.role, body.content):
-        try:
-            await qdrant.upsert_message_vector(
-                message_id=mid,
-                owner_id=body.owner_id,
-                conversation_id=cid,
-                role=body.role,
-                content=body.content,
-                client_id=body.client_id,
-                policy_metadata=policy_metadata,
-            )
-        except Exception:
-            logging.exception(
-                "qdrant upsert failed (non-fatal)",
-                extra={"message_id": str(mid)},
-            )
+    if body.role in ("user", "assistant"):
+        await _index_canonical_message(mid)
 
     return MessageCreateResponse(message_id=str(mid))
+
+
+async def _index_canonical_message(message_id: UUID) -> None:
+    try:
+        message = await pg.get_indexable_message(message_id)
+        if message is not None and should_index_message(message["role"], message["content"]):
+            await qdrant.upsert_message_vector(**message)
+    except Exception:
+        # PostgreSQL completion is authoritative; ordinary reindex can repair this later.
+        logging.warning("canonical message indexing unavailable (non-fatal)")
 
 
 @app.post(
