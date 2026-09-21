@@ -566,12 +566,13 @@ authentication. A work ID or current-work association never grants access.
 | Method/path | Request | Result |
 |---|---|---|
 | `POST /v1/internal/work-items` | `owner_id`, `conversation_id`, `request_id`, nullable `client_id`, `surface` | One work projection |
+| `POST /v1/internal/work-items/reconcile-interrupted` | No body; service key required | `{"interrupted_count":0}` (number newly failed) |
 | `GET /v1/internal/work-items/{work_id}` | Required query `owner_id`, `conversation_id` | Exact authorized work projection |
 | `PATCH /v1/internal/work-items/{work_id}` | `owner_id`, `conversation_id`, `state`, optional terminal fields below | Updated work projection |
 | `PUT /v1/internal/current-work` | `owner_id`, non-empty `client_id`, `work_id` | `{"status":"resolved","work":{...}}` |
 | `GET /v1/internal/current-work` | Required query `owner_id`, non-empty `client_id` | Exact associated projection, or `{"status":"none","work":null}` |
 
-All bodies reject extra fields. Work, conversation, and assistant-message IDs
+All modeled request bodies reject extra fields. Work, conversation, and assistant-message IDs
 are UUIDs. Owner, request, and client identifiers are 1–120 characters using
 the existing identifier alphabet `[A-Za-z0-9][A-Za-z0-9._:-]*`; surface uses
 that alphabet with a 64-character maximum. A genuinely absent originating
@@ -621,6 +622,19 @@ persisted in the same owner/conversation. These operations do not reopen the
 conversation, permit ordinary continuation, or authorize appending a new
 message to a retired conversation. Missing conversations and inconsistent
 owner/result associations still fail closed.
+
+Interrupted-work reconciliation is an explicit service operation, not automatic
+recovery. The trusted caller must ensure the former sole execution process is
+gone and invoke it before admitting new execution. One PostgreSQL transaction
+changes valid pending/running work to `failed` with `failure_code=interrupted`
+and a server-owned terminal timestamp. Identity and `started_at` are preserved;
+no assistant result is created. Closed/superseded conversations remain retired.
+Any inconsistent association/lifecycle or storage failure aborts the entire
+operation with bounded `503 work_unavailable`; bad rows are not skipped or
+repaired. Terminal rows and current-work associations are unchanged. A repeated
+call returns zero; concurrent callers serialize transitions using row locks.
+Only the count is returned, never work or owner enumeration. This operation
+does not resume computation or address assistant-message publication.
 
 The current-work locator is one explicit association per owner/client.
 Setting it checks the work's owner and originating client. A later explicit set

@@ -72,6 +72,7 @@ from models import (
     WorkCreateRequest,
     WorkIdentifier,
     WorkProjection,
+    WorkReconcileResponse,
     WorkTransitionRequest,
     ArtifactCompleteRequest,
     ArtifactInitRequest,
@@ -284,6 +285,14 @@ app = FastAPI(
 )
 async def create_work(body: WorkCreateRequest):
     return await _work_operation(pg.create_work(**body.model_dump()))
+
+
+@app.post(
+    "/v1/internal/work-items/reconcile-interrupted", response_model=WorkReconcileResponse,
+    tags=["work"], dependencies=[Depends(require_api_key)],
+)
+async def reconcile_interrupted_work():
+    return await _work_operation(pg.reconcile_interrupted_work())
 
 
 @app.get(
