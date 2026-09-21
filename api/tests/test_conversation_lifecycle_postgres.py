@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta, timezone
@@ -35,6 +36,122 @@ async def _change_work(store, work, state, **result):
         work_id=work["work_id"], owner_id=work["owner_id"],
         conversation_id=work["conversation_id"], state=state, **result,
     )
+
+
+@pytest.mark.parametrize("has_prior_assistant", [True, False])
+def test_pending_work_does_not_replace_immediate_assistant_history(
+    postgres_database, has_prior_assistant,
+):
+    owner = "owner-history-work"
+    pending_request = "request-pending-work-sentinel"
+    newest_request = "request-canonical-newest"
+    newest_content = "CANONICAL-NEWEST-SENTINEL: the recorded setting is active."
+
+    async def seed(store):
+        conversation = await store.create_conversation(owner, "client-history")
+        newest_message = None
+        if has_prior_assistant:
+            for request, content in [
+                ("request-canonical-older", "CANONICAL-OLDER-SENTINEL: the setting was inactive."),
+                (newest_request, newest_content),
+            ]:
+                newest_message = await store.add_message(
+                    conversation, owner, "assistant", content,
+                    metadata={"request_id": request},
+                )
+                await store.create_trace({
+                    "owner_id": owner, "conversation_id": conversation,
+                    "request_id": request, "surface": "web", "status": "ok",
+                })
+        # Newer messages outside the exact owner/conversation are never candidates.
+        other_conversation = await store.create_conversation(owner, "other-client")
+        foreign_conversation = await store.create_conversation("foreign-owner", "client-history")
+        for scope_owner, scope_conversation in [
+            (owner, other_conversation), ("foreign-owner", foreign_conversation),
+        ]:
+            await store.add_message(
+                scope_conversation, scope_owner, "assistant", "OTHER-SCOPE-SENTINEL",
+                metadata={"request_id": "request-other-scope"},
+            )
+        return conversation, newest_message, other_conversation, foreign_conversation
+
+    conversation, newest_message, other_conversation, foreign_conversation = _run(
+        postgres_database, seed,
+    )
+
+    async def immediate_candidate(store):
+        # This is the exact bounded storage query used by both immediate-history resolvers.
+        return await store.list_assistant_trace_candidates(
+            owner_id=owner, conversation_id=conversation, limit=1,
+        )
+
+    before = _run(postgres_database, immediate_candidate)
+    if has_prior_assistant:
+        assert len(before) == 1
+        assert before[0]["message_id"] == str(newest_message)
+        assert before[0]["message_content"] == newest_content
+        assert before[0]["message_request_id"] == before[0]["trace_request_id"] == newest_request
+        assert before[0]["message_owner_id"] == before[0]["trace_owner_id"] == owner
+        assert before[0]["message_conversation_id"] == str(conversation)
+        assert before[0]["trace_conversation_id"] == str(conversation)
+        assert before[0]["message_role"] == "assistant"
+        assert before[0]["trace_status"] == "ok"
+    else:
+        assert before == []
+
+    with psycopg.connect(postgres_database) as conn:
+        messages_before = conn.execute("SELECT * FROM messages ORDER BY id").fetchall()
+    count_before = _message_count(postgres_database, conversation)
+    pending = _run(postgres_database, lambda store: store.create_work(
+        owner_id=owner, conversation_id=conversation, request_id=pending_request,
+        client_id="client-history", surface="web",
+    ))
+    # Reopen storage: the assertions cannot pass merely because a fake retained local state.
+    loaded = _run(postgres_database, lambda store: store.get_work(
+        owner_id=owner, conversation_id=conversation, work_id=pending["work_id"],
+    ))
+    assert loaded == pending
+    assert loaded["state"] == "pending"
+    assert loaded["assistant_message_id"] is None
+    assert loaded["started_at"] is loaded["completed_at"] is loaded["failure_code"] is None
+    assert set(loaded) == {
+        "work_id", "owner_id", "conversation_id", "request_id", "client_id", "surface",
+        "state", "created_at", "started_at", "completed_at", "assistant_message_id", "failure_code",
+    }
+    assert "SENTINEL: the" not in json.dumps(loaded, default=str)
+    assert _message_count(postgres_database, conversation) == count_before
+    with psycopg.connect(postgres_database) as conn:
+        assert conn.execute("SELECT * FROM messages ORDER BY id").fetchall() == messages_before
+        assistant_contents = conn.execute(
+            "SELECT content FROM messages WHERE role = 'assistant'",
+        ).fetchall()
+    for (content,) in assistant_contents:
+        assert all(value not in content for value in (
+            "still working", "pending", "running", str(pending["work_id"]), pending_request,
+        ))
+    after = _run(postgres_database, immediate_candidate)
+    assert after == before
+    serialized = json.dumps(after, default=str)
+    assert str(pending["work_id"]) not in serialized
+    assert pending_request not in serialized
+    assert "pending" not in serialized
+
+    async def isolated(store):
+        for scoped_owner, scoped_conversation in [
+            ("foreign-owner", conversation), (owner, foreign_conversation),
+        ]:
+            assert await store.list_assistant_trace_candidates(
+                owner_id=scoped_owner, conversation_id=scoped_conversation, limit=1,
+            ) == []
+        for scoped_owner, scoped_conversation in [
+            ("foreign-owner", conversation), (owner, other_conversation),
+        ]:
+            assert await store.get_work(
+                owner_id=scoped_owner, conversation_id=scoped_conversation,
+                work_id=pending["work_id"],
+            ) is None
+
+    _run(postgres_database, isolated)
 
 
 def test_work_create_replay_and_restart_preserve_exact_associations(postgres_database):
