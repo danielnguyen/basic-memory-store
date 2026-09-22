@@ -72,6 +72,7 @@ from models import (
     WorkCreateRequest,
     WorkIdentifier,
     WorkProjection,
+    WorkResultResponse,
     WorkReconcileResponse,
     WorkTransitionRequest,
     ArtifactCompleteRequest,
@@ -306,6 +307,22 @@ async def get_work(work_id: UUID, owner_id: WorkIdentifier, conversation_id: UUI
     if work is None:
         raise HTTPException(status_code=404, detail="work_not_found")
     return work
+
+
+@app.get(
+    "/v1/internal/work-items/{work_id}/result", response_model=WorkResultResponse,
+    tags=["work"], dependencies=[Depends(require_api_key)],
+)
+async def get_work_result(work_id: UUID, owner_id: WorkIdentifier, conversation_id: UUID):
+    result = await _work_operation(pg.get_work_result(
+        work_id=work_id, owner_id=owner_id, conversation_id=conversation_id,
+    ))
+    if result is None:
+        raise HTTPException(status_code=404, detail="work_not_found")
+    try:
+        return WorkResultResponse.model_validate(result)
+    except ValueError:
+        raise HTTPException(status_code=503, detail="work_unavailable") from None
 
 
 @app.patch(

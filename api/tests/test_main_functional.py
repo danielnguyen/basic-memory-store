@@ -713,6 +713,116 @@ def _work_projection(payload):
     }
 
 
+def _work_result_response(state="completed"):
+    work = _work_projection(_work_payload())
+    work["state"] = state
+    if state in {"running", "completed"}:
+        work["started_at"] = work["created_at"]
+    if state in {"completed", "failed"}:
+        work["completed_at"] = work["created_at"]
+    if state == "failed":
+        work["failure_code"] = "interrupted"
+    result = None
+    if state == "completed":
+        work["assistant_message_id"] = str(uuid.uuid4())
+        result = {"assistant_message_id": work["assistant_message_id"], "content": "Exact\ncanonical α."}
+    return {"work": work, "result": result}
+
+
+def _install_result_reader(monkeypatch, **mock_options):
+    reader = AsyncMock(**mock_options)
+    # No other database method or provider/index method is available to this endpoint.
+    monkeypatch.setattr(main_module, "pg", types.SimpleNamespace(get_work_result=reader))
+    monkeypatch.setattr(main_module, "qdrant", object())
+    monkeypatch.setattr(main_module, "litellm", object())
+    return reader
+
+
+@pytest.mark.parametrize("state", ["pending", "running", "completed", "failed"])
+def test_work_result_api_exact_read_only_projection(client, monkeypatch, state):
+    value = _work_result_response(state)
+    work = value["work"]
+    reader = _install_result_reader(monkeypatch, return_value=value)
+    response = client.get(f"/v1/internal/work-items/{work['work_id']}/result",
+                          params={"owner_id": work["owner_id"], "conversation_id": work["conversation_id"]},
+                          headers=auth_headers())
+    assert response.status_code == 200
+    assert response.json() == value
+    assert set(response.json()) == {"work", "result"}
+    if state == "completed":
+        assert set(response.json()["result"]) == {"assistant_message_id", "content"}
+    else:
+        assert response.json()["result"] is None
+    reader.assert_awaited_once_with(work_id=uuid.UUID(work["work_id"]), owner_id=work["owner_id"],
+                                    conversation_id=uuid.UUID(work["conversation_id"]))
+
+
+@pytest.mark.parametrize("headers", [{}, {"X-API-Key": "wrong-key"}])
+def test_work_result_api_requires_authentication(client, monkeypatch, headers):
+    reader = _install_result_reader(monkeypatch, return_value=None)
+    response = client.get(f"/v1/internal/work-items/{uuid.uuid4()}/result",
+                          params={"owner_id": "owner", "conversation_id": str(uuid.uuid4())}, headers=headers)
+    assert response.status_code == 401
+    reader.assert_not_awaited()
+
+
+@pytest.mark.parametrize("missing", ["owner_id", "conversation_id"])
+def test_work_result_api_requires_exact_scope(client, monkeypatch, missing):
+    reader = _install_result_reader(monkeypatch, return_value=None)
+    params = {"owner_id": "owner", "conversation_id": str(uuid.uuid4())}
+    del params[missing]
+    response = client.get(f"/v1/internal/work-items/{uuid.uuid4()}/result", params=params, headers=auth_headers())
+    assert response.status_code == 422
+    reader.assert_not_awaited()
+
+
+@pytest.mark.parametrize("error,status,detail", [
+    (None, 404, "work_not_found"),
+    (WorkError("work_unavailable"), 503, "work_unavailable"),
+    (RuntimeError("SQL credential-source-sentinel"), 503, "work_unavailable"),
+])
+def test_work_result_api_bounded_errors(client, monkeypatch, error, status, detail):
+    _install_result_reader(monkeypatch, return_value=None, side_effect=error)
+    response = client.get(f"/v1/internal/work-items/{uuid.uuid4()}/result",
+                          params={"owner_id": "owner", "conversation_id": str(uuid.uuid4())}, headers=auth_headers())
+    assert response.status_code == status
+    assert response.json() == {"detail": detail}
+    assert "credential-source-sentinel" not in response.text
+
+
+@pytest.mark.parametrize("malformation", [
+    "extra", "message_extra", "work_extra", "missing_result", "wrong_id", "invalid_id",
+    "pending_with_result", "running_with_result", "failed_with_result", "content_type",
+])
+def test_work_result_model_and_api_reject_malformed_storage(client, monkeypatch, malformation):
+    from models import WorkResultResponse
+    from pydantic import ValidationError
+
+    value = _work_result_response()
+    if malformation == "extra":
+        value["trace"] = "hidden-sentinel"
+    elif malformation == "message_extra":
+        value["result"]["metadata"] = "hidden-sentinel"
+    elif malformation == "work_extra":
+        value["work"]["prompt"] = "hidden-sentinel"
+    elif malformation == "missing_result":
+        value["result"] = None
+    elif malformation in {"wrong_id", "invalid_id"}:
+        value["result"]["assistant_message_id"] = str(uuid.uuid4()) if malformation == "wrong_id" else "invalid"
+    elif malformation == "content_type":
+        value["result"]["content"] = {"hidden": "sentinel"}
+    else:
+        value["work"] = _work_result_response(malformation.split("_")[0])["work"]
+    with pytest.raises(ValidationError):
+        WorkResultResponse.model_validate(value)
+    _install_result_reader(monkeypatch, return_value=value)
+    response = client.get(f"/v1/internal/work-items/{value['work']['work_id']}/result",
+                          params={"owner_id": value["work"]["owner_id"], "conversation_id": value["work"]["conversation_id"]},
+                          headers=auth_headers())
+    assert response.status_code == 503
+    assert response.json() == {"detail": "work_unavailable"}
+
+
 @pytest.mark.parametrize("terminal,index_failure", [("completed", False), ("completed", True), ("failed", False)])
 def test_work_publication_indexes_only_completed_exact_result(client, monkeypatch, terminal, index_failure):
     payload = _work_payload()

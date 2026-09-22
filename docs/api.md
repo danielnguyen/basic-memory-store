@@ -568,9 +568,33 @@ authentication. A work ID or current-work association never grants access.
 | `POST /v1/internal/work-items` | `owner_id`, `conversation_id`, `request_id`, nullable `client_id`, `surface` | One work projection |
 | `POST /v1/internal/work-items/reconcile-interrupted` | No body; service key required | `{"interrupted_count":0}` (number newly failed) |
 | `GET /v1/internal/work-items/{work_id}` | Required query `owner_id`, `conversation_id` | Exact authorized work projection |
+| `GET /v1/internal/work-items/{work_id}/result` | Required query `owner_id`, `conversation_id` | `{"work":{...},"result":null}` or the exact canonical assistant result |
 | `PATCH /v1/internal/work-items/{work_id}` | `owner_id`, `conversation_id`, `state`, optional terminal fields below | Updated work projection |
 | `PUT /v1/internal/current-work` | `owner_id`, non-empty `client_id`, `work_id` | `{"status":"resolved","work":{...}}` |
 | `GET /v1/internal/current-work` | Required query `owner_id`, non-empty `client_id` | Exact associated projection, or `{"status":"none","work":null}` |
+
+The exact result endpoint uses one PostgreSQL statement snapshot of the work,
+owning conversation, and exact referenced assistant message. Pending, running,
+and failed work return `result: null`, even when a provisional assistant row
+exists. Completed work returns only `assistant_message_id` and the exact
+canonical `content` inside `result`; `work` retains its existing projection.
+Both response objects reject extra fields. Completion and non-null result must
+agree, and the message ID must equal the work's result reference.
+
+Work ID, owner, and conversation must match exactly, including the conversation's
+durable owner. Wrong owner, wrong conversation, and missing work share
+`404 work_not_found`. A completed work whose exact assistant association is
+missing, malformed, noncanonical, or owner/conversation/reverse-binding
+inconsistent fails with bounded `503 work_unavailable`, without substitution.
+The existing publication rule applies: an unbound canonical assistant message
+remains compatible; a work-bound message must be the exact completed result of
+this work. Closed and superseded conversations remain readable for already
+admitted work without reopening or replacing the conversation.
+
+This read does not write messages, work, locators, traces, or claims, and does not
+invoke semantic/history retrieval, Qdrant, models, or external sources. It neither
+reconstructs nor duplicates the stored answer. Message metadata and internal
+reverse bindings are not returned in the result object.
 
 All modeled request bodies reject extra fields. Work, conversation, and assistant-message IDs
 are UUIDs. Owner, request, and client identifiers are 1–120 characters using
