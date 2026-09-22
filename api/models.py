@@ -351,6 +351,30 @@ class WorkProjection(WorkCreateRequest):
     failure_code: WorkFailureCode | None
 
 
+class WorkResultMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    assistant_message_id: UUID
+    content: str
+
+
+class WorkResultResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    work: WorkProjection
+    result: WorkResultMessage | None
+
+    @model_validator(mode="after")
+    def validate_result(self) -> WorkResultResponse:
+        if (self.work.state == "completed") != (self.result is not None):
+            raise ValueError("work_result_state_invalid")
+        if self.result is not None and (
+            self.result.assistant_message_id != self.work.assistant_message_id
+        ):
+            raise ValueError("work_result_reference_invalid")
+        return self
+
+
 class WorkReconcileResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 

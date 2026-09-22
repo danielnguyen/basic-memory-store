@@ -326,6 +326,36 @@ class PostgresStore:
                 cur, work_id=work_id, owner_id=owner_id, conversation_id=conversation_id,
             )
 
+    async def get_work_result(
+        self, *, work_id: UUID, owner_id: str, conversation_id: UUID,
+    ) -> dict[str, Any] | None:
+        # One statement snapshot: invalid completed associations remain distinguishable
+        # internally from an absent/unauthorized work, without searching for a substitute.
+        async with self.pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                f"""SELECT {", ".join("w." + name for name in _WORK_FIELDS)}, m.id, m.content
+                    FROM work_items w JOIN conversations c ON c.id = w.conversation_id
+                      AND c.owner_id = w.owner_id
+                    LEFT JOIN messages m ON w.state = 'completed'
+                      AND m.id = w.assistant_message_id
+                      AND m.owner_id = w.owner_id AND m.conversation_id = w.conversation_id
+                      AND m.role = 'assistant'
+                      AND (m.work_id IS NULL OR m.work_id = w.work_id)
+                      AND {_canonical_message_sql('m')}
+                    WHERE w.work_id = %s AND w.owner_id = %s AND w.conversation_id = %s""",
+                (work_id, owner_id, conversation_id),
+            )
+            row = await cur.fetchone()
+        if row is None:
+            return None
+        work = _work_from_row(row[:len(_WORK_FIELDS)])
+        result = None
+        if work["state"] == "completed":
+            if row[-2] is None or not isinstance(row[-1], str):
+                raise WorkError("work_unavailable")
+            result = {"assistant_message_id": row[-2], "content": row[-1]}
+        return {"work": work, "result": result}
+
     async def transition_work(self, *, work_id: UUID, **values: Any) -> dict[str, Any]:
         body = WorkTransitionRequest.model_validate(values)
         try:

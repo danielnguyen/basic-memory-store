@@ -38,6 +38,159 @@ async def _change_work(store, work, state, **result):
     )
 
 
+async def _exact_work_result(store, work, **overrides):
+    return await store.get_work_result(**{
+        "work_id": work["work_id"], "owner_id": work["owner_id"],
+        "conversation_id": work["conversation_id"], **overrides,
+    })
+
+
+def test_work_result_exact_publication_and_repeated_read(postgres_database):
+    content = "Canonical result sentinel.\nExact formatting: α **unchanged**."
+
+    async def exercise(store):
+        work = await _new_work(store)
+        assert await _exact_work_result(store, work) == {"work": work, "result": None}
+        work = await _change_work(store, work, "running")
+        assert await _exact_work_result(store, work) == {"work": work, "result": None}
+        mid = await store.add_message(
+            work["conversation_id"], work["owner_id"], "assistant", content,
+            metadata={"request_id": work["request_id"], "private": "credential-source-sentinel"},
+        )
+        with psycopg.connect(postgres_database) as conn:
+            assert conn.execute("SELECT work_id, content FROM messages WHERE id=%s", (mid,)).fetchone() == (
+                work["work_id"], content,
+            )
+        provisional = await _exact_work_result(store, work)
+        assert provisional == {"work": work, "result": None}
+        assert content not in str(provisional)
+        work = await _change_work(store, work, "completed", assistant_message_id=mid)
+        # A newer ordinary answer is not a substitute for the exact work result.
+        await store.add_message(work["conversation_id"], work["owner_id"], "assistant", "newer-unrelated")
+        await store.set_current_work(owner_id=work["owner_id"], client_id=work["client_id"],
+                                     work_id=work["work_id"])
+        return work, mid
+
+    work, mid = _run(postgres_database, exercise)
+    with psycopg.connect(postgres_database) as conn:
+        before = [conn.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
+                  for table in ("work_items", "messages", "conversations", "current_work")]
+        assert conn.execute("SELECT count(*) FROM messages WHERE work_id=%s", (work["work_id"],)).fetchone() == (1,)
+    for _ in range(3):
+        result = _run(postgres_database, lambda store: _exact_work_result(store, work))
+        assert result == {"work": work, "result": {"assistant_message_id": mid, "content": content}}
+        assert "credential-source-sentinel" not in str(result)
+        assert "newer-unrelated" not in str(result)
+        assert "content" not in result["work"]
+    with psycopg.connect(postgres_database) as conn:
+        after = [conn.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
+                 for table in ("work_items", "messages", "conversations", "current_work")]
+    assert after == before
+
+
+def test_work_result_completed_legacy_unbound_compatibility(postgres_database):
+    async def exercise(store):
+        work = await _new_work(store)
+        mid = await store.add_message(work["conversation_id"], work["owner_id"], "assistant", "legacy-exact")
+        await _change_work(store, work, "running")
+        work = await _change_work(store, work, "completed", assistant_message_id=mid)
+        assert await _exact_work_result(store, work) == {
+            "work": work, "result": {"assistant_message_id": mid, "content": "legacy-exact"},
+        }
+        return mid
+
+    mid = _run(postgres_database, exercise)
+    with psycopg.connect(postgres_database) as conn:
+        assert conn.execute("SELECT work_id FROM messages WHERE id=%s", (mid,)).fetchone() == (None,)
+
+
+@pytest.mark.parametrize("retirement", [None, "closed", "superseded"])
+@pytest.mark.parametrize("terminal", ["completed", "execution_failed", "interrupted"])
+def test_work_result_terminal_and_retired_conversation(postgres_database, retirement, terminal):
+    async def exercise(store):
+        work = await _new_work(store)
+        await _change_work(store, work, "running")
+        mid = await store.add_message(work["conversation_id"], work["owner_id"], "assistant", "terminal-exact",
+                                     metadata={"request_id": work["request_id"]})
+        if retirement:
+            await _retire_work_conversation(store, work, retirement)
+        if terminal == "completed":
+            work = await _change_work(store, work, "completed", assistant_message_id=mid)
+        elif terminal == "interrupted":
+            assert await store.reconcile_interrupted_work() == {"interrupted_count": 1}
+            work = await store.get_work(work_id=work["work_id"], owner_id=work["owner_id"],
+                                        conversation_id=work["conversation_id"])
+        else:
+            work = await _change_work(store, work, "failed", failure_code=terminal)
+        result = await _exact_work_result(store, work)
+        assert result["work"] == work
+        if terminal == "completed":
+            assert result["result"] == {"assistant_message_id": mid, "content": "terminal-exact"}
+        else:
+            assert work["failure_code"] == terminal and work["state"] == "failed"
+            assert result["result"] is None and "terminal-exact" not in str(result)
+        conversation = await store.get_conversation_for_owner(work["conversation_id"], work["owner_id"])
+        assert conversation["lifecycle_state"] == (retirement or "open")
+    _run(postgres_database, exercise)
+
+
+@pytest.mark.parametrize("mismatch", ["owner_id", "conversation_id", "work_id", "conversation_owner"])
+def test_work_result_identity_isolation(postgres_database, mismatch):
+    async def seed(store):
+        work = await _new_work(store)
+        await _change_work(store, work, "running")
+        mid = await store.add_message(
+            work["conversation_id"], work["owner_id"], "assistant", "owner-private-result",
+            metadata={"request_id": work["request_id"]},
+        )
+        return await _change_work(store, work, "completed", assistant_message_id=mid)
+
+    work = _run(postgres_database, seed)
+    overrides = {}
+    if mismatch == "conversation_owner":
+        with psycopg.connect(postgres_database) as conn:
+            conn.execute("UPDATE conversations SET owner_id='different-owner' WHERE id=%s",
+                         (work["conversation_id"],))
+    else:
+        overrides[mismatch] = "wrong-owner" if mismatch == "owner_id" else uuid4()
+    assert _run(postgres_database, lambda store: _exact_work_result(store, work, **overrides)) is None
+
+
+@pytest.mark.parametrize("corruption", ["missing", "role", "owner", "conversation", "binding"])
+def test_work_result_corruption_fails_closed_without_mutation(postgres_database, corruption):
+    async def seed(store):
+        work = await _new_work(store)
+        await _change_work(store, work, "running")
+        mid = await store.add_message(work["conversation_id"], work["owner_id"], "assistant", "corrupt-hidden",
+                                     metadata={"request_id": work["request_id"]})
+        work = await _change_work(store, work, "completed", assistant_message_id=mid)
+        other = await _new_work(store, request="other-request")
+        await store.add_message(work["conversation_id"], work["owner_id"], "assistant", "not-a-replacement")
+        return work, mid, other
+
+    work, mid, other = _run(postgres_database, seed)
+    with psycopg.connect(postgres_database) as conn:
+        if corruption == "missing":
+            conn.execute("SET LOCAL session_replication_role = replica")
+            conn.execute("DELETE FROM messages WHERE id=%s", (mid,))
+        elif corruption == "role":
+            # Unbind first so the existing assistant-only binding constraint still holds.
+            conn.execute("UPDATE messages SET work_id=NULL, role='user' WHERE id=%s", (mid,))
+        elif corruption == "owner":
+            conn.execute("UPDATE messages SET owner_id='wrong-owner' WHERE id=%s", (mid,))
+        elif corruption == "conversation":
+            conn.execute("UPDATE messages SET conversation_id=%s WHERE id=%s", (other["conversation_id"], mid))
+        else:
+            conn.execute("UPDATE messages SET work_id=%s WHERE id=%s", (other["work_id"], mid))
+        before = [conn.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
+                  for table in ("work_items", "messages", "conversations")]
+    with pytest.raises(WorkError, match="^work_unavailable$"):
+        _run(postgres_database, lambda store: _exact_work_result(store, work))
+    with psycopg.connect(postgres_database) as conn:
+        assert [conn.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
+                for table in ("work_items", "messages", "conversations")] == before
+
+
 @pytest.mark.parametrize("has_prior_assistant", [True, False])
 def test_pending_work_does_not_replace_immediate_assistant_history(
     postgres_database, has_prior_assistant,
