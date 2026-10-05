@@ -92,7 +92,9 @@ def without_message_work(sql_text: str) -> str:
 
 def test_message_work_migration_preserves_enrolled_state_and_converges(pg_database, temp_db_dir):
     from psycopg.rows import dict_row
-    current = (SOURCE_DB_DIR / "baseline.sql").read_text()
+    current = (SOURCE_DB_DIR / "baseline.sql").read_text().split(
+        "\nCREATE TABLE IF NOT EXISTS presence_surface_permissions",
+    )[0]
     prior = without_message_work(current)
     assert sha256(prior.encode()).hexdigest() == PRE_MESSAGE_WORK_BASELINE_CHECKSUM
     assert PRE_MESSAGE_WORK_BASELINE_CHECKSUM in schema_migrations.COMPATIBLE_BASELINE_CHECKSUMS
@@ -158,7 +160,9 @@ def test_pre_work_baseline_checksum_is_explicitly_compatible():
 def test_work_migration_from_current_enrolled_baseline_converges(pg_database, temp_db_dir):
     from psycopg.rows import dict_row
 
-    current = (SOURCE_DB_DIR / "baseline.sql").read_text()
+    current = (SOURCE_DB_DIR / "baseline.sql").read_text().split(
+        "\nCREATE TABLE IF NOT EXISTS presence_surface_permissions",
+    )[0]
     prior = without_work(current)
     baseline = temp_db_dir / "baseline.sql"
     baseline.write_text(prior)
@@ -911,6 +915,9 @@ def test_clean_baseline_contains_conversation_lifecycle_constraints_and_index(
     pg_database: str,
     temp_db_dir: Path,
 ) -> None:
+    migration_name = "20261005120000_presence_surface_permissions.sql"
+    shutil.copy2(SOURCE_DB_DIR / "migrations/managed" / migration_name,
+                 temp_db_dir / "migrations/managed" / migration_name)
     upgraded = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
 
     assert upgraded["state"] == "current"
@@ -1057,6 +1064,9 @@ def test_prior_baseline_advances_conversation_lifecycle_without_rewriting_data(
     shutil.copy2(migration, temp_db_dir / "migrations" / "managed" / migration.name)
 
     before = run_cli_ok("status", dsn=pg_database, db_dir=temp_db_dir)
+    migration_name = "20261005120000_presence_surface_permissions.sql"
+    shutil.copy2(SOURCE_DB_DIR / "migrations/managed" / migration_name,
+                 temp_db_dir / "migrations/managed" / migration_name)
     upgraded = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
     repeated = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
     checked = run_cli_ok("check", dsn=pg_database, db_dir=temp_db_dir)
@@ -1253,6 +1263,9 @@ def test_claim_support_migration_retains_v1_and_accepts_bounded_v2(
             temp_db_dir / "migrations" / "managed" / migration.name,
         )
 
+    migration_name = "20261005120000_presence_surface_permissions.sql"
+    shutil.copy2(SOURCE_DB_DIR / "migrations/managed" / migration_name,
+                 temp_db_dir / "migrations/managed" / migration_name)
     upgraded = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
     repeated = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
 
@@ -1385,6 +1398,9 @@ def test_prior_enrolled_baseline_advances_through_claim_record_migration(
     shutil.copy2(migration, temp_db_dir / "migrations" / "managed" / migration.name)
 
     before = run_cli_ok("status", dsn=pg_database, db_dir=temp_db_dir)
+    migration_name = "20261005120000_presence_surface_permissions.sql"
+    shutil.copy2(SOURCE_DB_DIR / "migrations/managed" / migration_name,
+                 temp_db_dir / "migrations/managed" / migration_name)
     upgraded = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
     status = run_cli_ok("status", dsn=pg_database, db_dir=temp_db_dir)
     checked = run_cli_ok("check", dsn=pg_database, db_dir=temp_db_dir)
@@ -1393,6 +1409,7 @@ def test_prior_enrolled_baseline_advances_through_claim_record_migration(
     assert before["pending_migrations"] == [migration.name]
     assert upgraded["applied_migrations"] == [migration.name]
     assert upgraded["baseline_checksum_status"] == "compatible_prior"
+    assert upgraded["applied_migrations"] == [migration_name]
     assert status["state"] == "current"
     assert checked["state"] == "current"
     assert table_exists(pg_database, "claim_records")
@@ -1486,6 +1503,9 @@ def test_pre_acquisition_manifest_baseline_advances_through_manifest_migration(
     shutil.copy2(migration, temp_db_dir / "migrations" / "managed" / migration.name)
 
     before = run_cli_ok("status", dsn=pg_database, db_dir=temp_db_dir)
+    migration_name = "20261005120000_presence_surface_permissions.sql"
+    shutil.copy2(SOURCE_DB_DIR / "migrations/managed" / migration_name,
+                 temp_db_dir / "migrations/managed" / migration_name)
     upgraded = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
     repeated = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
     status = run_cli_ok("status", dsn=pg_database, db_dir=temp_db_dir)
@@ -1521,6 +1541,9 @@ def test_clean_baseline_contains_claim_record_constraints_and_indexes(
     pg_database: str,
     temp_db_dir: Path,
 ) -> None:
+    migration_name = "20261005120000_presence_surface_permissions.sql"
+    shutil.copy2(SOURCE_DB_DIR / "migrations/managed" / migration_name,
+                 temp_db_dir / "migrations/managed" / migration_name)
     upgraded = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
 
     assert upgraded["state"] == "current"
@@ -1907,6 +1930,7 @@ def test_derivation_version_cleanup_migrates_only_exact_legacy_values_and_defaul
         "20260822163000_presented_claim_support.sql",
         "20260920120000_work_items.sql",
         MESSAGE_WORK_MIGRATION,
+        "20261005120000_presence_surface_permissions.sql",
     ]
     assert repeated["applied_migrations"] == []
     assert column_default(pg_database, "memory_items", "derivation_version") == f"'{MEMORY_ITEM_DERIVATION_VERSION}'::text"
@@ -2146,13 +2170,19 @@ def test_presence_permission_prior_enrollment_upgrades_without_rewriting_data(
         )
         conn.execute("INSERT INTO proactive_prefs (owner_id, enabled) VALUES ('preserve', false)")
         conn.commit()
+    migration_name = "20261005120000_presence_surface_permissions.sql"
+    shutil.copy2(SOURCE_DB_DIR / "migrations/managed" / migration_name,
+                 temp_db_dir / "migrations/managed" / migration_name)
     upgraded = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
     assert upgraded["state"] == "current"
     assert upgraded["baseline_checksum_status"] == "compatible_prior"
+    assert upgraded["applied_migrations"] == [migration_name]
     with psycopg.connect(pg_database) as conn:
         assert conn.execute(
             "SELECT enabled FROM proactive_prefs WHERE owner_id='preserve'",
         ).fetchone() == (False,)
+        from psycopg.rows import dict_row
+        conn.row_factory = dict_row
         errors = schema_migrations.validate_schema_against_baseline(
             conn, baseline_path=SOURCE_DB_DIR / "baseline.sql", target_schema="public",
         )
