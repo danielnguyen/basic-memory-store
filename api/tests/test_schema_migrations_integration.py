@@ -84,6 +84,7 @@ MESSAGE_WORK_MIGRATION = "20260921190000_message_work_binding.sql"
 
 
 def without_message_work(sql_text: str) -> str:
+    sql_text = sql_text.split("\nCREATE TABLE IF NOT EXISTS presence_surface_permissions")[0]
     start = sql_text.index("-- Internal reverse binding; lifecycle remains owned by work_items.")
     end = sql_text.index("CREATE TABLE IF NOT EXISTS current_work", start)
     return sql_text[:start] + sql_text[end:]
@@ -218,6 +219,7 @@ def test_work_database_constraints_reject_invalid_rows(pg_database, temp_db_dir)
 
 
 def without_work(sql_text: str) -> str:
+    sql_text = sql_text.split("\nCREATE TABLE IF NOT EXISTS presence_surface_permissions")[0]
     marker = "-- Durable work tracks references, never canonical answer content."
     if marker not in sql_text:
         return sql_text
@@ -227,6 +229,7 @@ def without_work(sql_text: str) -> str:
 
 
 def without_conversation_lifecycle(sql_text: str) -> str:
+    sql_text = sql_text.split("\nCREATE TABLE IF NOT EXISTS presence_surface_permissions")[0]
     sql_text = without_work(sql_text)
     start = sql_text.index("CREATE TABLE IF NOT EXISTS conversations")
     end = sql_text.index("CREATE TABLE IF NOT EXISTS messages", start)
@@ -244,6 +247,7 @@ def without_conversation_lifecycle(sql_text: str) -> str:
 
 
 def without_claim_support(sql_text: str) -> str:
+    sql_text = sql_text.split("\nCREATE TABLE IF NOT EXISTS presence_surface_permissions")[0]
     sql_text = without_work(sql_text)
     normalized = sql_text.replace(
         "  schema_version TEXT NOT NULL CHECK (schema_version IN ('claim-record.v1', 'claim-record.v2')),\n",
@@ -2111,3 +2115,45 @@ def test_compose_configuration_has_migration_dependency_ordering() -> None:
         "PG_DSN=postgresql://memory_user:${POSTGRES_PASSWORD}@memory-db-postgres:5432/memory_db"
     ]
     assert services["basic-memory-store"]["depends_on"]["memory-db-migrate"]["condition"] == "service_completed_successfully"
+
+
+def test_presence_permission_baseline_and_managed_migration_are_identical():
+    migration = (SOURCE_DB_DIR / "migrations/managed/"
+                 "20261005120000_presence_surface_permissions.sql").read_text()
+    baseline = (SOURCE_DB_DIR / "baseline.sql").read_text()
+    assert baseline.endswith(migration)
+    prior = baseline.removesuffix("\n" + migration)
+    assert sha256(prior.encode()).hexdigest() == (
+        "f659b7ea21e38dc12fcd00be49a75e3f422ea45ceeceea3527570b1c4115cbc3"
+    )
+    assert sha256(prior.encode()).hexdigest() in schema_migrations.COMPATIBLE_BASELINE_CHECKSUMS
+
+
+def test_presence_permission_prior_enrollment_upgrades_without_rewriting_data(
+    pg_database, temp_db_dir,
+):
+    baseline = (SOURCE_DB_DIR / "baseline.sql").read_text()
+    migration = (SOURCE_DB_DIR / "migrations/managed/"
+                 "20261005120000_presence_surface_permissions.sql").read_text()
+    prior = baseline.removesuffix("\n" + migration)
+    execute_sql(pg_database, prior)
+    with psycopg.connect(pg_database) as conn:
+        schema_migrations.create_ledger_table(conn)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, kind, checksum_sha256, execution_ms)"
+            " VALUES (%s, 'baseline', %s, 1)",
+            (schema_migrations.BASELINE_VERSION, sha256(prior.encode()).hexdigest()),
+        )
+        conn.execute("INSERT INTO proactive_prefs (owner_id, enabled) VALUES ('preserve', false)")
+        conn.commit()
+    upgraded = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
+    assert upgraded["state"] == "current"
+    assert upgraded["baseline_checksum_status"] == "compatible_prior"
+    with psycopg.connect(pg_database) as conn:
+        assert conn.execute(
+            "SELECT enabled FROM proactive_prefs WHERE owner_id='preserve'",
+        ).fetchone() == (False,)
+        errors = schema_migrations.validate_schema_against_baseline(
+            conn, baseline_path=SOURCE_DB_DIR / "baseline.sql", target_schema="public",
+        )
+        assert errors == []
