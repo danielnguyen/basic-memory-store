@@ -6,7 +6,7 @@ import re
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, UTC, timedelta
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Security, Request, Response
@@ -106,6 +106,9 @@ from models import (
     ProactiveDeliveryAttemptResponse,
     ProactiveEvaluateRequest,
     ProactiveEvaluateResponse,
+    PresenceSurfacePermissionKey,
+    PresenceSurfacePermissionResponse,
+    PresenceSurfacePermissionUpdateRequest,
     ProactivePrefsResponse,
     ProactivePrefsUpdateRequest,
     ProactiveSuggestionFeedbackRequest,
@@ -1943,6 +1946,30 @@ async def orchestrate_chat(body: OrchestrateChatRequest, request: Request):
         surface_behavior=surface_behavior,
     )
     return OrchestrateChatResponse(**resp.model_dump(), request_id=(getattr(request.state, "request_id", None) or ""))
+
+
+@app.get(
+    "/v1/presence/surface-permissions",
+    response_model=PresenceSurfacePermissionResponse,
+    dependencies=[Depends(require_api_key)],
+)
+async def get_presence_surface_permission(key: Annotated[PresenceSurfacePermissionKey, Query()]):
+    row = await pg.get_presence_surface_permission(key.owner_id, key.surface)
+    return PresenceSurfacePermissionResponse(**(row or {
+        **key.model_dump(), "configured": False,
+        "conversation_context_allowed": False, "proactive_presence_allowed": False,
+        "ambient_listening_allowed": False, "created_at": None, "updated_at": None,
+    }))
+
+
+@app.put(
+    "/v1/presence/surface-permissions",
+    response_model=PresenceSurfacePermissionResponse,
+    dependencies=[Depends(require_api_key)],
+)
+async def put_presence_surface_permission(body: PresenceSurfacePermissionUpdateRequest):
+    row = await pg.upsert_presence_surface_permission(**body.model_dump())
+    return PresenceSurfacePermissionResponse(**row)
 
 
 @app.get(

@@ -2505,3 +2505,32 @@ def test_supplied_message_insert_failure_rolls_back_activity(postgres_database):
     assert _message_row(postgres_database, message_id) is None
     assert _message_count(postgres_database, conversation_id) == 0
     assert _row(postgres_database, conversation_id)[2] == before
+
+
+def test_presence_permission_postgres_exact_upsert_and_isolation(postgres_database):
+    async def exercise(store):
+        assert await store.get_presence_surface_permission("permission-owner", "alexa") is None
+        for context in (False, True):
+            for proactive in (False, True):
+                for ambient in (False, True):
+                    row = await store.upsert_presence_surface_permission(
+                        owner_id="permission-owner", surface="alexa",
+                        conversation_context_allowed=context, proactive_presence_allowed=proactive,
+                        ambient_listening_allowed=ambient,
+                    )
+                    assert row["configured"] is True
+                    assert row["conversation_context_allowed"] is context
+                    assert row["proactive_presence_allowed"] is proactive
+                    assert row["ambient_listening_allowed"] is ambient
+                    assert await store.get_presence_surface_permission(
+                        "permission-owner", "alexa",
+                    ) == row
+                    assert await store.get_presence_surface_permission(
+                        "other-owner", "alexa",
+                    ) is None
+                    assert await store.get_presence_surface_permission(
+                        "permission-owner", "telegram",
+                    ) is None
+        assert await store.get_proactive_prefs("permission-owner") is None
+
+    _run(postgres_database, exercise)

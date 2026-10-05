@@ -891,6 +891,47 @@ class EventIngestResponse(BaseModel):
     entity_ids: List[str] = Field(default_factory=list)
 
 
+class PresenceSurfacePermissionKey(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    owner_id: str = Field(min_length=1, max_length=120)
+    surface: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_-]*$")
+
+    @field_validator("owner_id")
+    @classmethod
+    def validate_owner(cls, value: str) -> str:
+        if not value.strip() or value != value.strip():
+            raise ValueError("owner_id_invalid")
+        return value
+
+
+class PresenceSurfacePermissionUpdateRequest(PresenceSurfacePermissionKey):
+    conversation_context_allowed: bool
+    proactive_presence_allowed: bool
+    ambient_listening_allowed: bool
+
+
+class PresenceSurfacePermissionResponse(PresenceSurfacePermissionUpdateRequest):
+    configured: bool
+    created_at: str | None
+    updated_at: str | None
+
+    @model_validator(mode="after")
+    def validate_configuration(self) -> "PresenceSurfacePermissionResponse":
+        if self.configured:
+            if not self.created_at or not self.updated_at:
+                raise ValueError("permission_timestamps_required")
+            for value in (self.created_at, self.updated_at):
+                parsed = datetime.fromisoformat(value)
+                if parsed.tzinfo is None:
+                    raise ValueError("permission_timestamp_invalid")
+        elif self.created_at is not None or self.updated_at is not None or any((
+            self.conversation_context_allowed, self.proactive_presence_allowed,
+            self.ambient_listening_allowed,
+        )):
+            raise ValueError("unconfigured_permission_inconsistent")
+        return self
+
+
 # ---- Proactive ----
 
 SuggestionStatus = Literal["pending", "dismissed", "accepted", "expired"]

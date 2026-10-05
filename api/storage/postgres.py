@@ -1328,6 +1328,51 @@ class PostgresStore:
             "created_at": str(row[9]),
         }
 
+    @staticmethod
+    def _presence_permission_row(row) -> dict[str, Any]:
+        return {
+            "owner_id": row[0], "surface": row[1], "configured": True,
+            "conversation_context_allowed": row[2], "proactive_presence_allowed": row[3],
+            "ambient_listening_allowed": row[4],
+            "created_at": str(row[5]), "updated_at": str(row[6]),
+        }
+
+    async def get_presence_surface_permission(self, owner_id: str, surface: str):
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """SELECT owner_id, surface, conversation_context_allowed,
+                    proactive_presence_allowed, ambient_listening_allowed, created_at, updated_at
+                    FROM presence_surface_permissions WHERE owner_id = %s AND surface = %s""",
+                    (owner_id, surface),
+                )
+                row = await cur.fetchone()
+        return self._presence_permission_row(row) if row else None
+
+    async def upsert_presence_surface_permission(
+        self, *, owner_id: str, surface: str, conversation_context_allowed: bool,
+        proactive_presence_allowed: bool, ambient_listening_allowed: bool,
+    ):
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """INSERT INTO presence_surface_permissions
+                    (owner_id, surface, conversation_context_allowed,
+                     proactive_presence_allowed, ambient_listening_allowed)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (owner_id, surface) DO UPDATE SET
+                    conversation_context_allowed = EXCLUDED.conversation_context_allowed,
+                    proactive_presence_allowed = EXCLUDED.proactive_presence_allowed,
+                    ambient_listening_allowed = EXCLUDED.ambient_listening_allowed,
+                    updated_at = now()
+                    RETURNING owner_id, surface, conversation_context_allowed,
+                    proactive_presence_allowed, ambient_listening_allowed, created_at, updated_at""",
+                    (owner_id, surface, conversation_context_allowed,
+                     proactive_presence_allowed, ambient_listening_allowed),
+                )
+                row = await cur.fetchone()
+        return self._presence_permission_row(row)
+
     async def get_proactive_prefs(self, owner_id: str) -> dict[str, Any] | None:
         q = """
         SELECT owner_id, enabled, allowed_surfaces_json, rule_prefs_json, created_at, updated_at

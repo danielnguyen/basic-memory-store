@@ -1,5 +1,7 @@
 import types
 import uuid
+
+import pytest
 from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
@@ -642,3 +644,94 @@ def test_legacy_proactive_retry_reuses_existing_request_decision(monkeypatch):
         assert len(fake_pg.initiative_decisions) == 1
     finally:
         client.close()
+
+
+@pytest.mark.parametrize("flags", [
+    (a, b, c) for a in (False, True) for b in (False, True) for c in (False, True)
+])
+def test_presence_surface_permission_exact_api_round_trip(monkeypatch, flags):
+    client, pg, _ = _client(monkeypatch)
+    rows = {}
+
+    async def lookup(owner_id, surface):
+        return rows.get((owner_id, surface))
+
+    async def upsert(**body):
+        row = {
+            **body, "configured": True,
+            "created_at": "2026-10-05T00:00:00+00:00",
+            "updated_at": "2026-10-05T00:00:00+00:00",
+        }
+        rows[(body["owner_id"], body["surface"])] = row
+        return row
+
+    monkeypatch.setattr(pg, "get_presence_surface_permission", lookup, raising=False)
+    monkeypatch.setattr(pg, "upsert_presence_surface_permission", upsert, raising=False)
+    headers = _headers("permission")
+    url = "/v1/presence/surface-permissions"
+    absent = client.get(url, params={"owner_id": "owner", "surface": "alexa"}, headers=headers)
+    assert absent.status_code == 200
+    assert absent.json() == {
+        "owner_id": "owner", "surface": "alexa", "configured": False,
+        "conversation_context_allowed": False, "proactive_presence_allowed": False,
+        "ambient_listening_allowed": False, "created_at": None, "updated_at": None,
+    }
+    body = {
+        "owner_id": "owner", "surface": "alexa", "conversation_context_allowed": flags[0],
+        "proactive_presence_allowed": flags[1], "ambient_listening_allowed": flags[2],
+    }
+    created = client.put(url, json=body, headers=headers)
+    assert created.status_code == 200
+    assert created.json()["configured"] is True
+    assert client.get(url, params={"owner_id": "owner", "surface": "alexa"}, headers=headers).status_code == 200
+    updated = client.put(url, json={**body, "conversation_context_allowed": not flags[0]},
+                         headers=headers)
+    assert updated.status_code == 200
+    assert updated.json()["conversation_context_allowed"] is not flags[0]
+    for owner, surface in (("other", "alexa"), ("owner", "telegram")):
+        result = client.get(url, params={"owner_id": owner, "surface": surface}, headers=headers)
+        assert result.json()["configured"] is False
+    assert pg.prefs == {}
+
+
+@pytest.mark.parametrize("changes", [
+    {"surface": ""}, {"surface": " "}, {"surface": "a" * 65},
+    {"surface": "*"}, {"surface": "Alexa"}, {"owner_id": ""},
+    {"conversation_context_allowed": 1}, {"proactive_presence_allowed": "true"},
+    {"ambient_listening_allowed": None}, {"configured": True},
+])
+def test_presence_permission_rejects_malformed_without_write(monkeypatch, changes):
+    client, pg, _ = _client(monkeypatch)
+    calls = []
+
+    async def upsert(**body):
+        calls.append(body)
+
+    monkeypatch.setattr(pg, "upsert_presence_surface_permission", upsert, raising=False)
+    response = client.put("/v1/presence/surface-permissions", headers=_headers("invalid"),
+                          json={
+                              "owner_id": "owner", "surface": "alexa",
+                              "conversation_context_allowed": False,
+                              "proactive_presence_allowed": False,
+                              "ambient_listening_allowed": False, **changes,
+                          })
+    assert response.status_code == 422
+    assert calls == []
+
+@pytest.mark.parametrize("params", [
+    {"owner_id": " ", "surface": "alexa"}, {"owner_id": "owner", "surface": ""},
+    {"owner_id": "owner", "surface": "*"}, {"owner_id": "owner", "surface": "a" * 65},
+    {"owner_id": "owner", "surface": "alexa", "wildcard": True},
+])
+def test_presence_permission_get_rejects_malformed_exact_key(monkeypatch, params):
+    client, pg, _ = _client(monkeypatch)
+    calls = []
+
+    async def lookup(*args):
+        calls.append(args)
+
+    monkeypatch.setattr(pg, "get_presence_surface_permission", lookup, raising=False)
+    response = client.get("/v1/presence/surface-permissions",
+                          params=params, headers=_headers("invalid-key"))
+    assert response.status_code == 422
+    assert calls == []
