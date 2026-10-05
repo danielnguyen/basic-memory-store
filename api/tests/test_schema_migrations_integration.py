@@ -915,9 +915,6 @@ def test_clean_baseline_contains_conversation_lifecycle_constraints_and_index(
     pg_database: str,
     temp_db_dir: Path,
 ) -> None:
-    migration_name = "20261005120000_presence_surface_permissions.sql"
-    shutil.copy2(SOURCE_DB_DIR / "migrations/managed" / migration_name,
-                 temp_db_dir / "migrations/managed" / migration_name)
     upgraded = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
 
     assert upgraded["state"] == "current"
@@ -1064,9 +1061,6 @@ def test_prior_baseline_advances_conversation_lifecycle_without_rewriting_data(
     shutil.copy2(migration, temp_db_dir / "migrations" / "managed" / migration.name)
 
     before = run_cli_ok("status", dsn=pg_database, db_dir=temp_db_dir)
-    migration_name = "20261005120000_presence_surface_permissions.sql"
-    shutil.copy2(SOURCE_DB_DIR / "migrations/managed" / migration_name,
-                 temp_db_dir / "migrations/managed" / migration_name)
     upgraded = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
     repeated = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
     checked = run_cli_ok("check", dsn=pg_database, db_dir=temp_db_dir)
@@ -1263,9 +1257,6 @@ def test_claim_support_migration_retains_v1_and_accepts_bounded_v2(
             temp_db_dir / "migrations" / "managed" / migration.name,
         )
 
-    migration_name = "20261005120000_presence_surface_permissions.sql"
-    shutil.copy2(SOURCE_DB_DIR / "migrations/managed" / migration_name,
-                 temp_db_dir / "migrations/managed" / migration_name)
     upgraded = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
     repeated = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
 
@@ -1398,9 +1389,6 @@ def test_prior_enrolled_baseline_advances_through_claim_record_migration(
     shutil.copy2(migration, temp_db_dir / "migrations" / "managed" / migration.name)
 
     before = run_cli_ok("status", dsn=pg_database, db_dir=temp_db_dir)
-    migration_name = "20261005120000_presence_surface_permissions.sql"
-    shutil.copy2(SOURCE_DB_DIR / "migrations/managed" / migration_name,
-                 temp_db_dir / "migrations/managed" / migration_name)
     upgraded = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
     status = run_cli_ok("status", dsn=pg_database, db_dir=temp_db_dir)
     checked = run_cli_ok("check", dsn=pg_database, db_dir=temp_db_dir)
@@ -1409,7 +1397,6 @@ def test_prior_enrolled_baseline_advances_through_claim_record_migration(
     assert before["pending_migrations"] == [migration.name]
     assert upgraded["applied_migrations"] == [migration.name]
     assert upgraded["baseline_checksum_status"] == "compatible_prior"
-    assert upgraded["applied_migrations"] == [migration_name]
     assert status["state"] == "current"
     assert checked["state"] == "current"
     assert table_exists(pg_database, "claim_records")
@@ -1503,9 +1490,6 @@ def test_pre_acquisition_manifest_baseline_advances_through_manifest_migration(
     shutil.copy2(migration, temp_db_dir / "migrations" / "managed" / migration.name)
 
     before = run_cli_ok("status", dsn=pg_database, db_dir=temp_db_dir)
-    migration_name = "20261005120000_presence_surface_permissions.sql"
-    shutil.copy2(SOURCE_DB_DIR / "migrations/managed" / migration_name,
-                 temp_db_dir / "migrations/managed" / migration_name)
     upgraded = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
     repeated = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
     status = run_cli_ok("status", dsn=pg_database, db_dir=temp_db_dir)
@@ -1541,9 +1525,6 @@ def test_clean_baseline_contains_claim_record_constraints_and_indexes(
     pg_database: str,
     temp_db_dir: Path,
 ) -> None:
-    migration_name = "20261005120000_presence_surface_permissions.sql"
-    shutil.copy2(SOURCE_DB_DIR / "migrations/managed" / migration_name,
-                 temp_db_dir / "migrations/managed" / migration_name)
     upgraded = run_cli_ok("upgrade", dsn=pg_database, db_dir=temp_db_dir)
 
     assert upgraded["state"] == "current"
