@@ -5,12 +5,14 @@ HTTP method, or BMS credential from its MCP caller.
 """
 
 import os
-from typing import Any
+from datetime import datetime, timezone
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 import httpx
 from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
+from pydantic import BaseModel, Field, ValidationError
 
 mcp = MCPServer("BMS memory (read only)")
 
@@ -67,6 +69,86 @@ async def get_memory(memory_id: str) -> dict[str, Any]:
     remembered fact. No writes or arbitrary API requests are possible.
     """
     return await read_memory(memory_id)
+
+
+class SearchInput(BaseModel):
+    query: str = Field(..., min_length=1, max_length=500)
+    limit: int = Field(5, ge=1, le=10, strict=True)
+
+
+class SearchSourceRef(BaseModel):
+    ref_type: str = Field(..., min_length=1, max_length=64)
+    ref_id: str = Field(..., min_length=1, max_length=160)
+    support_kind: str = Field(default="direct", min_length=1, max_length=64)
+
+
+class SearchMemory(BaseModel):
+    memory_id: UUID
+    owner_id: str = Field(..., min_length=1, max_length=160)
+    summary: str = Field(..., min_length=1, max_length=4000)
+    memory_type: str = Field(..., min_length=1, max_length=64)
+    source_refs: list[SearchSourceRef] = Field(..., max_length=50)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    status: Literal["active"]
+    promotion_state: Literal["promoted"]
+    freshness_state: Literal["active"]
+    expires_at: datetime | None = None
+    updated_at: datetime
+
+
+class SearchResponse(BaseModel):
+    memories: list[SearchMemory] = Field(..., max_length=10)
+
+
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
+async def search_memories(
+    query: Annotated[str, Field(min_length=1, max_length=500)],
+    limit: Annotated[int, Field(ge=1, le=10, strict=True)] = 5,
+) -> dict[str, Any]:
+    """Find current promoted memories by words or a short English question.
+
+    Searches only the configured owner's stored summaries. Use returned sources
+    as evidence; an empty successful result means no matching memory was found.
+    A failure is not evidence that no memory exists. No writes are exposed.
+    """
+    try:
+        inputs = SearchInput(query=query, limit=limit)
+        if not inputs.query.strip():
+            return {"ok": False, "reason": "invalid_query"}
+    except ValidationError:
+        return {"ok": False, "reason": "invalid_query"}
+
+    owner = os.environ.get("BMS_OWNER_ID", "").strip()
+    key = os.environ.get("MEMORY_API_KEY", "").strip()
+    base = os.environ.get("BMS_API_URL", "http://basic-memory-store:8000").rstrip("/")
+    if not owner or not key:
+        return {"ok": False, "reason": "not_configured"}
+
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=False, trust_env=False) as client:
+            response = await client.get(
+                f"{base}/v1/internal/memory/search",
+                params={"owner_id": owner, "query": inputs.query, "limit": inputs.limit},
+                headers={"X-API-Key": key, "Accept": "application/json"},
+            )
+        if response.status_code == 422:
+            return {"ok": False, "reason": "invalid_query"}
+        if response.status_code != 200:
+            return {"ok": False, "reason": "bms_unavailable"}
+        result = SearchResponse.model_validate(response.json())
+        if len(result.memories) > inputs.limit:
+            return {"ok": False, "reason": "bms_unavailable"}
+        now = datetime.now(timezone.utc)
+        for memory in result.memories:
+            if (memory.owner_id != owner or memory.updated_at.tzinfo is None
+                    or (memory.expires_at is not None and (
+                        memory.expires_at.tzinfo is None or memory.expires_at <= now))):
+                return {"ok": False, "reason": "bms_unavailable"}
+    except (httpx.HTTPError, ValueError):
+        return {"ok": False, "reason": "bms_unavailable"}
+    return {"ok": True, "memories": [
+        memory.model_dump(mode="json", exclude={"owner_id"}) for memory in result.memories
+    ]}
 
 
 if __name__ == "__main__":

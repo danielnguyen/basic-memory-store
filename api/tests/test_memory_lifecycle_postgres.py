@@ -446,3 +446,72 @@ def test_event_storage_failure_rolls_back_status_change(monkeypatch, postgres_da
 
     assert row[0] == "active"
     assert event_count == 0
+
+
+def test_summary_search_ranking_owner_lifecycle_and_safe_queries(monkeypatch, postgres_database):
+    from datetime import datetime, timedelta, timezone
+    from psycopg.types.json import Json
+
+    monkeypatch.setattr(main_module, "settings", _settings())
+    monkeypatch.setattr(main_module, "qdrant", FakeQdrant())
+    monkeypatch.setattr(main_module, "pg", PostgresStore(postgres_database))
+    strong, weak, foreign = uuid4(), uuid4(), uuid4()
+    now = datetime.now(timezone.utc)
+    fixtures = [
+        (strong, "owner-a", "The synthetic silver lighthouse marks the harbor.", "active", "promoted", None, None),
+        (weak, "owner-a", "A lighthouse marks a distant coast.", "active", "promoted", now + timedelta(days=1), None),
+        (foreign, "owner-b", "Private silver lighthouse secret.", "active", "promoted", None, None),
+    ]
+    for status in DURABLE_MEMORY_STATUSES:
+        if status != "active":
+            fixtures.append((uuid4(), "owner-a", "silver lighthouse", status, "promoted", None, None))
+    for state in ("candidate", "suppressed", "decayed"):
+        fixtures.append((uuid4(), "owner-a", "silver lighthouse", "active", state, None, None))
+    fixtures.extend([
+        (uuid4(), "owner-a", "silver lighthouse expired", "active", "promoted", now - timedelta(days=1), None),
+        (uuid4(), "owner-a", "silver lighthouse replaced", "active", "promoted", None, strong),
+    ])
+    with psycopg.connect(postgres_database) as conn:
+        assert conn.execute("SHOW server_version_num").fetchone()[0].startswith("16")
+        for memory_id, owner, summary, status, promotion, expiry, successor in fixtures:
+            conn.execute(
+                """INSERT INTO memory_items
+                   (id, owner_id, summary, memory_type, source_ref_hash, status, promotion_state,
+                    expires_at, superseded_by_memory_id, source_refs_json, confidence, explanation_json)
+                   VALUES (%s, %s, %s, 'core', %s, %s, %s, %s, %s, %s, 0.8, %s)""",
+                (memory_id, owner, summary, str(memory_id), status, promotion, expiry, successor,
+                 Json([{"ref_type": "message", "ref_id": "synthetic-source", "metadata": {"token": "SECRET"}}]),
+                 Json({"token": "SECRET"})),
+            )
+        before = conn.execute("SELECT row_to_json(m) FROM memory_items m ORDER BY id").fetchall()
+        events_before = conn.execute("SELECT count(*) FROM memory_events").fetchone()
+
+    with TestClient(main_module.app) as client:
+        def search(query, **params):
+            return client.get("/v1/internal/memory/search", headers={"X-API-Key": "testkey"},
+                              params={"owner_id": "owner-a", "query": query, **params})
+
+        for query in ("What did I save about the silver lighthouse?", "silver lighthouse", "'silver' & lighthouse!",
+                      '"silver lighthouse" | !missing', "silver lighthouses"):
+            response = search(query)
+            assert response.status_code == 200, response.text
+            memories = response.json()["memories"]
+            assert [m["memory_id"] for m in memories] == [str(strong), str(weak)]
+            assert all(m["owner_id"] == "owner-a" and m["freshness_state"] == "active" for m in memories)
+            assert memories[0]["confidence"] == 0.8
+            assert "SECRET" not in response.text and "Private" not in response.text
+            assert memories[0]["source_refs"] == [{"ref_type": "message", "ref_id": "synthetic-source", "support_kind": "direct"}]
+            assert "explanation" not in memories[0] and "events" not in response.json()
+        assert len(search("silver lighthouse", limit=1).json()["memories"]) == 1
+        assert search("silver lighthouse", owner_id="owner-b").json()["memories"][0]["memory_id"] == str(foreign)
+        assert search("silver lighthouse", owner_id="missing").json() == {"memories": []}
+        for query in ("unicorn nebula", "'; DROP TABLE memory_items; --", "' OR 1=1; --"):
+            assert search(query).json() == {"memories": []}
+        for query in ("", "   ", "the and or", "!!!", "x" * 501):
+            assert search(query).status_code == 422
+        assert search("silver", limit=11).status_code == 422
+        assert search("silver", owner_id="   ").status_code == 422
+
+    with psycopg.connect(postgres_database) as conn:
+        assert conn.execute("SELECT row_to_json(m) FROM memory_items m ORDER BY id").fetchall() == before
+        assert conn.execute("SELECT count(*) FROM memory_events").fetchone() == events_before
