@@ -145,6 +145,7 @@ from models import (
     MemoryEvaluateResponse,
     MemoryEventItem,
     MemoryItemResponse,
+    MemorySearchResponse,
     MemoryPromoteRequest,
     MemoryPromoteResponse,
     MemoryReinforceRequest,
@@ -2460,6 +2461,25 @@ async def transition_memory(memory_id: str, body: MemoryTransitionRequest, reque
         memory=MemoryItemResponse(**shape_memory_item(result["memory"])),
         events_appended=result["events_appended"],
     )
+
+
+@app.get(
+    "/v1/internal/memory/search",
+    response_model=MemorySearchResponse,
+    tags=["memory-internal"],
+    dependencies=[Depends(require_api_key)],
+    summary="Search current promoted summaries for one owner",
+)
+async def search_memories(
+    owner_id: str = Query(..., min_length=1, max_length=160),
+    query: str = Query(..., min_length=1, max_length=500),
+    limit: int = Query(5, ge=1, le=10),
+):
+    try:
+        memories = await pg.search_memory_items(owner_id=owner_id, query=query, limit=limit)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Search requires an owner and meaningful query text")
+    return MemorySearchResponse(memories=memories)
 
 
 @app.get(

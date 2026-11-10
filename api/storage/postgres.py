@@ -4140,6 +4140,50 @@ class PostgresStore:
             "events_appended": ["state_changed"],
         }
 
+    async def search_memory_items(self, *, owner_id: str, query: str, limit: int = 5) -> list[dict[str, Any]]:
+        if (not isinstance(owner_id, str) or not owner_id.strip() or len(owner_id) > 160
+                or not isinstance(query, str) or not query.strip() or len(query) > 500
+                or type(limit) is not int or not 1 <= limit <= 10):
+            raise ValueError("Invalid search input")
+        async with self.pool.connection() as conn:
+            async with conn.transaction():
+                await conn.execute("SET TRANSACTION READ ONLY")
+                await conn.execute("SET LOCAL statement_timeout = '2s'")
+                async with conn.cursor() as cur:
+                    # Parse plain text with PostgreSQL's English dictionary. OR the
+                    # quoted lexemes so question wording does not require every word
+                    # to occur; rank rewards overlap. Caller text is never TSQuery SQL.
+                    await cur.execute(
+                        """
+                        SELECT string_agg(quote_literal(term), ' | ')::tsquery
+                        FROM unnest(tsvector_to_array(to_tsvector('english', %s))) AS term
+                        """,
+                        (query,),
+                    )
+                    search_query = (await cur.fetchone())[0]
+                    if search_query is None:
+                        raise ValueError("Search requires meaningful text")
+                    await cur.execute(
+                        """
+                        SELECT id, owner_id, summary, memory_type, source_refs_json,
+                               confidence, status, promotion_state, expires_at, updated_at
+                        FROM memory_items
+                        WHERE owner_id = %s AND status = 'active'
+                          AND promotion_state = 'promoted'
+                          AND superseded_by_memory_id IS NULL
+                          AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+                          AND to_tsvector('english', summary) @@ %s::tsquery
+                        ORDER BY ts_rank(to_tsvector('english', summary), %s::tsquery) DESC,
+                                 updated_at DESC, id ASC
+                        LIMIT %s
+                        """,
+                        (owner_id, search_query, search_query, limit),
+                    )
+                    rows = await cur.fetchall()
+        fields = ("memory_id", "owner_id", "summary", "memory_type", "source_refs",
+                  "confidence", "status", "promotion_state", "expires_at", "updated_at")
+        return [{**dict(zip(fields, row)), "freshness_state": "active"} for row in rows]
+
     async def get_memory_debug(self, memory_id: UUID, owner_id: str) -> dict[str, Any] | None:
         select_cols = """
             id, owner_id, memory_type, summary, source_refs_json, source_ref_hash,

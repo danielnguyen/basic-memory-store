@@ -429,3 +429,69 @@ def test_transition_rejects_unsupported_status_before_storage(monkeypatch):
         assert pg.transition_calls == []
     finally:
         client.close()
+
+
+def test_search_returns_only_bounded_evidence_and_preserves_owner(monkeypatch):
+    pg = FakePG()
+    calls = []
+
+    async def search(**kwargs):
+        calls.append(kwargs)
+        return [{
+            "memory_id": str(uuid.uuid4()), "owner_id": kwargs["owner_id"],
+            "summary": "The silver lighthouse", "memory_type": "core",
+            "source_refs": [{"ref_type": "message", "ref_id": "m-1", "metadata": {"token": "SECRET"}}],
+            "confidence": 0.8, "status": "active", "promotion_state": "promoted",
+            "freshness_state": "active", "updated_at": "2026-01-01T00:00:00Z",
+            "explanation": {"token": "SECRET"}, "events": [{"token": "SECRET"}],
+        }]
+
+    pg.search_memory_items = search
+    monkeypatch.setattr(main_module, "settings", _settings())
+    monkeypatch.setattr(main_module, "pg", pg)
+    client = TestClient(main_module.app)
+    response = client.get("/v1/internal/memory/search", params={"owner_id": "owner", "query": "silver lighthouse"},
+                          headers={"X-API-Key": "testkey"})
+    assert response.status_code == 200
+    assert calls == [{"owner_id": "owner", "query": "silver lighthouse", "limit": 5}]
+    memory = response.json()["memories"][0]
+    assert set(memory) == {"memory_id", "owner_id", "summary", "memory_type", "source_refs", "confidence",
+                           "status", "promotion_state", "freshness_state", "expires_at", "updated_at"}
+    assert memory["source_refs"] == [{"ref_type": "message", "ref_id": "m-1", "support_kind": "direct"}]
+    assert "SECRET" not in response.text
+    assert pg.promote_calls == pg.reinforce_calls == pg.transition_calls == pg.decay_calls == pg.decision_calls == []
+    client.close()
+
+
+def test_search_validation_auth_empty_and_read_only(monkeypatch):
+    calls = []
+
+    async def search(**kwargs):
+        calls.append(kwargs)
+        if not kwargs["query"].strip() or kwargs["query"] == "the and":
+            raise ValueError("meaningless query")
+        return []
+
+    monkeypatch.setattr(main_module, "settings", _settings())
+    monkeypatch.setattr(main_module, "pg", types.SimpleNamespace(search_memory_items=search))
+    client = TestClient(main_module.app)
+    path = "/v1/internal/memory/search"
+    params = {"owner_id": "owner", "query": "unknown"}
+    assert client.get(path, params=params).status_code == 401
+    assert client.get(path, params=params, headers={"X-API-Key": "wrong"}).status_code == 401
+    assert calls == []
+    headers = {"X-API-Key": "testkey"}
+    for invalid in ({"query": ""}, {"query": "x" * 501}, {"owner_id": ""},
+                    {"owner_id": "x" * 161}, {"limit": 0}, {"limit": 11}, {"limit": "1.5"}):
+        assert client.get(path, params={**params, **invalid}, headers=headers).status_code == 422
+    assert calls == []
+    for query in ("   ", "the and"):
+        assert client.get(path, params={**params, "query": query}, headers=headers).status_code == 422
+    for query in ("unknown", "'silver' & lighthouse!", "'; DROP TABLE memory_items; --"):
+        response = client.get(path, params={**params, "query": query}, headers=headers)
+        assert response.status_code == 200
+        assert response.json() == {"memories": []}
+        assert calls[-1]["query"] == query
+    for method in ("post", "put", "patch", "delete"):
+        assert getattr(client, method)(path, headers=headers).status_code == 405
+    client.close()

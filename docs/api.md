@@ -691,3 +691,41 @@ There is no recency search or semantic selection. Existing work, including
 terminal work, remains resolvable after conversation retirement. The locator
 may also be explicitly set or replaced after retirement, subject to the same
 owner/client/work checks. No broad work-list API is provided.
+
+### Search promoted memories (internal, authenticated)
+
+`GET /v1/internal/memory/search?owner_id=owner-123&query=silver%20lighthouse&limit=5`
+requires the existing `X-API-Key`. The service key remains powerful: the caller supplies
+one durable owner, and the query never searches another owner's records. The private
+MCP adapter binds that owner from server configuration instead of accepting it from ChatGPT.
+
+`query` is plain text, 1–500 characters, with at least one English search term after
+PostgreSQL removes stop words. `limit` defaults to 5 and must be 1–10. Invalid input,
+including blank, punctuation-only and stop-word-only queries, returns 422. Questions
+such as “What did I save about the silver lighthouse?” match summaries by English
+stemming and term overlap. Results rank by full-text relevance, then update time and
+ID for deterministic ties. This is keyword retrieval, not semantic or factual inference.
+
+The response is `{"memories": [...]}`; no match returns `{"memories": []}`. Each item
+contains `memory_id`, `owner_id`, `summary` (at most 4000 characters), `memory_type`,
+`source_refs` (at most 50, containing only `ref_type`, `ref_id`, `support_kind`),
+`confidence` when recorded (otherwise null), `status`, `promotion_state`,
+`freshness_state`, `expires_at`, and `updated_at`. Arbitrary source metadata,
+explanations, scores, audit events and debug fields are omitted.
+
+Only active, promoted records with no successor and no elapsed expiry are eligible.
+All other lifecycle/promotion states are excluded. The operation is parameterized,
+uses a read-only database transaction with a two-second statement timeout, and writes
+no memories or audit events. It adds no schema objects or indexes.
+
+The MCP tool `search_memories(query, limit=5)` uses the existing `BMS_OWNER_ID`,
+`MEMORY_API_KEY`, and `BMS_API_URL` configuration and one fixed GET endpoint. It exposes
+no owner, credential, URL or method argument. Successful results have `ok: true` and
+`memories` (without `owner_id`); an empty list means no matching evidence. Failures
+have `ok: false` and a bounded `reason` (`invalid_query`, `not_configured`, or
+`bms_unavailable`), never upstream error details. A failed search does not establish
+that a memory is absent. Wrong-owner, malformed, ineligible or oversized responses
+are rejected as a whole. `get_memory` and the existing temporary write path are unchanged.
+
+Deployment and the live ChatGPT lighthouse search remain owner-operated acceptance
+steps after the updated images are released.

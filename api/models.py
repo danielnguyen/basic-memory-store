@@ -1223,6 +1223,30 @@ class MemoryItemResponse(BaseModel):
     updated_at: str
 
 
+class MemorySearchSourceRef(BaseModel):
+    ref_type: str = Field(..., min_length=1, max_length=64)
+    ref_id: str = Field(..., min_length=1, max_length=160)
+    support_kind: str = Field(default="direct", min_length=1, max_length=64)
+
+
+class MemorySearchItem(BaseModel):
+    memory_id: UUID
+    owner_id: str = Field(..., min_length=1, max_length=160)
+    summary: str = Field(..., min_length=1, max_length=4000)
+    memory_type: str = Field(..., min_length=1, max_length=64)
+    source_refs: List[MemorySearchSourceRef] = Field(..., max_length=50)
+    confidence: Optional[float] = Field(default=None, ge=0, le=1)
+    status: Literal["active"]
+    promotion_state: Literal["promoted"]
+    freshness_state: Literal["active"]
+    expires_at: Optional[datetime] = None
+    updated_at: datetime
+
+
+class MemorySearchResponse(BaseModel):
+    memories: List[MemorySearchItem] = Field(default_factory=list, max_length=10)
+
+
 class MemoryPromoteRequest(BaseModel):
     request_id: str = Field(..., min_length=1, max_length=160)
     owner_id: str = Field(..., min_length=1, max_length=160)
