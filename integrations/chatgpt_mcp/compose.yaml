@@ -1,0 +1,22 @@
+# Separate Portainer stack; do not modify running CCP or Grafana stacks.
+services:
+  bms-mcp-tunnel:
+    image: danielnguyen/basic-memory-store-mcp:latest
+    restart: unless-stopped
+    environment:
+      CONTROL_PLANE_TUNNEL_ID: ${CONTROL_PLANE_TUNNEL_ID:?}
+      CONTROL_PLANE_API_KEY: ${CONTROL_PLANE_API_KEY:?}
+      MEMORY_API_KEY: ${MEMORY_API_KEY:?}
+      BMS_OWNER_ID: daniel
+    networks:
+      - llm-memory-dmz
+      - llm-egress
+    # Outbound tunnel only; no published ports or socket mounts.
+
+networks:
+  llm-memory-dmz:
+    external: true
+    name: llm-memory-dmz
+  llm-egress:
+    external: true
+    name: llm-egress
