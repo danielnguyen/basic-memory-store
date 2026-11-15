@@ -10,15 +10,15 @@ retrieval and memory-lifecycle APIs.
 - Chat Orchestrator owns the normal `POST /v1/chat` request path.
 - Cognitive Runtime owns runtime policy and overlays.
 
-Basic Memory Store also exposes direct compatibility chat endpoints, but new
-chat integrations should enter through Chat Orchestrator.
+Chat integrations enter through Chat Orchestrator. BMS direct-chat endpoints
+have been retired; see the [release dependency](docs/api.md#direct-chat-retirement).
 
 ## Architecture
 
 - PostgreSQL is the authoritative store for durable records.
 - Qdrant is a derivable semantic index that can be rebuilt from PostgreSQL.
 - FastAPI exposes the HTTP service.
-- LiteLLM provides model and embedding access where a feature needs it.
+- LiteLLM provides embedding access for semantic indexing and retrieval.
 
 `owner_id` identifies the person or account that owns durable data.
 `client_id` identifies the source surface or device. Callers must keep these

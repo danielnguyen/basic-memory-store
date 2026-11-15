@@ -534,11 +534,18 @@ Related internal routes support episode extraction and retrieval, derived-data
 invalidation and replay, and bounded recall selection. These APIs own durable
 state transitions; runtime policy remains outside Basic Memory Store.
 
-## Direct chat compatibility
+## Direct chat retirement
 
-`POST /v1/chat` and `POST /v1/orchestrate/chat` remain compatibility endpoints.
+BMS `POST /v1/chat` and `POST /v1/orchestrate/chat` have been removed and return
+404. The chat-only `scripts/memcli.sh` has been retired.
 The normal chat entry point is Chat Orchestrator's `POST /v1/chat`, which calls
 Basic Memory Store through its service boundary.
+
+Before the owner deploys this BMS change, confirm that the CO-only Lambda
+change in [ccp-lambda #7](https://github.com/danielnguyen/ccp-lambda/issues/7)
+has been released and its effective `CHAT_API_URL` and `CHAT_API_KEY` configuration
+is valid. Older direct BMS chat callers must migrate to CO; their breakage is an
+accepted compatibility change. Merge and deployment remain owner-operated.
 
 ## Service endpoints
 

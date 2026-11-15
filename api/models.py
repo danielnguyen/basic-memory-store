@@ -269,11 +269,6 @@ class RetrievalContainmentPolicy(BaseModel):
         return _normalize_labels(values)
 
 
-class MessageIn(BaseModel):
-    role: Role = Field(..., description="Message role.", examples=["user"])
-    content: str = Field(..., description="Message content.", examples=["Remember that my favorite snack is pretzels."])
-
-
 class RetrievalOptions(BaseModel):
     k: int = Field(default=8, ge=1, le=50, description="Number of retrieved items to include.")
     min_score: float = Field(
@@ -2541,67 +2536,3 @@ ImmediateHistoryResolveResponse = Annotated[
     ImmediateHistoryResolveResponseV1 | ImmediateHistoryResolveResponseV2,
     Field(discriminator="schema_version"),
 ]
-
-
-# ---- Chat ----
-
-class ChatRequest(BaseModel):
-    owner_id: str = Field(..., examples=["owner_123"])
-    conversation_id: Optional[str] = Field(
-        default=None,
-        description="If omitted, a new conversation is created automatically.",
-        examples=["550e8400-e29b-41d4-a716-446655440000"],
-    )
-    client_id: Optional[str] = Field(default=None, examples=["car"])
-    messages: List[MessageIn] = Field(..., description="New messages to process (usually one user message).")
-    retrieval: Optional[RetrievalOptions] = Field(default=None)
-    debug: bool = Field(
-        default=False,
-        description="If true, include retrieval diagnostics in the response."
-    )
-
-
-class RetrievalDebugHit(BaseModel):
-    message_id: str
-    score: float
-
-
-class RetrievalDebug(BaseModel):
-    scope_used: RetrievalScope
-    fallback_used: bool
-    hits: List[RetrievalDebugHit]
-
-
-class ChatResponse(BaseModel):
-    conversation_id: str
-    answer: str
-    retrieved_count: int
-    debug: Optional[RetrievalDebug] = None
-
-
-InteractionMode = Literal["text", "voice_mediated"]
-LatencyPreference = Literal["normal", "low", "lowest"]
-VerbosityTarget = Literal["short", "normal", "detailed"]
-OutputFormat = Literal["plain_text", "markdown", "speech"]
-
-
-class SurfaceContext(BaseModel):
-    surface_type: Optional[str] = Field(default=None, min_length=1, max_length=80)
-    interaction_mode: Optional[InteractionMode] = None
-    spoken_output: Optional[bool] = None
-    active_task_mode: Optional[bool] = None
-    latency_preference: Optional[LatencyPreference] = None
-    verbosity_target: Optional[VerbosityTarget] = None
-    allows_expansion: Optional[bool] = None
-    output_format: Optional[OutputFormat] = None
-    style_envelope: Dict[str, Any] = Field(default_factory=dict)
-
-
-class OrchestrateChatRequest(ChatRequest):
-    surface: str = "unknown"
-    artifact_ids: Optional[List[str]] = None
-    surface_context: Optional[SurfaceContext] = None
-
-
-class OrchestrateChatResponse(ChatResponse):
-    request_id: str

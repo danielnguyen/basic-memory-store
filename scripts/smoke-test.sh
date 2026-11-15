@@ -52,38 +52,16 @@ CID=$(
 [[ -n "$CID" && "$CID" != "null" ]] || die "conversation_id missing"
 echo "✅ CID=$CID"
 
-step "Chat 1 (write memory)"
-CHAT1=$(
-  curl -sS -X POST "$BASE/v1/chat" \
+step "Append memory"
+MESSAGE=$(
+  curl -sS -X POST "$BASE/v1/conversations/$CID/messages" \
     "${HDR[@]}" \
-    -d "{\"owner_id\":\"$OWNER_ID\",\"conversation_id\":\"$CID\",\"client_id\":\"$CLIENT_ID\",\"messages\":[{\"role\":\"user\",\"content\":\"Remember that my favorite snack is pretzels.\"}]}"
+    -d "{\"owner_id\":\"$OWNER_ID\",\"client_id\":\"$CLIENT_ID\",\"role\":\"user\",\"content\":\"Remember that my favorite snack is pretzels.\"}"
 )
-echo "$CHAT1" | jq .
-RC1=$(echo "$CHAT1" | jq -r '.retrieved_count')
-[[ "$RC1" =~ ^[0-9]+$ ]] || die "Chat 1 retrieved_count not numeric: $RC1"
-echo "✅ Chat 1 ok (retrieved_count=$RC1)"
-
-step "Chat 2 (should retrieve context)"
-CHAT2=$(
-  curl -sS -X POST "$BASE/v1/chat" \
-    "${HDR[@]}" \
-    -d "{\"owner_id\":\"$OWNER_ID\",\"conversation_id\":\"$CID\",\"client_id\":\"$CLIENT_ID\",\"messages\":[{\"role\":\"user\",\"content\":\"What is my favorite snack?\"}]}"
-)
-echo "$CHAT2" | jq .
-ANS2=$(echo "$CHAT2" | jq -r '.answer')
-RC2=$(echo "$CHAT2" | jq -r '.retrieved_count')
-
-[[ -n "$ANS2" && "$ANS2" != "null" ]] || die "Chat 2 missing answer"
-[[ "$RC2" =~ ^[0-9]+$ ]] || die "Chat 2 retrieved_count not numeric: $RC2"
-(( RC2 > 0 )) || die "Expected retrieved_count > 0 on Chat 2, got $RC2"
-echo "✅ Chat 2 ok (retrieved_count=$RC2)"
-
-if echo "$ANS2" | grep -qi "pretzel"; then
-  echo "✅ Chat 2 answer mentions pretzels"
-else
-  echo "⚠️  Chat 2 answer did not explicitly mention pretzels (not failing):"
-  echo "    $ANS2"
-fi
+echo "$MESSAGE" | jq .
+MID=$(echo "$MESSAGE" | jq -r '.message_id')
+[[ -n "$MID" && "$MID" != "null" ]] || die "message_id missing"
+echo "✅ Memory stored (message_id=$MID)"
 
 step "Retrieve (semantic search should return pretzels)"
 RETR=$(
