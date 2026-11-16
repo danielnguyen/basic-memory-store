@@ -193,8 +193,6 @@ class FakePG:
         return mid
 
     async def get_recent_messages(self, conversation_id, limit: int):
-        # Return minimal structure your prompt assembler expects
-        # (Your assemble_messages uses model_dump() from body.messages + recent_messages.)
         out = []
         for m in self.messages[-limit:]:
             if m["conversation_id"] == str(conversation_id):
@@ -639,8 +637,6 @@ def client(monkeypatch):
         litellm_base_url="http://litellm:4000",
         litellm_api_key=None,
         embed_model="embed",
-        chat_model="chat_local_fast",
-        chat_temperature=None,
         require_request_id=True,
         enforce_request_id_header_body_match=True,
         enable_trace_storage=True,
@@ -656,7 +652,6 @@ def client(monkeypatch):
         enable_hygiene_scan_api=True,
         enable_graph_retrieval_expansion=False,
         recent_turns=10,
-        max_context_chars=4000,
         artifacts_object_prefix="artifacts",
         artifacts_upload_base_url="http://localhost:9000",
         artifacts_presign_ttl_s=900,
