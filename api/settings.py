@@ -48,15 +48,8 @@ class Settings(BaseSettings):
     )
 
     # --- Models (LiteLLM model names) ---
-    chat_model: str = Field(default="gpt-4o-mini", alias="CHAT_MODEL")
     embed_model: str = Field(default="text-embedding-3-small", alias="EMBED_MODEL")
 
-
-    chat_temperature: float | None = Field(
-        default=None,
-        alias="CHAT_TEMPERATURE",
-        description="Optional temperature for chat completions. If unset, the field is omitted (recommended for O-series).",
-    )
 
     # --- Indexing policy ---
     index_user_questions: bool = Field(
@@ -125,7 +118,6 @@ class Settings(BaseSettings):
     )
     enable_hygiene_scan_api: bool = Field(default=True, alias="ENABLE_HYGIENE_SCAN_API")
     enable_graph_retrieval_expansion: bool = Field(default=False, alias="ENABLE_GRAPH_RETRIEVAL_EXPANSION")
-    max_context_chars: int = Field(default=12000, alias="MAX_CONTEXT_CHARS", ge=1000, le=200000)
 
     # --- Trace and profile settings ---
     require_request_id: bool = Field(default=True, alias="REQUIRE_REQUEST_ID")

@@ -47,15 +47,12 @@ deployment: Compose specifies the mutable `main-stable` image tag, not a proven
 installed version. Documentation and offline checks cannot establish account
 access, installed proxy support or live answer quality.
 
-BMS compatibility chat uses `/v1/chat/completions`, optionally sending
-`temperature` and `max_tokens`; its default omits temperature. LiteLLM must
-translate `max_tokens` to `max_completion_tokens` without changing the bound.
-Normal Chat Orchestrator requests can instead carry `max_completion_tokens`,
-`reasoning_effort`, `tools` and `response_format`; verify those fields survive
-the proxy boundary. These are distinct request shapes.
+BMS direct-chat routes have been retired; conversation requests enter Chat
+Orchestrator. Its requests can carry `max_completion_tokens`, `reasoning_effort`,
+`tools` and `response_format`; verify those fields survive the proxy boundary.
 
 [GPT-5.6 migration guidance](https://developers.openai.com/api/docs/guides/upgrading-to-gpt-5p6-sol)
-restricts sampling parameters when reasoning is active. In particular, a BMS
+restricts sampling parameters when reasoning is active. In particular, an
 override such as `temperature=0.2` with default reasoning is rejected by the
 locally checked LiteLLM 1.105.5 adapter for both targets. Before deployment,
 check whether an existing caller sends such an override. If it does, stop and

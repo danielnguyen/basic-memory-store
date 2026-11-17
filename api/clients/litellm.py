@@ -95,51 +95,6 @@ class LiteLLMClient:
           async embed_texts(model, texts) -> list[list[float]]
         """
         return await self.embeddings(model, list(texts))
-    
-    async def chat(
-        self,
-        model: str,
-        messages: Sequence[dict[str, Any]],
-        temperature: float | None = None,
-        max_tokens: Optional[int] = None,
-        request_id: str | None = None,
-    ) -> str:
-        """
-        OpenAI-compatible chat completions call via LiteLLM.
-
-        Assumes:
-          POST {base_url}/v1/chat/completions
-        Payload:
-          {"model": "...", "messages": [...], "temperature": 1, "max_tokens": ...}
-
-        Returns:
-          assistant message content (string)
-        """
-        url = self._url("/v1/chat/completions")
-        payload: dict[str, Any] = {
-            "model": model,
-            "messages": list(messages)
-        }
-        if temperature is not None:
-            payload["temperature"] = temperature
-        if max_tokens is not None:
-            payload["max_tokens"] = max_tokens
-
-        async with httpx.AsyncClient(timeout=self.timeout_s) as client:
-            r = await client.post(url, headers=self._headers(request_id), json=payload)
-            try:
-                r.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                # Include provider error body for easier debugging
-                raise RuntimeError(f"LiteLLM chat failed: {e.response.status_code} {e.response.text}") from e
-            data = r.json()
-
-        # OpenAI-compatible response:
-        # {"choices":[{"message":{"role":"assistant","content":"..."}, ...}], ...}
-        try:
-            return data["choices"][0]["message"]["content"]
-        except Exception as e:
-            raise RuntimeError(f"Unexpected chat response shape: {data!r}") from e
 
 
 class LiteLLMEmbedder:

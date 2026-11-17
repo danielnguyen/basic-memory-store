@@ -10,7 +10,6 @@ TEST_ENV_DEFAULTS = {
     "QDRANT_URL": "http://127.0.0.1:1",
     "LITELLM_BASE_URL": "http://127.0.0.1:1",
     "LITELLM_API_KEY": "testkey",
-    "CHAT_MODEL": "test-chat",
     "EMBED_MODEL": "test-embed",
     "OBJECT_STORE_ENABLED": "false",
 }

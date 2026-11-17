@@ -18,3 +18,5 @@ jobs:
 
       - name: Run canonical Docker-backed test group
         run: make test
+      - name: Run mandatory Docker replay scenarios
+        run: make replay-test

@@ -9,7 +9,6 @@ TEST_ENV := \
 	-e QDRANT_URL=http://127.0.0.1:1 \
 	-e LITELLM_BASE_URL=http://127.0.0.1:1 \
 	-e LITELLM_API_KEY=testkey \
-	-e CHAT_MODEL=test-chat \
 	-e EMBED_MODEL=test-embed \
 	-e OBJECT_STORE_ENABLED=false
 

@@ -27,7 +27,6 @@ from storage.postgres import (
 )
 from storage.qdrant import QdrantStore, RetrievalHit as QdrantHit
 from storage.object_store import ObjectStoreClient
-from prompts.context import assemble_messages, build_artifact_context_block, build_context_block
 from services.ingestion import (
     TEXT_ARTIFACT_DERIVATION_VERSION,
     derive_text_chunks_for_artifact,
@@ -79,16 +78,12 @@ from models import (
     ArtifactInitRequest,
     ArtifactInitResponse,
     ArtifactResponse,
-    ChatRequest,
-    ChatResponse,
     ConversationCreateRequest,
     ConversationCreateResponse,
     ConversationLifecycleRequest,
     ConversationLifecycleState,
     ConversationListResponse,
     ConversationProjection,
-    OrchestrateChatRequest,
-    OrchestrateChatResponse,
     ConversationResolveRequest,
     ConversationResolveResponse,
     EventIngestRequest,
@@ -162,8 +157,6 @@ from models import (
     TieredRetrieveRequest,
     TieredRetrieveResponse,
     OverlayItem,
-    RetrievalDebug,
-    RetrievalDebugHit,
     RetrieveBundleRequest,
     RetrieveBundleResponse,
     ArtifactRef,
@@ -175,7 +168,6 @@ from models import (
     HygieneScanResponse,
     ProfileResolveRequest,
     ProfileResolveResponse,
-    SurfaceContext,
     ClaimRecord,
     ClaimRecordCreateRequest,
     ClaimRecordCreateResponse,
@@ -436,86 +428,6 @@ def _safe_uuid_message_ids(hits: list[QdrantHit], *, context: str, kind: str) ->
             memory_skipped_qdrant_ids_total.labels(kind=kind).inc()
             logging.warning("Skipping non-UUID retrieval hit id in %s: %r", context, getattr(h, "message_id", None))
     return out
-
-
-def _safe_uuid_ids(raw_ids: list[str], *, context: str, kind: str) -> list[UUID]:
-    out: list[UUID] = []
-    for item in raw_ids:
-        try:
-            out.append(UUID(item))
-        except (TypeError, ValueError):
-            memory_skipped_qdrant_ids_total.labels(kind=kind).inc()
-            logging.warning("Skipping non-UUID retrieval hit id in %s: %r", context, item)
-    return out
-
-
-def _cap_snippet(text: str, max_chars: int) -> str:
-    cleaned = text.strip()
-    if len(cleaned) <= max_chars:
-        return cleaned
-    return cleaned[: max_chars - 12].rstrip() + "...(trunc)"
-
-
-def _retrieval_artifact_k() -> int:
-    return int(getattr(settings, "retrieval_artifact_k", 3))
-
-
-def _retrieval_artifact_max_snippet_chars() -> int:
-    return int(getattr(settings, "retrieval_artifact_max_snippet_chars", 500))
-
-
-def _normalize_surface_type(value: str | None) -> str | None:
-    if not value:
-        return None
-    normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
-    if normalized in {"", "unknown"}:
-        return None
-    return normalized
-
-
-def _resolve_surface_behavior(surface: str | None, surface_context: SurfaceContext | None) -> dict[str, Any]:
-    legacy_surface = _normalize_surface_type(surface)
-    nested_surface = _normalize_surface_type(surface_context.surface_type) if surface_context else None
-    resolved_surface = nested_surface or legacy_surface or "chat"
-
-    interaction_mode = surface_context.interaction_mode if surface_context and surface_context.interaction_mode else None
-    spoken_output = surface_context.spoken_output if surface_context and surface_context.spoken_output is not None else None
-    active_task_mode = bool(surface_context.active_task_mode) if surface_context and surface_context.active_task_mode is not None else False
-    latency_preference = surface_context.latency_preference if surface_context and surface_context.latency_preference else "normal"
-    verbosity_target = surface_context.verbosity_target if surface_context and surface_context.verbosity_target else None
-    allows_expansion = surface_context.allows_expansion if surface_context and surface_context.allows_expansion is not None else True
-    output_format = surface_context.output_format if surface_context and surface_context.output_format else None
-
-    if interaction_mode is None:
-        interaction_mode = "voice_mediated" if resolved_surface in {"voice", "car", "alexa"} else "text"
-    if spoken_output is None:
-        spoken_output = interaction_mode == "voice_mediated" or resolved_surface in {"voice", "car", "alexa"}
-    if output_format is None:
-        output_format = "speech" if spoken_output else "plain_text"
-    if verbosity_target is None:
-        verbosity_target = "short" if active_task_mode else "normal"
-
-    compatibility_note = None
-    if nested_surface and legacy_surface and nested_surface != legacy_surface:
-        compatibility_note = {
-            "kind": "surface_type_override",
-            "top_level_surface": legacy_surface,
-            "surface_context_surface_type": nested_surface,
-            "resolved_surface_type": resolved_surface,
-        }
-
-    return {
-        "surface_type": resolved_surface,
-        "interaction_mode": interaction_mode,
-        "spoken_output": spoken_output,
-        "active_task_mode": active_task_mode,
-        "latency_preference": latency_preference,
-        "verbosity_target": verbosity_target,
-        "allows_expansion": allows_expansion,
-        "output_format": output_format,
-        "style_envelope": surface_context.style_envelope if surface_context else {},
-        "compatibility_note": compatibility_note,
-    }
 
 
 def _time_window_cutoff(time_window: str) -> datetime | None:
@@ -1527,335 +1439,6 @@ async def scan_hygiene(body: HygieneScanRequest):
 async def list_hygiene_flags(owner_id: str, status: str | None = None, limit: int = 50):
     flags = await pg.list_hygiene_flags(owner_id=owner_id, status=status, limit=limit)
     return HygieneFlagListResponse(flags=[HygieneFlagItem(**flag) for flag in flags])
-
-
-# -------------------------
-# Chat
-# -------------------------
-
-async def _run_chat(
-    body: ChatRequest,
-    request: Request,
-    *,
-    surface: str | None = None,
-    artifact_ids: list[str] | None = None,
-    surface_behavior: dict[str, Any] | None = None,
-) -> ChatResponse:
-    request_started = time.perf_counter()
-    owner_id = body.owner_id
-    client_id = body.client_id
-
-    created_new = False
-
-    if not body.conversation_id:
-        conversation_id = str(await pg.create_conversation(owner_id=owner_id, client_id=client_id, title=None))
-        created_new = True
-    else:
-        conversation_id = body.conversation_id
-
-    try:
-        cid = UUID(conversation_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="conversation_id must be a UUID")
-
-    if not created_new and not await pg.conversation_exists(cid):
-        raise HTTPException(status_code=404, detail="conversation_id not found")
-
-    inserted_user_message_ids: set[str] = set()
-
-    last_user_text: str | None = None
-    for m in body.messages:
-        if m.role != "user":
-            continue
-        last_user_text = m.content
-        mid = await pg.add_message(
-            conversation_id=cid,
-            owner_id=owner_id,
-            role="user",
-            content=m.content,
-            client_id=client_id,
-            metadata=None,
-        )
-        inserted_user_message_ids.add(str(mid))
-        if should_index_message("user", m.content):
-            try:
-                await qdrant.upsert_message_vector(
-                    message_id=mid,
-                    owner_id=owner_id,
-                    conversation_id=cid,
-                    role="user",
-                    content=m.content,
-                    client_id=client_id,
-                )
-            except Exception:
-                logging.exception(
-                    "qdrant upsert failed for user message (non-fatal)",
-                    extra={
-                        "message_id": str(mid),
-                        "request_id": getattr(request.state, "request_id", None),
-                    },
-                )
-
-    if not last_user_text:
-        raise HTTPException(status_code=400, detail="At least one user message is required.")
-
-    opts = body.retrieval or RetrievalOptions(k=settings.retrieval_k, min_score=0.25, scope="conversation")
-    k = opts.k
-    min_score = opts.min_score
-    artifact_k = _retrieval_artifact_k()
-
-    scope_used = opts.scope
-    fallback_used = False
-
-    def _scope_filters(scope: str) -> tuple[str | None, str | None]:
-        if scope == "conversation":
-            return str(cid), None
-        if scope == "client":
-            return None, client_id
-        return None, None
-
-    async def _run_search(scope: str, min_score_: float) -> list[QdrantHit]:
-        conv_filter, client_filter = _scope_filters(scope)
-        return await qdrant.search(
-            owner_id=owner_id,
-            query=last_user_text,
-            k=k,
-            min_score=min_score_,
-            conversation_id=conv_filter,
-            client_id=client_filter,
-            exclude_message_ids=list(inserted_user_message_ids) if inserted_user_message_ids else None,
-        )
-
-    try:
-        retrieval_hits = await _run_search(opts.scope, min_score)
-    except Exception:
-        logging.exception("qdrant search failed (non-fatal)")
-        retrieval_hits = []
-
-    if opts.scope == "conversation" and (len(retrieval_hits) == 0 or len(retrieval_hits) < max(2, k // 2)):
-        owner_min_score = min(1.0, min_score + 0.05)
-        try:
-            retrieval_hits = await _run_search("owner", owner_min_score)
-            fallback_used = True
-            scope_used = "owner"
-        except Exception:
-            logging.exception("qdrant owner-scope fallback search failed (non-fatal)")
-            retrieval_hits = []
-
-    filtered_hits = [h for h in retrieval_hits if h.message_id not in inserted_user_message_ids]
-    retrieval_ids = _safe_uuid_message_ids(filtered_hits, context="/v1/chat", kind="retrieval")
-    retrieved = await pg.get_message_snippets_by_ids(retrieval_ids)
-    artifact_hits = await qdrant.search_artifact_chunks(
-        owner_id=owner_id,
-        query=last_user_text,
-        k=artifact_k,
-        min_score=min_score,
-        client_id=client_id if opts.scope == "client" else None,
-        conversation_id=cid if opts.scope == "conversation" else None,
-    ) if artifact_k > 0 else []
-    artifact_ids_for_prompt = _safe_uuid_ids(
-        [hit.derived_text_id for hit in artifact_hits],
-        context="/v1/chat",
-        kind="artifact",
-    )
-    artifact_snips = await pg.get_derived_text_snippets_by_ids(artifact_ids_for_prompt)
-    recent = await pg.get_recent_messages(conversation_id=cid, limit=settings.recent_turns)
-
-    system_preamble = (
-        "You are a helpful assistant.\n"
-        "- Use the provided context when relevant.\n"
-        "- If context conflicts, prefer newer timestamps.\n"
-        "- Do not invent facts.\n"
-    )
-    message_context_block = build_context_block(retrieved=retrieved, max_chars=settings.max_context_chars)
-    artifact_context_block = build_artifact_context_block(
-        [
-            {
-                "repo_name": s.get("repo_name"),
-                "file_path": s.get("file_path"),
-                "snippet": _cap_snippet(s["text"], _retrieval_artifact_max_snippet_chars()),
-            }
-            for s in artifact_snips[:artifact_k]
-        ],
-        max_chars=max(1000, settings.max_context_chars // 3),
-    )
-    context_block = "\n\n".join(part for part in (message_context_block, artifact_context_block) if part)
-    prompt_messages = assemble_messages(
-        system_preamble=system_preamble,
-        context_block=context_block,
-        recent_messages=recent,
-        user_messages=[m.model_dump() for m in body.messages],
-    )
-
-    model_started = time.perf_counter()
-    try:
-        answer = await litellm.chat(
-            model=settings.chat_model,
-            messages=prompt_messages,
-            temperature=settings.chat_temperature,
-            request_id=getattr(request.state, "request_id", None),
-        )
-    except Exception as e:
-        logging.exception(
-            "LiteLLM chat call failed",
-            extra={"request_id": getattr(request.state, "request_id", None)},
-        )
-        raise HTTPException(status_code=502, detail=str(e))
-    model_latency_ms = int((time.perf_counter() - model_started) * 1000)
-
-    amid = await pg.add_message(
-        conversation_id=cid,
-        owner_id=owner_id,
-        role="assistant",
-        content=answer,
-        client_id=client_id,
-        metadata=None,
-    )
-    if should_index_message("assistant", answer):
-        try:
-            await qdrant.upsert_message_vector(
-                message_id=amid,
-                owner_id=owner_id,
-                conversation_id=cid,
-                role="assistant",
-                content=answer,
-                client_id=client_id,
-            )
-        except Exception:
-            logging.exception(
-                "qdrant upsert failed for assistant message (non-fatal)",
-                extra={
-                    "message_id": str(amid),
-                    "request_id": getattr(request.state, "request_id", None),
-                },
-            )
-
-    debug_block: RetrievalDebug | None = None
-    if getattr(body, "debug", False):
-        debug_block = RetrievalDebug(
-            scope_used=scope_used,
-            fallback_used=fallback_used,
-            hits=[RetrievalDebugHit(message_id=h.message_id, score=h.score) for h in filtered_hits],
-        )
-
-    resp = ChatResponse(
-        conversation_id=str(cid),
-        answer=answer,
-        retrieved_count=len(retrieved) + len(artifact_snips[:artifact_k]),
-        debug=debug_block,
-    )
-
-    request_id = getattr(request.state, "request_id", None)
-    if request_id:
-        try:
-            await pg.create_trace(
-                {
-                    "request_id": request_id,
-                    "conversation_id": cid,
-                    "owner_id": owner_id,
-                    "client_id": client_id,
-                    "surface": surface or "chat",
-                    "profile": (
-                        {
-                            "surface_context": {
-                                "surface_type": surface_behavior["surface_type"],
-                                "interaction_mode": surface_behavior["interaction_mode"],
-                                "spoken_output": surface_behavior["spoken_output"],
-                                "active_task_mode": surface_behavior["active_task_mode"],
-                                "latency_preference": surface_behavior["latency_preference"],
-                                "verbosity_target": surface_behavior["verbosity_target"],
-                                "allows_expansion": surface_behavior["allows_expansion"],
-                                "output_format": surface_behavior["output_format"],
-                            },
-                            **(
-                                {"surface_compatibility_note": surface_behavior["compatibility_note"]}
-                                if surface_behavior["compatibility_note"]
-                                else {}
-                            ),
-                        }
-                        if surface_behavior
-                        else {}
-                    ),
-                    "router_decision": {
-                    "selected_model": settings.chat_model,
-                    "rule_id": "default-chat-model",
-                    "fallbacks": [],
-                    },
-                    "retrieval": {
-                    "query": last_user_text,
-                    "scope_requested": opts.scope,
-                    "scope_used": scope_used,
-                    "fallback_used": fallback_used,
-                    "hits": [{"message_id": h.message_id, "score": h.score} for h in filtered_hits],
-                    "artifacts_used": (artifact_ids or []) + [s["artifact_id"] for s in artifact_snips[:artifact_k]],
-                    "artifact_refs": [
-                        {
-                            "artifact_id": s["artifact_id"],
-                            "file_path": s["file_path"],
-                            "snippet": _cap_snippet(s["text"], _retrieval_artifact_max_snippet_chars()),
-                            "relevance_score": next((h.score for h in artifact_hits if h.derived_text_id == s["derived_text_id"]), None),
-                            "repo_name": s.get("repo_name"),
-                        }
-                        for s in artifact_snips[:artifact_k]
-                    ],
-                    },
-                    "manual_override": {},
-                    "model_call": {
-                    "provider": "litellm",
-                    "model": settings.chat_model,
-                    "latency_ms": model_latency_ms,
-                    "error": None,
-                    },
-                    "fallback": {},
-                    "cost": {"estimate_usd": None},
-                    "latency_ms": int((time.perf_counter() - request_started) * 1000),
-                    "status": "ok",
-                    "error": None,
-                }
-            )
-        except Exception:
-            logging.exception("trace write failed (non-fatal)", extra={"request_id": request_id})
-
-    return resp
-
-
-@app.post(
-    "/v1/chat",
-    response_model=ChatResponse,
-    tags=["chat"],
-    dependencies=[Depends(require_api_key)],
-    summary="Chat with retrieval-augmented memory",
-)
-async def chat(body: ChatRequest, request: Request):
-    resp = await _run_chat(body, request)
-    return resp
-
-
-@app.post(
-    "/v1/orchestrate/chat",
-    response_model=OrchestrateChatResponse,
-    tags=["chat"],
-    dependencies=[Depends(require_api_key)],
-    summary="Surface-aware orchestration entrypoint (additive wrapper over /v1/chat)",
-)
-async def orchestrate_chat(body: OrchestrateChatRequest, request: Request):
-    surface_behavior = _resolve_surface_behavior(body.surface, body.surface_context)
-    base_req = ChatRequest(
-        owner_id=body.owner_id,
-        conversation_id=body.conversation_id,
-        client_id=body.client_id,
-        messages=body.messages,
-        retrieval=body.retrieval,
-        debug=body.debug,
-    )
-    resp = await _run_chat(
-        base_req,
-        request,
-        surface=surface_behavior["surface_type"],
-        artifact_ids=body.artifact_ids or [],
-        surface_behavior=surface_behavior,
-    )
-    return OrchestrateChatResponse(**resp.model_dump(), request_id=(getattr(request.state, "request_id", None) or ""))
 
 
 @app.get(

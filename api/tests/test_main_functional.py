@@ -8,7 +8,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main as main_module
-from models import OrchestrateChatRequest
 from services.chunking import chunk_text
 from storage.postgres import (
     ConversationLifecycleConflictError,
@@ -194,8 +193,6 @@ class FakePG:
         return mid
 
     async def get_recent_messages(self, conversation_id, limit: int):
-        # Return minimal structure your prompt assembler expects
-        # (Your assemble_messages uses model_dump() from body.messages + recent_messages.)
         out = []
         for m in self.messages[-limit:]:
             if m["conversation_id"] == str(conversation_id):
@@ -640,8 +637,6 @@ def client(monkeypatch):
         litellm_base_url="http://litellm:4000",
         litellm_api_key=None,
         embed_model="embed",
-        chat_model="chat_local_fast",
-        chat_temperature=None,
         require_request_id=True,
         enforce_request_id_header_body_match=True,
         enable_trace_storage=True,
@@ -657,7 +652,6 @@ def client(monkeypatch):
         enable_hygiene_scan_api=True,
         enable_graph_retrieval_expansion=False,
         recent_turns=10,
-        max_context_chars=4000,
         artifacts_object_prefix="artifacts",
         artifacts_upload_base_url="http://localhost:9000",
         artifacts_presign_ttl_s=900,
@@ -1081,10 +1075,6 @@ def test_work_exact_missing_and_scope_validation(client, monkeypatch):
     for params in ({}, {"owner_id": "owner-work"}, {"conversation_id": str(uuid.uuid4())}):
         assert client.get(path, params=params, headers=auth_headers()).status_code == 422
     assert lookup.await_count == 1
-
-
-def _system_prompt_text() -> str:
-    return "\n".join(item["content"] for item in main_module.litellm.calls[-1]["messages"] if item["role"] == "system")
 
 
 def _init_text_artifact(client, *, content: bytes, owner_id: str = "daniel", filename: str = "notes.txt") -> str:
@@ -1711,47 +1701,35 @@ def test_message_append_storage_errors_are_bounded(client, monkeypatch, error, e
     assert main_module.qdrant.upserts == []
 
 
-def test_v1_chat_requires_auth(client):
-    r = client.post("/v1/chat", json={"owner_id": "daniel", "client_id": "smoke", "messages": [{"role": "user", "content": "ping"}]})
-    assert r.status_code == 401
-
-
-def test_v1_chat_happy_path(client):
-    r = client.post(
-        "/v1/chat",
-        headers=auth_headers(),
+@pytest.mark.parametrize("path", ["/v1/chat", "/v1/orchestrate/chat"])
+@pytest.mark.parametrize("authenticated", [False, True])
+def test_direct_chat_routes_are_retired(client, path, authenticated):
+    response = client.post(
+        path,
+        headers=auth_headers() if authenticated else {},
         json={
-            "owner_id": "daniel",
+            "owner_id": "owner-alpha",
             "client_id": "smoke",
-            "messages": [{"role": "user", "content": "ping"}],
+            "messages": [{"role": "user", "content": "Remember this message."}],
         },
     )
-    assert r.status_code == 200
-    body = r.json()
-    assert body["answer"] == "pong"
-    assert "conversation_id" in body
-    assert isinstance(body["retrieved_count"], int)
+    assert response.status_code == 404
+    assert main_module.pg.conversations == set()
+    assert main_module.pg.messages == []
+    assert main_module.pg.traces == {}
+    assert main_module.qdrant.upserts == []
+    assert main_module.litellm.calls == []
 
 
-def test_v1_chat_trace_profile_remains_unchanged(client):
-    rid = "rid-v1-chat"
-    r = client.post(
-        "/v1/chat",
-        headers={**auth_headers(), "X-Request-ID": rid},
-        json={
-            "owner_id": "daniel",
-            "client_id": "smoke",
-            "messages": [{"role": "user", "content": "ping"}],
-        },
-    )
-    assert r.status_code == 200
-
-    prompt_text = _system_prompt_text()
-    assert "Surface behavior guidance:" not in prompt_text
-
-    trace = client.get(f"/v1/traces/{rid}", headers=auth_headers()).json()
-    assert trace["surface"] == "chat"
-    assert trace["profile"] == {}
+def test_openapi_excludes_direct_chat(client):
+    schema = client.get("/openapi.json").json()
+    assert "/v1/chat" not in schema["paths"]
+    assert "/v1/orchestrate/chat" not in schema["paths"]
+    assert not {
+        "ChatRequest", "ChatResponse", "OrchestrateChatRequest",
+        "OrchestrateChatResponse", "MessageIn", "RetrievalDebug",
+        "RetrievalDebugHit", "SurfaceContext",
+    } & schema["components"]["schemas"].keys()
 
 
 def test_v1_retrieve_passes_exclude_ids(client, monkeypatch):
@@ -3002,218 +2980,6 @@ def test_tiered_retrieve_mandatory_policy_filters_all_tiers(client, monkeypatch)
     assert calls["pinned_limit"] == 2
     assert calls["policy_overlay_filter"]["allowed_domains"] == ["technical"]
     assert calls["persona_overlay_filter"]["allowed_domains"] == ["technical"]
-
-
-def test_orchestrate_chat_and_trace_read(client):
-    rid = "rid-orchestrate-test"
-    r = client.post(
-        "/v1/orchestrate/chat",
-        headers={**auth_headers(), "X-Request-ID": rid},
-        json={
-            "owner_id": "daniel",
-            "client_id": "vscode",
-            "surface": "vscode",
-            "artifact_ids": [str(uuid.uuid4())],
-            "messages": [{"role": "user", "content": "ping"}],
-        },
-    )
-    assert r.status_code == 200
-    body = r.json()
-    assert body["answer"] == "pong"
-    request_id = body["request_id"]
-    assert request_id == rid
-
-    r2 = client.get(f"/v1/traces/{request_id}", headers=auth_headers())
-    assert r2.status_code == 200
-    trace = r2.json()
-    assert trace["request_id"] == request_id
-    assert trace["surface"] == "vscode"
-    assert trace["profile"]["surface_context"]["surface_type"] == "vscode"
-    assert trace["profile"]["surface_context"]["spoken_output"] is False
-
-
-def test_orchestrate_request_surface_context_is_optional():
-    req = OrchestrateChatRequest(
-        owner_id="owner",
-        client_id="client",
-        messages=[{"role": "user", "content": "ping"}],
-    )
-    assert req.surface_context is None
-    assert req.surface == "unknown"
-
-
-def test_resolve_surface_behavior_prefers_surface_context_surface_type():
-    req = OrchestrateChatRequest(
-        owner_id="owner",
-        client_id="client",
-        surface="vscode",
-        surface_context={"surface_type": "telegram", "spoken_output": False},
-        messages=[{"role": "user", "content": "ping"}],
-    )
-
-    resolved = main_module._resolve_surface_behavior(req.surface, req.surface_context)
-
-    assert resolved["surface_type"] == "telegram"
-    assert resolved["compatibility_note"] == {
-        "kind": "surface_type_override",
-        "top_level_surface": "vscode",
-        "surface_context_surface_type": "telegram",
-        "resolved_surface_type": "telegram",
-    }
-
-
-def test_orchestrate_chat_without_surface_context_keeps_default_prompt_shape(client):
-    r = client.post(
-        "/v1/orchestrate/chat",
-        headers=auth_headers(),
-        json={
-            "owner_id": "daniel",
-            "client_id": "vscode",
-            "messages": [{"role": "user", "content": "ping"}],
-        },
-    )
-    assert r.status_code == 200
-
-    prompt_text = _system_prompt_text()
-    assert "Surface behavior guidance:" not in prompt_text
-    assert "spoken delivery" not in prompt_text
-
-
-def test_orchestrate_chat_telegram_surface_stays_text_first(client):
-    rid = "rid-telegram-surface"
-    r = client.post(
-        "/v1/orchestrate/chat",
-        headers={**auth_headers(), "X-Request-ID": rid},
-        json={
-            "owner_id": "daniel",
-            "client_id": "telegram",
-            "messages": [{"role": "user", "content": "ping"}],
-            "surface_context": {
-                "surface_type": "telegram",
-                "interaction_mode": "text",
-                "spoken_output": False,
-                "output_format": "plain_text",
-            },
-        },
-    )
-    assert r.status_code == 200
-
-    prompt_text = _system_prompt_text()
-    assert "Surface behavior guidance:" not in prompt_text
-    assert "spoken delivery" not in prompt_text
-
-    trace = client.get(f"/v1/traces/{rid}", headers=auth_headers()).json()
-    assert trace["surface"] == "telegram"
-    assert trace["profile"]["surface_context"]["surface_type"] == "telegram"
-    assert trace["profile"]["surface_context"]["spoken_output"] is False
-    assert trace["profile"]["surface_context"]["interaction_mode"] == "text"
-
-
-def test_orchestrate_chat_voice_surface_keeps_default_prompt_shape_and_preserves_trace(client):
-    rid = "rid-voice-surface"
-    r = client.post(
-        "/v1/orchestrate/chat",
-        headers={**auth_headers(), "X-Request-ID": rid},
-        json={
-            "owner_id": "daniel",
-            "client_id": "car",
-            "messages": [{"role": "user", "content": "ping"}],
-            "surface_context": {
-                "surface_type": "car",
-                "interaction_mode": "voice_mediated",
-                "spoken_output": True,
-                "active_task_mode": True,
-                "allows_expansion": False,
-                "output_format": "speech",
-                "latency_preference": "low",
-            },
-        },
-    )
-    assert r.status_code == 200
-
-    prompt_text = _system_prompt_text()
-    assert "Surface behavior guidance:" not in prompt_text
-    assert "spoken delivery" not in prompt_text
-
-    trace = client.get(f"/v1/traces/{rid}", headers=auth_headers()).json()
-    assert trace["surface"] == "car"
-    assert trace["profile"]["surface_context"]["surface_type"] == "car"
-    assert trace["profile"]["surface_context"]["interaction_mode"] == "voice_mediated"
-    assert trace["profile"]["surface_context"]["spoken_output"] is True
-    assert trace["profile"]["surface_context"]["active_task_mode"] is True
-    assert trace["profile"]["surface_context"]["allows_expansion"] is False
-    assert trace["profile"]["surface_context"]["output_format"] == "speech"
-    assert trace["profile"]["surface_context"]["latency_preference"] == "low"
-
-
-def test_orchestrate_chat_surface_context_overrides_legacy_surface(client):
-    rid = "rid-surface-override"
-    r = client.post(
-        "/v1/orchestrate/chat",
-        headers={**auth_headers(), "X-Request-ID": rid},
-        json={
-            "owner_id": "daniel",
-            "client_id": "vscode",
-            "surface": "vscode",
-            "messages": [{"role": "user", "content": "ping"}],
-            "surface_context": {
-                "surface_type": "telegram",
-                "interaction_mode": "text",
-                "spoken_output": False,
-            },
-        },
-    )
-    assert r.status_code == 200
-
-    trace = client.get(f"/v1/traces/{rid}", headers=auth_headers()).json()
-    assert trace["surface"] == "telegram"
-    assert trace["profile"]["surface_context"]["surface_type"] == "telegram"
-    assert trace["profile"]["surface_compatibility_note"] == {
-        "kind": "surface_type_override",
-        "top_level_surface": "vscode",
-        "surface_context_surface_type": "telegram",
-        "resolved_surface_type": "telegram",
-    }
-
-
-def test_v1_chat_includes_artifact_snippets_in_prompt(client, monkeypatch):
-    derived_id = str(uuid.uuid4())
-
-    class ArtifactHit:
-        def __init__(self):
-            self.derived_text_id = derived_id
-            self.artifact_id = str(uuid.uuid4())
-            self.file_path = "api/main.py"
-            self.repo_name = "basic-memory-store"
-            self.score = 0.72
-
-    async def fake_artifact_search(**kwargs):
-        return [ArtifactHit()]
-
-    async def fake_derived(ids):
-        return [{
-            "derived_text_id": derived_id,
-            "artifact_id": str(uuid.uuid4()),
-            "text": "def build_context_block(): pass",
-            "file_path": "api/main.py",
-            "repo_name": "basic-memory-store",
-        }]
-
-    monkeypatch.setattr(main_module.qdrant, "search_artifact_chunks", fake_artifact_search, raising=True)
-    monkeypatch.setattr(main_module.pg, "get_derived_text_snippets_by_ids", fake_derived, raising=True)
-
-    r = client.post(
-        "/v1/chat",
-        headers=auth_headers(),
-        json={
-            "owner_id": "daniel",
-            "client_id": "smoke",
-            "messages": [{"role": "user", "content": "Where is context built?"}],
-        },
-    )
-    assert r.status_code == 200
-    prompt_messages = main_module.litellm.calls[-1]["messages"]
-    assert any("Relevant ingested file excerpts:" in item["content"] for item in prompt_messages if item["role"] == "system")
 
 
 def test_metrics_exposes_skipped_qdrant_counter(client, monkeypatch):

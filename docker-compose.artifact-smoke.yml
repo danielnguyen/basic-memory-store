@@ -68,7 +68,6 @@ services:
       QDRANT_COLLECTION: messages
       LITELLM_BASE_URL: http://127.0.0.1:1
       LITELLM_API_KEY: smoke
-      CHAT_MODEL: smoke-chat
       EMBED_MODEL: local-deterministic
       OBJECT_STORE_ENABLED: "true"
       OBJECT_STORE_ENDPOINT: http://minio-internal:9000
