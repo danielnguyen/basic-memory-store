@@ -347,6 +347,58 @@ async def test_retrieve_bundle_shape(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("role,metadata,expected", [
+    ("assistant", {"speaker_profile_ref": "daniel:star_trek_q:1", "private": "hidden"}, "daniel:star_trek_q:1"),
+    ("assistant", {}, None),
+    ("assistant", None, None),
+    ("assistant", [], None),
+    ("assistant", "malformed", None),
+    *[("assistant", {"speaker_profile_ref": value}, None) for value in [
+        None, "", "  ", 1, True, [], {},
+        "not-a-profile-reference", "daniel:star_trek_q", "daniel:star_trek_q:banana",
+        ":star_trek_q:1", "daniel::1", "daniel:star_trek_q:",
+        "daniel:star_trek_q:1.5", "daniel:star_trek_q:1:extra",
+        " daniel:star_trek_q:1", "daniel:star_trek_q:1\n", "daniel:star trek q:1",
+    ]],
+    *[("assistant", {"speaker_profile_ref": value}, value) for value in [
+        "owner-2:profile.v2_name:12", "daniel:star_trek_q:0", "daniel:star_trek_q:-1",
+    ]],
+    ("user", {"speaker_profile_ref": "daniel:star_trek_q:1"}, None),
+    ("system", {"speaker_profile_ref": "daniel:star_trek_q:1"}, None),
+])
+async def test_recent_speaker_attribution_is_optional_and_private(monkeypatch, role, metadata, expected):
+    semantic_id = str(uuid.uuid4())
+    pg = FakePG(message_metadata={semantic_id: {"speaker_profile_ref": "daniel:star_trek_q:1"}})
+    original = pg.get_recent_message_items
+
+    async def recent(**kwargs):
+        rows = await original(**kwargs)
+        rows[0].update(role=role, metadata=metadata)
+        return rows
+
+    monkeypatch.setattr(pg, "get_recent_message_items", recent)
+    monkeypatch.setattr(main_module, "pg", pg)
+    monkeypatch.setattr(main_module, "qdrant", FakeQdrant(message_ids=[semantic_id]))
+    monkeypatch.setattr(main_module, "settings", types.SimpleNamespace(
+        memory_api_key="testkey", require_request_id=True,
+        enforce_request_id_header_body_match=True, retrieval_k=8,
+    ))
+    response = await _post_retrieve_bundle(
+        conversation_id=str(uuid.uuid4()), request_id="speaker-test",
+        body={"request_id": "speaker-test", "owner_id": "owner", "query": "hello"},
+    )
+    assert response.status_code == 200, response.text
+    bundle = response.json()["bundle"]
+    item = bundle["recent"][0]
+    assert item["speaker_profile_ref"] == expected
+    assert item["role"] == role
+    assert item["content"] == "recent snippet"
+    assert "metadata" not in item
+    assert "hidden" not in response.text
+    assert all(item["speaker_profile_ref"] is None for item in bundle["semantic"])
+
+
+@pytest.mark.asyncio
 async def test_retrieve_bundle_recent_mode_with_30d_window(monkeypatch):
     now = datetime.now(UTC)
     inside_window = (now - timedelta(days=7)).isoformat()
