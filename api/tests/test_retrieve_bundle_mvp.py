@@ -353,7 +353,16 @@ async def test_retrieve_bundle_shape(monkeypatch):
     ("assistant", None, None),
     ("assistant", [], None),
     ("assistant", "malformed", None),
-    *[("assistant", {"speaker_profile_ref": value}, None) for value in [None, "", "  ", 1, True, [], {}]],
+    *[("assistant", {"speaker_profile_ref": value}, None) for value in [
+        None, "", "  ", 1, True, [], {},
+        "not-a-profile-reference", "daniel:star_trek_q", "daniel:star_trek_q:banana",
+        ":star_trek_q:1", "daniel::1", "daniel:star_trek_q:",
+        "daniel:star_trek_q:1.5", "daniel:star_trek_q:1:extra",
+        " daniel:star_trek_q:1", "daniel:star_trek_q:1\n", "daniel:star trek q:1",
+    ]],
+    *[("assistant", {"speaker_profile_ref": value}, value) for value in [
+        "owner-2:profile.v2_name:12", "daniel:star_trek_q:0", "daniel:star_trek_q:-1",
+    ]],
     ("user", {"speaker_profile_ref": "daniel:star_trek_q:1"}, None),
     ("system", {"speaker_profile_ref": "daniel:star_trek_q:1"}, None),
 ])

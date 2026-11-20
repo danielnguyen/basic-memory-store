@@ -205,7 +205,13 @@ def test_message_policy_metadata_round_trips_dedicated_column_with_postgresql_16
     assert qdrant_payload["memory_domains"] == ["technical"]
 
 
-def test_recent_speaker_round_trip_through_existing_apis(monkeypatch, postgres_database):
+@pytest.mark.parametrize("speaker_ref,expected", [
+    ("owner-speaker:star_trek_q:1", "owner-speaker:star_trek_q:1"),
+    ("not-a-profile-reference", None),
+    ("daniel:star_trek_q", None),
+    ("daniel:star_trek_q:banana", None),
+])
+def test_recent_speaker_round_trip_through_existing_apis(monkeypatch, postgres_database, speaker_ref, expected):
     conversation_id = uuid4()
     with psycopg.connect(postgres_database) as conn:
         conn.execute(
@@ -216,7 +222,7 @@ def test_recent_speaker_round_trip_through_existing_apis(monkeypatch, postgres_d
         monkeypatch, postgres_database, conversation_id=conversation_id,
         body={
             "owner_id": "owner-speaker", "role": "assistant", "content": "Q said this.",
-            "metadata": {"speaker_profile_ref": "owner-speaker:star_trek_q:1", "private": "hidden"},
+            "metadata": {"speaker_profile_ref": speaker_ref, "private": "hidden"},
         },
     )
     assert created.status_code == 200, created.text
@@ -240,7 +246,7 @@ def test_recent_speaker_round_trip_through_existing_apis(monkeypatch, postgres_d
     recent = response.json()["bundle"]["recent"]
     assert len(recent) == 1
     assert recent[0]["message_id"] == created.json()["message_id"]
-    assert recent[0]["speaker_profile_ref"] == "owner-speaker:star_trek_q:1"
+    assert recent[0]["speaker_profile_ref"] == expected
     assert recent[0]["role"] == "assistant"
     assert recent[0]["content"] == "Q said this."
     assert "metadata" not in recent[0]

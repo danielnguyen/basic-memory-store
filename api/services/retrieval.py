@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -202,12 +203,14 @@ def _normalize_domain_values(raw_value: Any) -> list[str]:
 
 
 def _speaker_profile_ref(message: dict[str, Any]) -> str | None:
-    """Project only a nonblank assistant reference; profile references are opaque."""
+    """Project a stored owner:profile:integer-version reference without resolving it."""
     metadata = message.get("metadata")
     if message.get("role") != "assistant" or not isinstance(metadata, dict):
         return None
     value = metadata.get("speaker_profile_ref")
-    return value if isinstance(value, str) and value.strip() else None
+    if not isinstance(value, str) or re.fullmatch(r"[^:\s]+:[^:\s]+:-?[0-9]+", value) is None:
+        return None
+    return value
 
 
 def _policy_metadata(raw_metadata: Any) -> RetrievalPolicyMetadata:
