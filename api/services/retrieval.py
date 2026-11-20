@@ -201,6 +201,15 @@ def _normalize_domain_values(raw_value: Any) -> list[str]:
     return normalized
 
 
+def _speaker_profile_ref(message: dict[str, Any]) -> str | None:
+    """Project only a nonblank assistant reference; profile references are opaque."""
+    metadata = message.get("metadata")
+    if message.get("role") != "assistant" or not isinstance(metadata, dict):
+        return None
+    value = metadata.get("speaker_profile_ref")
+    return value if isinstance(value, str) and value.strip() else None
+
+
 def _policy_metadata(raw_metadata: Any) -> RetrievalPolicyMetadata:
     metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
     domains: list[str] = []
@@ -993,6 +1002,7 @@ async def build_retrieval_bundle(
             source_ref=RetrievalSourceRef(ref_type="message", ref_id=s["message_id"]),
             source_availability="not_applicable",
             qualification_reasons=["canonical_recent"],
+            speaker_profile_ref=_speaker_profile_ref(s),
             policy_metadata=_policy_metadata(s.get("policy_metadata") or s.get("metadata")),
             **_freshness_metadata(memory_item=memory_items_by_ref.get(("message", s["message_id"])), source_kind="message"),
         )

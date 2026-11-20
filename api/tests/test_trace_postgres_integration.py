@@ -205,6 +205,50 @@ def test_message_policy_metadata_round_trips_dedicated_column_with_postgresql_16
     assert qdrant_payload["memory_domains"] == ["technical"]
 
 
+def test_recent_speaker_round_trip_through_existing_apis(monkeypatch, postgres_database):
+    conversation_id = uuid4()
+    with psycopg.connect(postgres_database) as conn:
+        conn.execute(
+            "INSERT INTO conversations (id, owner_id, client_id) VALUES (%s, %s, %s)",
+            (conversation_id, "owner-speaker", "client-speaker"),
+        )
+    created, _ = _append_through_api(
+        monkeypatch, postgres_database, conversation_id=conversation_id,
+        body={
+            "owner_id": "owner-speaker", "role": "assistant", "content": "Q said this.",
+            "metadata": {"speaker_profile_ref": "owner-speaker:star_trek_q:1", "private": "hidden"},
+        },
+    )
+    assert created.status_code == 200, created.text
+    monkeypatch.setattr(main_module, "pg", PostgresStore(postgres_database))
+    with TestClient(main_module.app) as client:
+        response = client.post(
+            f"/v2/conversations/{conversation_id}/retrieve",
+            headers={"X-API-Key": "testkey", "X-Request-ID": "speaker-round-trip"},
+            json={"owner_id": "owner-speaker", "request_id": "speaker-round-trip",
+                  "query": "Who said that?", "include_artifacts": False,
+                  "retrieval": {"k": 8, "scope": "conversation"}},
+        )
+        wrong_owner = client.post(
+            f"/v2/conversations/{conversation_id}/retrieve",
+            headers={"X-API-Key": "testkey", "X-Request-ID": "speaker-wrong-owner"},
+            json={"owner_id": "other-owner", "request_id": "speaker-wrong-owner",
+                  "query": "Who said that?", "include_artifacts": False,
+                  "retrieval": {"k": 8, "scope": "conversation"}},
+        )
+    assert response.status_code == 200, response.text
+    recent = response.json()["bundle"]["recent"]
+    assert len(recent) == 1
+    assert recent[0]["message_id"] == created.json()["message_id"]
+    assert recent[0]["speaker_profile_ref"] == "owner-speaker:star_trek_q:1"
+    assert recent[0]["role"] == "assistant"
+    assert recent[0]["content"] == "Q said this."
+    assert "metadata" not in recent[0]
+    assert "hidden" not in response.text
+    assert wrong_owner.status_code == 404
+    assert "star_trek_q" not in wrong_owner.text
+
+
 def test_working_message_queries_are_owner_qualified_before_limit_with_postgresql_16(postgres_database):
     policy = {
         "memory_domains": ["technical"],
@@ -234,6 +278,7 @@ def test_working_message_queries_are_owner_qualified_before_limit_with_postgresq
                 owner_id="owner-working",
                 role="assistant",
                 content="same owner working survives",
+                metadata={"speaker_profile_ref": "owner-working:star_trek_q:1"},
                 client_id="client-working",
                 policy_metadata=policy,
             )
@@ -248,10 +293,11 @@ def test_working_message_queries_are_owner_qualified_before_limit_with_postgresq
             """
             INSERT INTO messages (
               id, conversation_id, owner_id, client_id, role, content,
-              policy_metadata, created_at
+              policy_metadata, metadata, created_at
             ) VALUES (
               %s, %s, 'other-owner', 'client-working', 'assistant',
-              'cross owner working must not consume limit', %s::jsonb, now()
+              'cross owner working must not consume limit', %s::jsonb,
+              '{"speaker_profile_ref": "other-owner:star_trek_q:1"}'::jsonb, now()
             )
             """,
             (cross_owner_message_id, conversation_id, json.dumps(policy)),
@@ -285,6 +331,13 @@ def test_working_message_queries_are_owner_qualified_before_limit_with_postgresq
                 owner_id="owner-working",
                 limit=1,
             )
+            blocked = await store.get_recent_message_items(
+                conversation_id=conversation_id,
+                owner_id="owner-working",
+                limit=1,
+                policy_filter={**policy_filter, "blocked_domains": ["technical"]},
+            )
+            assert blocked == []
         finally:
             await store.close()
         return mandatory, legacy
@@ -293,6 +346,7 @@ def test_working_message_queries_are_owner_qualified_before_limit_with_postgresq
 
     assert [item["message_id"] for item in mandatory] == [str(owner_message_id)]
     assert mandatory[0]["policy_metadata"] == policy
+    assert mandatory[0]["metadata"]["speaker_profile_ref"] == "owner-working:star_trek_q:1"
     assert [item["message_id"] for item in legacy] == [str(owner_message_id)]
 
 
