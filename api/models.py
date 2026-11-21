@@ -723,6 +723,9 @@ class RetrievalMessageItem(BaseModel):
     conversation_id: str
     role: Role
     content: str
+    speaker_profile_ref: Optional[str] = Field(
+        default=None, description="Stored assistant speaker reference for canonical recent history; null means unknown."
+    )
     created_at: str
     score: Optional[float] = None
     score_details: Dict[str, Any] = Field(default_factory=dict)
