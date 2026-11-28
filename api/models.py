@@ -431,6 +431,33 @@ class ConversationListResponse(BaseModel):
     )
 
 
+class ConversationMessage(BaseModel):
+    message_id: UUID
+    conversation_id: UUID
+    owner_id: str
+    role: Literal["user", "assistant"]
+    content: str
+    created_at: datetime
+    speaker_profile_ref: str | None = None
+
+
+class ConversationMessagesResponse(BaseModel):
+    conversation_id: UUID
+    owner_id: str
+    messages: list[ConversationMessage]
+    next_cursor: str | None = None
+    has_more: bool
+
+
+def parse_message_cursor(cursor: str, conversation_id: UUID) -> tuple[datetime, UUID]:
+    """A position only, never an authorization grant."""
+    cid, timestamp, mid = cursor.split("|")
+    when = datetime.fromisoformat(timestamp)
+    if UUID(cid) != conversation_id or when.utcoffset() is None:
+        raise ValueError("invalid_cursor")
+    return when, UUID(mid)
+
+
 class ConversationResolveRequest(BaseModel):
     owner_id: str = Field(..., examples=["owner_123"])
     client_id: Optional[str] = Field(default=None, examples=["car"])

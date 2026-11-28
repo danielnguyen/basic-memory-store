@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import re
@@ -13,6 +14,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Security, Request, R
 from fastapi.security.api_key import APIKeyHeader
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, generate_latest
 
+from models import ConversationMessage, ConversationMessagesResponse, parse_message_cursor
 from settings import get_settings
 from clients.litellm import LiteLLMClient
 from storage.postgres import (
@@ -34,6 +36,7 @@ from services.ingestion import (
     is_supported_text_artifact_mime,
 )
 from services.retrieval import (
+    _speaker_profile_ref,
     build_retrieval_response_payload,
     containment_policy_filter,
     doctrine_diagnostics_for_bundle,
@@ -648,6 +651,71 @@ async def get_conversation(conversation_id: str, owner_id: str):
     if conversation is None:
         raise HTTPException(status_code=404, detail="conversation_not_found")
     return ConversationProjection(**conversation)
+
+
+@app.get(
+    "/v1/conversations/{conversation_id}/messages",
+    response_model=ConversationMessagesResponse,
+    tags=["conversations"], dependencies=[Depends(require_api_key)],
+    summary="Read an exact owner-selected canonical transcript",
+)
+async def get_conversation_messages(
+    conversation_id: UUID,
+    owner_id: Annotated[str, Query(min_length=1, max_length=160)],
+    limit: Annotated[int, Query(ge=1, le=50)] = 20,
+    cursor: Annotated[str | None, Query(max_length=160)] = None,
+    created_since: datetime | None = None,
+    created_before: datetime | None = None,
+):
+    try:
+        if cursor is not None:
+            parse_message_cursor(cursor, conversation_id)
+        if any(t is not None and t.utcoffset() is None for t in (created_since, created_before)):
+            raise ValueError()
+        if created_since is not None and created_before is not None and created_since >= created_before:
+            raise ValueError()
+    except ValueError:
+        raise HTTPException(422, detail="invalid_transcript_query") from None
+    try:
+        async with asyncio.timeout(5):
+            rows = await pg.get_conversation_messages(
+                conversation_id=conversation_id, owner_id=owner_id, limit=limit,
+                cursor=cursor, created_since=created_since, created_before=created_before,
+            )
+        messages = []
+        used_bytes = 0
+        for row in rows[:limit]:
+            if row["content"] is None:
+                if messages:
+                    break
+                raise HTTPException(413, detail="transcript_message_too_large")
+            message = ConversationMessage(**{
+                **row, "speaker_profile_ref": _speaker_profile_ref(row),
+            })
+            if message.owner_id != owner_id or message.conversation_id != conversation_id:
+                raise ValueError()
+            size = len(message.model_dump_json().encode("utf-8"))
+            if used_bytes + size > 200000:
+                if not messages:
+                    raise HTTPException(413, detail="transcript_message_too_large")
+                break
+            messages.append(message)
+            used_bytes += size
+        has_more = len(rows) > len(messages)
+        next_cursor = None
+        if has_more and messages:
+            oldest = messages[-1]
+            next_cursor = f"{conversation_id}|{oldest.created_at.isoformat()}|{oldest.message_id}"
+        return ConversationMessagesResponse(
+            conversation_id=conversation_id, owner_id=owner_id,
+            messages=list(reversed(messages)), has_more=has_more, next_cursor=next_cursor,
+        )
+    except ConversationNotFoundError:
+        raise HTTPException(404, detail="conversation_not_found") from None
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(503, detail="transcript_unavailable") from None
 
 
 @app.post(

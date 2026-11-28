@@ -2534,3 +2534,125 @@ def test_presence_permission_postgres_exact_upsert_and_isolation(postgres_databa
         assert await store.get_proactive_prefs("permission-owner") is None
 
     _run(postgres_database, exercise)
+
+
+
+def test_transcript_recent_suffix_windows_and_exact_retired_id(postgres_database, monkeypatch):
+    async def exercise(store):
+        cid = await store.create_conversation("transcript-owner", "configured-client")
+        other = await store.create_conversation("other-owner", "configured-client")
+        ids = [UUID(int=i + 1) for i in range(8)]
+        for i, mid in enumerate(ids):
+            await store.add_message(cid, "transcript-owner", "user" if i % 2 == 0 else "assistant",
+                                    f"Exact synthetic exchange {i}.\n  α **formatting**",
+                                    message_id=mid, metadata={"speaker_profile_ref": "transcript-owner:vega:1"},
+                                    policy_metadata={"local_only": True})
+        await store.add_message(other, "other-owner", "user", "foreign-owner")
+        with psycopg.connect(postgres_database) as conn:
+            conn.execute("UPDATE messages SET created_at = '2026-01-01T00:00:00Z' WHERE conversation_id=%s", (cid,))
+        async def read(**kwargs):
+            return await store.get_conversation_messages(conversation_id=cid, owner_id="transcript-owner", **kwargs)
+        rows = await read()
+        # Exercise the actual API page assembler over PostgreSQL, not just a fake.
+        import main as main_module
+        monkeypatch.setattr(main_module, "pg", store)
+        complete = await main_module.get_conversation_messages(cid, "transcript-owner")
+        assert len(complete.messages) == 8 and not complete.has_more
+        assert [m.message_id for m in complete.messages] == ids
+        collected = []
+        page_cursor = None
+        while True:
+            page = await main_module.get_conversation_messages(
+                cid, "transcript-owner", limit=3, cursor=page_cursor,
+            )
+            collected = page.messages + collected
+            if not page.has_more:
+                break
+            assert page.next_cursor != page_cursor
+            page_cursor = page.next_cursor
+        assert collected == complete.messages
+        assert [r["message_id"] for r in rows] == list(reversed(ids))
+        assert [r["content"] for r in reversed(rows)] == [f"Exact synthetic exchange {i}.\n  α **formatting**" for i in range(8)]
+        assert len(await read(created_since=datetime(2026, 1, 1, tzinfo=UTC))) == 8
+        assert await read(created_before=datetime(2026, 1, 1, tzinfo=UTC)) == []
+        assert await read(created_since=datetime(2026, 1, 2, tzinfo=UTC)) == []
+        page = await read(limit=3)
+        assert [r["message_id"] for r in page] == list(reversed(ids))[:4]  # lookahead
+        cursor = f"{cid}|{page[2]['created_at'].isoformat()}|{page[2]['message_id']}"
+        older = await read(limit=3, cursor=cursor)
+        assert [r["message_id"] for r in older] == list(reversed(ids))[3:7]
+        with pytest.raises(ValueError):
+            await read(cursor=f"{other}|2026-01-01T00:00:00Z|{ids[-1]}")
+        for target, owner in ((cid, "other-owner"), (other, "transcript-owner"), (uuid4(), "transcript-owner")):
+            with pytest.raises(ConversationNotFoundError):
+                await store.get_conversation_messages(conversation_id=target, owner_id=owner)
+        replacement = await store.create_conversation("transcript-owner", "new-client")
+        await store.add_message(replacement, "transcript-owner", "assistant", "replacement-not-original")
+        await store.transition_conversation_lifecycle(conversation_id=cid, owner_id="transcript-owner",
+                                                     lifecycle_state="closed", superseded_by_conversation_id=None)
+        assert await read() == rows
+        await store.transition_conversation_lifecycle(conversation_id=cid, owner_id="transcript-owner",
+                                                     lifecycle_state="superseded", superseded_by_conversation_id=replacement)
+        assert await read() == rows
+        # Physical retention/deletion applies directly; there is no transcript copy.
+        with psycopg.connect(postgres_database) as conn:
+            conn.execute("DELETE FROM messages WHERE conversation_id=%s", (cid,))
+        assert await read() == []
+        with psycopg.connect(postgres_database) as conn:
+            conn.execute("DELETE FROM conversations WHERE id=%s", (cid,))
+        with pytest.raises(ConversationNotFoundError):
+            await read()
+    _run(postgres_database, exercise)
+
+
+def test_transcript_canonical_work_roles_owners_and_read_only(postgres_database):
+    async def exercise(store):
+        cid = await store.create_conversation("transcript-owner", "configured-client")
+        expected = []
+        for state in ("pending", "running", "completed", "failed"):
+            work = await store.create_work(owner_id="transcript-owner", conversation_id=cid,
+                                           request_id=state, client_id="configured-client", surface="web")
+            if state != "pending":
+                work = await _change_work(store, work, "running")
+            mid = await store.add_message(cid, "transcript-owner", "assistant", state,
+                                         metadata={"request_id": state, "surface": "user", "role": "user"})
+            if state == "completed":
+                await _change_work(store, work, "completed", assistant_message_id=mid)
+                expected.append(mid)
+            elif state == "failed":
+                await _change_work(store, work, "failed", failure_code="interrupted")
+        for role in ("user", "assistant", "system", "tool"):
+            mid = await store.add_message(cid, "transcript-owner", role, f"stored-{role}",
+                                         metadata={"surface": "system", "role": "assistant", "credential": "SECRET"},
+                                         policy_metadata={"local_only": True})
+            if role in ("user", "assistant"):
+                expected.append(mid)
+        with psycopg.connect(postgres_database) as conn:
+            conn.execute("INSERT INTO messages (conversation_id, owner_id, role, content) VALUES (%s, 'other', 'user', 'foreign')", (cid,))
+            before = [conn.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
+                      for table in ("conversations", "messages", "work_items")]
+        rows = await store.get_conversation_messages(conversation_id=cid, owner_id="transcript-owner")
+        assert {r["message_id"] for r in rows} == set(expected)
+        assert "SECRET" not in str(rows) and "foreign" not in str(rows)
+        assert all(set(r["metadata"]) == {"speaker_profile_ref"} for r in rows)
+        with psycopg.connect(postgres_database) as conn:
+            after = [conn.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
+                     for table in ("conversations", "messages", "work_items")]
+        assert after == before
+    _run(postgres_database, exercise)
+
+
+def test_transcript_storage_bounds_large_text_and_attribution(postgres_database):
+    async def exercise(store):
+        cid = await store.create_conversation("transcript-owner", "configured-client")
+        await store.add_message(cid, "transcript-owner", "assistant", "α" * 32769,
+                                metadata={"speaker_profile_ref": "x" * 201, "extra": "SECRET"})
+        rows = await store.get_conversation_messages(conversation_id=cid, owner_id="transcript-owner")
+        assert len(rows) == 1 and rows[0]["content"] is None
+        assert rows[0]["metadata"] == {"speaker_profile_ref": None}
+        # A blocked read must fail within the local statement deadline.
+        with psycopg.connect(postgres_database) as conn:
+            conn.execute("LOCK TABLE messages IN ACCESS EXCLUSIVE MODE")
+            with pytest.raises(psycopg.errors.QueryCanceled):
+                await store.get_conversation_messages(conversation_id=cid, owner_id="transcript-owner")
+    _run(postgres_database, exercise)
