@@ -3030,3 +3030,94 @@ def test_pinned_memories_migration_mentions_set_null_fk():
     sql = migration_path.read_text()
     assert "ALTER COLUMN conversation_id DROP NOT NULL" in sql
     assert "ON DELETE SET NULL" in sql
+
+
+
+def _transcript_rows(cid, count=8, content=None):
+    return [{"message_id": uuid.UUID(int=i + 1), "conversation_id": cid,
+             "owner_id": "owner-transcript", "role": "assistant" if i % 2 else "user",
+             "content": content if content is not None else f"Saved line {i}.\n  α spacing",
+             "created_at": datetime.fromisoformat("2026-01-01T00:00:00+00:00"),
+             "metadata": {"speaker_profile_ref": "owner-transcript:vega:1", "credential": "SECRET"}}
+            for i in reversed(range(count))]
+
+
+def test_transcript_api_exact_text_and_recent_pages(client, monkeypatch):
+    cid = uuid.uuid4()
+    rows = _transcript_rows(cid)
+    read = AsyncMock(return_value=rows)
+    monkeypatch.setattr(main_module.pg, "get_conversation_messages", read, raising=False)
+    url = f"/v1/conversations/{cid}/messages"
+    result = client.get(url, params={"owner_id": "owner-transcript"}, headers=auth_headers())
+    assert result.status_code == 200
+    body = result.json()
+    assert [m["content"] for m in body["messages"]] == [r["content"] for r in reversed(rows)]
+    assert len(body["messages"]) == 8 and not body["has_more"] and body["next_cursor"] is None
+    assert body["messages"][0]["speaker_profile_ref"] is None
+    assert body["messages"][1]["speaker_profile_ref"] == "owner-transcript:vega:1"
+    assert "SECRET" not in result.text and "metadata" not in result.text
+    read.return_value = rows[:4]
+    result = client.get(url, params={"owner_id": "owner-transcript", "limit": 3}, headers=auth_headers())
+    body = result.json()
+    assert body["has_more"] and len(body["messages"]) == 3
+    assert body["next_cursor"].endswith(str(rows[2]["message_id"]))
+    assert body["messages"][0]["message_id"] == str(rows[2]["message_id"])
+    read.return_value = []
+    assert client.get(url, params={"owner_id": "owner-transcript", "cursor": body["next_cursor"]},
+                      headers=auth_headers()).json()["messages"] == []
+    assert read.call_args.kwargs["cursor"] == body["next_cursor"]
+
+
+@pytest.mark.parametrize("params", [{"limit": 0}, {"limit": 51}, {"cursor": "bad"},
+    {"cursor": "x" * 161}, {"created_since": "2026-01-01"},
+    {"created_since": "2026-01-02T00:00:00Z", "created_before": "2026-01-01T00:00:00Z"}])
+def test_transcript_api_input_and_auth(client, monkeypatch, params):
+    read = AsyncMock()
+    monkeypatch.setattr(main_module.pg, "get_conversation_messages", read, raising=False)
+    url = f"/v1/conversations/{uuid.uuid4()}/messages"
+    assert client.get(url, params={"owner_id": "owner-transcript", **params}, headers=auth_headers()).status_code == 422
+    assert client.get(url, params={"owner_id": "owner-transcript"}).status_code == 401
+    assert client.get("/v1/conversations/not-uuid/messages", params={"owner_id": "owner-transcript"},
+                      headers=auth_headers()).status_code == 422
+    read.assert_not_called()
+
+
+@pytest.mark.parametrize("error,status", [(ConversationNotFoundError(), 404), (RuntimeError("SECRET"), 503)])
+def test_transcript_api_missing_and_unavailable(client, monkeypatch, error, status):
+    read = AsyncMock(side_effect=error)
+    monkeypatch.setattr(main_module.pg, "get_conversation_messages", read, raising=False)
+    result = client.get(f"/v1/conversations/{uuid.uuid4()}/messages", params={"owner_id": "owner-transcript"},
+                        headers=auth_headers())
+    assert result.status_code == status and "SECRET" not in result.text
+
+
+def test_transcript_api_byte_budget_does_not_truncate_text(client, monkeypatch):
+    cid = uuid.uuid4()
+    rows = _transcript_rows(cid, content="α" * 30000)
+    read = AsyncMock(return_value=rows)
+    monkeypatch.setattr(main_module.pg, "get_conversation_messages", read, raising=False)
+    url = f"/v1/conversations/{cid}/messages"
+    result = client.get(url, params={"owner_id": "owner-transcript"}, headers=auth_headers())
+    assert result.status_code == 200 and len(result.content) < 262144
+    body = result.json()
+    assert body["has_more"] and 0 < len(body["messages"]) < len(rows)
+    assert all(m["content"] == "α" * 30000 for m in body["messages"])
+    rows[0]["content"] = None
+    assert client.get(url, params={"owner_id": "owner-transcript"}, headers=auth_headers()).status_code == 413
+    rows[0]["content"] = "Exact newest"
+    rows[1]["content"] = None
+    body = client.get(url, params={"owner_id": "owner-transcript"}, headers=auth_headers()).json()
+    assert len(body["messages"]) == 1 and body["has_more"]
+
+
+def test_transcript_api_window_and_foreign_cursor(client, monkeypatch):
+    cid = uuid.uuid4()
+    read = AsyncMock(return_value=[])
+    monkeypatch.setattr(main_module.pg, "get_conversation_messages", read, raising=False)
+    params = {"owner_id": "owner-transcript", "created_since": "2025-12-31T19:00:00-05:00",
+              "created_before": "2026-01-02T00:00:00Z"}
+    url = f"/v1/conversations/{cid}/messages"
+    assert client.get(url, params=params, headers=auth_headers()).status_code == 200
+    assert read.call_args.kwargs["created_since"].utcoffset().total_seconds() == -18000
+    params["cursor"] = f"{uuid.uuid4()}|2026-01-01T00:00:00Z|{uuid.uuid4()}"
+    assert client.get(url, params=params, headers=auth_headers()).status_code == 422

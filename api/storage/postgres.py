@@ -13,6 +13,7 @@ from psycopg.errors import UniqueViolation
 
 from models import (
     AcquisitionHistoryIdentifier,
+    parse_message_cursor,
     CurrentWorkSetRequest,
     WorkCreateRequest,
     WorkProjection,
@@ -1048,9 +1049,12 @@ class PostgresStore:
         params.append(limit)
 
         async with self.pool.connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(q, tuple(params))
-                rows = await cur.fetchall()
+            async with conn.transaction():
+                await conn.execute("SET TRANSACTION READ ONLY")
+                await conn.execute("SET LOCAL statement_timeout = '2s'")
+                async with conn.cursor() as cur:
+                    await cur.execute(q, tuple(params))
+                    rows = await cur.fetchall()
 
         out: list[dict[str, Any]] = []
         next_cursor: str | None = None
@@ -1065,6 +1069,56 @@ class PostgresStore:
             next_cursor = f"{last_updated_at}|{last_id}"
 
         return out, next_cursor
+
+    async def get_conversation_messages(
+        self, *, conversation_id: UUID, owner_id: str, limit: int = 20,
+        cursor: str | None = None, created_since: datetime | None = None,
+        created_before: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        # Owner-directed transcript reads deliberately do not use automatic
+        # provider-disclosure policy. Publication and both owners still apply.
+        where = ["m.conversation_id = %s", "m.owner_id = %s",
+                 "m.role IN ('user', 'assistant')", _canonical_message_sql('m')]
+        params: list[Any] = [conversation_id, owner_id]
+        if cursor is not None:
+            when, mid = parse_message_cursor(cursor, conversation_id)
+            where.append("(m.created_at, m.id) < (%s, %s)")
+            params.extend([when, mid])
+        for timestamp, operator in ((created_since, ">="), (created_before, "<")):
+            if timestamp is not None:
+                where.append(f"m.created_at {operator} %s")
+                params.append(timestamp)
+        params.append(limit + 1)
+        async with self.pool.connection() as conn:
+            async with conn.transaction():
+                await conn.execute("SET TRANSACTION READ ONLY")
+                await conn.execute("SET LOCAL statement_timeout = '2s'")
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT 1 FROM conversations WHERE id = %s AND owner_id = %s",
+                        (conversation_id, owner_id),
+                    )
+                    if await cur.fetchone() is None:
+                        raise ConversationNotFoundError()
+                    # Bound transfer even for arbitrarily large stored text/metadata.
+                    # NULL content signals an explicit oversized-message failure;
+                    # it must never be silently omitted or shortened.
+                    await cur.execute(f"""
+                        SELECT m.id, m.role,
+                            CASE WHEN octet_length(m.content) <= 65536 THEN m.content END,
+                            m.created_at,
+                            CASE WHEN octet_length(m.metadata->>'speaker_profile_ref') <= 200
+                                 THEN m.metadata->'speaker_profile_ref' END
+                        FROM messages m
+                        JOIN conversations c ON c.id = m.conversation_id AND c.owner_id = m.owner_id
+                        WHERE {' AND '.join(where)}
+                        ORDER BY m.created_at DESC, m.id DESC LIMIT %s
+                    """, tuple(params))
+                    rows = await cur.fetchall()
+        return [{"message_id": r[0], "conversation_id": conversation_id,
+                 "owner_id": owner_id, "role": r[1], "content": r[2],
+                 "created_at": r[3], "metadata": {"speaker_profile_ref": r[4]}}
+                for r in rows]
 
     async def resolve_conversation(
         self,

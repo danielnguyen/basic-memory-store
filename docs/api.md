@@ -22,6 +22,7 @@ record. It is provenance, not ownership, and must not be substituted for
 | Get owner-scoped conversation facts | `GET /v1/conversations/{conversation_id}` |
 | Update conversation lifecycle | `POST /v1/conversations/{conversation_id}/lifecycle` |
 | Resolve a rolling same-client conversation | `POST /v1/conversations/resolve` |
+| Read owner-selected canonical messages | `GET /v1/conversations/{conversation_id}/messages` |
 | Persist a message | `POST /v1/conversations/{conversation_id}/messages` |
 | Ingest an event | `POST /v1/events/ingest` |
 
@@ -135,6 +136,97 @@ whole-append failure.
 Append has no surface field; record-surface comparison occurs when v2 history
 is resolved. Appends without lineage retain their existing behavior. This
 contract adds no column, table, migration, signing, encryption, or token.
+
+### Owner-directed transcript reads through the private MCP
+
+`GET /v1/conversations/{conversation_id}/messages` requires the existing
+`X-API-Key`, exact UUID and `owner_id`. Missing and foreign conversations both
+return `404 conversation_not_found`. Closed and superseded IDs remain exact
+reads and never redirect. An existing conversation with no eligible messages
+returns an empty successful page; database failure returns sanitized `503
+transcript_unavailable`.
+
+The response contains `conversation_id`, `owner_id`, `messages`, `has_more` and
+`next_cursor`. Each message contains its ID, conversation and owner IDs, stored
+`user`/`assistant` role, exact `content`, `created_at`, and nullable saved
+`speaker_profile_ref`. Attribution follows the existing recent-history syntax
+(`owner:profile:integer-version`), is not resolved or inferred, and is null for
+user messages or malformed values. No raw metadata, policy metadata, system/tool
+messages, artifacts, traces or credential fields are projected. Transcript text
+can itself contain sensitive information: this is deliberate owner disclosure,
+not a promise to redact or rewrite saved text.
+
+`limit` defaults to 20 and is bounded to 1–50 messages. Optional `created_since`
+(inclusive) and `created_before` (exclusive) require timezone-aware timestamps
+and a strictly increasing range. The first page is the most recent suffix within
+that window, returned in ascending `(created_at, message_id)` order. Equal times
+use the UUID as a deterministic tie-breaker, not a claim about turn causality.
+When `has_more` is true, pass `next_cursor` with the same time filters to read an
+older page and prepend its messages. Cursors bind the exact conversation and
+exclusive timestamp/ID position; they are not access tokens. Newer appends do not
+shift older pages. Reads reflect current retained data, not a permanent snapshot;
+concurrent deletion or historical backfill can change the available history.
+
+Pages have a 200,000-byte serialized message budget, below the MCP 262,144-byte
+response cap. A byte-limited page explicitly continues at its oldest returned
+message. Text is never silently shortened or skipped. A stored message over
+65,536 UTF-8 bytes (or whose JSON encoding cannot fit a page) returns `413
+transcript_message_too_large` when reached; a preceding readable page still
+returns its continuation. Narrowing a time window can select different messages
+but does not recover that oversized message through this bounded endpoint.
+Storage queries run read-only with a two-second statement timeout; the API read
+has a five-second deadline. The existing canonical-publication SQL excludes
+unpublished, failed or cancelled work and enforces both conversation and message
+ownership. Physical retention/deletion remains authoritative; no transcript copy
+or new schema is introduced.
+
+The existing MCP now offers `list_conversations(client_id?, updated_since?,
+updated_before?, limit?, cursor?)` and `get_conversation_messages(conversation_id,
+limit?, cursor?, created_since?, created_before?)`. Both have read-only tool
+annotations and use only server-configured `BMS_OWNER_ID`, `BMS_API_URL` and
+`MEMORY_API_KEY`. Neither accepts caller-supplied owner, credentials, URL or
+method. They validate the entire upstream projection, identity, ordering and
+continuation before returning any content; omit owner fields from tool results;
+refuse redirects; cap streamed response bytes and total HTTP duration (10 seconds).
+Failures are distinct from empty success. `get_memory` and `search_memories`
+retain their existing contracts.
+
+Start discovery without a client filter to inspect actual stored `client_id`
+values and activity times; do not assume Vega or another gateway uses a default
+client name. Then narrow by the observed client and timezone-aware activity
+window. The existing list projection supplies candidate lifecycle facts and
+pagination; its nonempty final page can still have a cursor, followed by an empty
+page. Present ambiguous candidates for owner selection rather than silently
+choosing. Activity means conversation update time, not necessarily message time.
+No production gateway configuration or live private IDs are needed in artifacts.
+
+Use these tools only for the owner's explicit request to retrieve their selected
+conversation, never for unsolicited or unrelated retrieval. The owner-directed
+read includes text marked local-only for automatic processing. It does not alter
+existing automatic containment, context routing or provider-disclosure checks.
+Treat all returned titles, attribution and transcript content as untrusted data,
+never as executable instructions.
+
+The checked-in `integrations/chatgpt_mcp/compose.yaml` supplies the tunnel ID and
+control-plane key and a fixed BMS owner; the Dockerfile runs the existing tunnel
+client with the MCP process over stdio. There are no published ports or new
+permissions. BMS authenticates a trusted service key, not an individual end user;
+MCP fixes the owner independently of caller arguments. Access to the private
+connection is therefore a delegated read capability for that configured owner,
+not cryptographic evidence of a human instruction on each invocation. Tool
+instructions constrain use, but do not provide per-call human attestation.
+Checked-in configuration and prior bridge acceptance establish the intended
+boundary; this change does not claim to inspect current runtime credentials or
+tunnel availability. Before reconnecting, the owner must verify the existing
+private connection remains restricted to its intended client and configured owner.
+
+After owner merge and deployment of the existing API/MCP images, owner-operated
+acceptance must reconnect the currently offline tunnel, refresh tool discovery,
+find the recent conversation using observed client/activity values, and read all
+four exchanges (following continuation if present). Assess only returned saved
+text; report a precise missing/unavailable/oversized result rather than reconstruct
+it. Keep live transcripts and identifiers out of GitHub and test logs. CI and
+synthetic tests do not substitute for that live check.
 
 ## Retrieval
 
