@@ -193,3 +193,99 @@ object-store, and Qdrant endpoints. Apply the managed schema check, verify
 representative owned records and artifacts, and rebuild or validate the
 semantic index before directing traffic to the restored services. Never test a
 restore against production endpoints.
+
+## Optional CCP proactive pages via ntfy
+
+The publisher defaults off. Both git and portfolio initiative evaluations use
+one HTTP transport after committing the canonical suggestion and decision.
+Only the database insert winner publishes; repeated or concurrent evaluation
+of the same owner/event/rule does not republish. Disabled preferences, denied
+owners/surfaces, suppressed decisions and candidate-only validation do not page.
+A requested surface other than telegram cannot publish, even if the legacy
+evaluator resolves a fallback surface. No memory
+snippet, portfolio data, suggestion title/body or model-provided destination is
+sent. Existing suggestion/decision/feedback and delivery APIs remain canonical.
+
+Configure `PROACTIVE_NTFY_ENABLED=true`, `PROACTIVE_NTFY_BASE_URL` (server
+origin only), `PROACTIVE_NTFY_TOPIC` (dedicated topic, for example `ccp-pages`),
+`PROACTIVE_NTFY_OWNER_ID` (the single authorized owner), and optionally
+`PROACTIVE_NTFY_TIMEOUT_S` (default 3 seconds, maximum 10). Use the installed
+server already serving Node-RED, with its existing access protections; do not
+use a public ntfy server for these identifiers. Do not use `alert`, `alerts` or
+`truenas-alerts`. HTTPS is preferred where the existing service supports it;
+the installed private-network HTTP service is also supported. This change adds
+no credentials, server configuration or receiver. Enablement does not grant
+network access or authorize service changes.
+
+### Wire contract
+
+One POST to `<configured origin>/<configured topic>`, content type
+`text/plain; charset=utf-8`, carries this JSON as the ntfy **message body**:
+
+```json
+{"version":1,"suggestion_id":"00000000-0000-4000-8000-000000000083","owner_id":"synthetic-owner","text":"CCP has a new suggestion for your attention. Open Vega to discuss it."}
+```
+
+The example is synthetic, not a valid record to deliver. The receiver must parse
+ntfy's outer SSE JSON, then parse its `message` as this object. Reject unknown
+versions, wrong owner, malformed IDs and non-message events. Look up the
+canonical suggestion, check owner, pending status, telegram target and current
+preferences, and suppress already delivered or dismissed records. Route the
+safe text through the existing Mavis sender without model transformation. Keep
+the suggestion ID through the send and use the existing
+`POST /v1/proactive/suggestions/{id}/delivery-attempt` callback with surface
+`telegram`; record actual sender success/failure and its external ID. A Telegram
+sender receipt does not establish physical G2 receipt.
+
+The publisher requires a successful HTTP response containing a nonempty ntfy
+`id`, `event=message` and the configured `topic`, with a maximum 4096-byte
+response and a total operation deadline. It does not follow redirects or retry.
+The `proactive_ntfy_publish` log records the suggestion ID and transport outcome
+`accepted` or `failed`. Neither outcome changes delivery status: it remains
+`not_attempted` until the existing receiver callback. Failures preserve canonical
+context and do not fail the evaluation request. A timeout or invalid response
+may mean ntfy accepted the page; `failed` means acceptance was not confirmed.
+
+### Staged owner-run activation and rollback
+
+1. Deploy the reviewed BMS build with publishing **off** and leave hourly
+   suggestion polling active. The separate Node-RED follow-up must first build
+   and review the receiver for this contract, including bounded cache reconnect,
+   serialized/deduplicated handling by suggestion ID, and canonical status checks.
+2. Keep that receiver's sender gated off while testing parsing. Inventory a
+   bounded, owner-approved set of pending/not_attempted and failed records with
+   existing APIs. Resolve which records are stale, still wanted or uncertain;
+   do not delete them or mass-replay them. Preserve unrelated deferred chat.
+3. For cutover, pause only proactive polling and drain its in-flight sends and
+   callbacks. Keep publishing off during this pause. Record the cutover time and
+   chosen reconciliation IDs. Start the reviewed receiver, then enable publishing
+   for the configured owner and dedicated topic. Do not run both senders together.
+4. From deployed CCP, ingest one harmless synthetic portfolio event using the
+   existing event-ingest API and a unique source event ID (drift above the enabled
+   rule threshold). Evaluate its returned event-log ID once through
+   `/v1/initiative/evaluate`, with an owner-approved test owner/preferences and
+   telegram surface matching configuration. No private holdings or memory are
+   needed. Observe its persisted suggestion/decision, ntfy acceptance, actual
+   Mavis message and callback, then have the owner confirm native G2 receipt and
+   activate Vega for an ordinary conversation about that event.
+5. Before retiring polling, repeat the same evaluation and verify no second
+   page. Test receiver interruption, reconnect within the server's verified cache
+   retention, replay of the same cached message, and sender failure. Require one
+   send for a known delivered suggestion and truthful failure callbacks. Reconcile
+   records created during the cutover pause individually. Do not infer receipt
+   from HTTP acceptance or claim reconnect guarantees without these live tests.
+6. Roll back by disabling BMS publishing first, stopping/draining the receiver,
+   reconciling any uncertain sends, and only then resuming proactive polling.
+   Check its pending/not_attempted filter before resumption; failed records need
+   explicit bounded handling. Preserve all canonical context and feedback.
+
+This is best-effort paging, not durable exactly-once delivery. A crash after
+suggestion insertion but before decision persistence or POST loses the automatic
+page; subsequent evaluation does not retry that insertion. A crash after POST
+or after Telegram send but before its callback can leave acceptance/delivery
+uncertain. Existing records support bounded owner-led reconciliation, and ntfy
+cache can support receiver recovery only within configured retention. Automatic
+recovery beyond that window is not provided. The receiver must serialize live
+and replay sends; canonical status checks alone cannot eliminate the
+send-before-callback crash window. Ambiguous records require inspection, not
+blind retry. There is no new durable queue, retry worker, schema or endpoint.
