@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
+
+import httpx
 
 from models import RetrievalOptions
 from services.retrieval import retrieve_ranked_messages
@@ -16,6 +20,60 @@ DEFAULT_PORTFOLIO_DRIFT_THRESHOLD = 0.05
 DEFAULT_GIT_MIN_SCORE = 0.35
 DEFAULT_COOLDOWN_HOURS = 24.0
 DEFAULT_NEGATIVE_FEEDBACK_SUPPRESSION_DAYS = 7.0
+
+
+async def _publish_page(*, settings: Any, suggestion: dict[str, Any], requested_surface: str | None) -> None:
+    """Best-effort transport acceptance only; delivery receipts remain receiver-owned."""
+    if (
+        not getattr(settings, "proactive_ntfy_enabled", False)
+        or suggestion["owner_id"] != getattr(settings, "proactive_ntfy_owner_id", "")
+        or requested_surface not in {None, "telegram"}
+        or suggestion.get("target_surface") != "telegram"
+        or suggestion.get("status") != "pending"
+        or suggestion.get("delivery_status") != "not_attempted"
+    ):
+        return
+    topic = settings.proactive_ntfy_topic
+    payload = {
+        "version": 1,
+        "suggestion_id": suggestion["suggestion_id"],
+        "owner_id": suggestion["owner_id"],
+        "text": "CCP has a new suggestion for your attention. Open Vega to discuss it.",
+    }
+    outcome = "failed"
+    try:
+        # Bound the entire operation, including slow streaming responses. No retries
+        # or redirects: timeout/connection loss can mean acceptance is unknown.
+        async with asyncio.timeout(settings.proactive_ntfy_timeout_s):
+            async with httpx.AsyncClient(
+                timeout=settings.proactive_ntfy_timeout_s, follow_redirects=False,
+            ) as client:
+                async with client.stream(
+                    "POST", settings.proactive_ntfy_base_url.rstrip("/") + "/" + topic,
+                    content=json.dumps(payload), headers={"Content-Type": "text/plain; charset=utf-8"},
+                ) as response:
+                    response.raise_for_status()
+                    body = bytearray()
+                    async for chunk in response.aiter_bytes(chunk_size=4096):
+                        body.extend(chunk)
+                        if len(body) > 4096:
+                            raise ValueError("Oversized ntfy response")
+                    receipt = json.loads(body)
+                    if (
+                        not isinstance(receipt, dict)
+                        or receipt.get("event") != "message"
+                        or receipt.get("topic") != topic
+                        or not isinstance(receipt.get("id"), str)
+                        or not receipt["id"]
+                    ):
+                        raise ValueError("Invalid ntfy receipt")
+                    outcome = "accepted"
+    except (httpx.HTTPError, TimeoutError, ValueError):
+        # Never log remote response bodies, URLs or private suggestion contents.
+        pass
+    logging.info("proactive_ntfy_publish", extra={
+        "suggestion_id": suggestion["suggestion_id"], "transport_outcome": outcome,
+    })
 
 
 def _coerce_float(value: Any) -> float | None:
@@ -515,6 +573,7 @@ async def evaluate_event(
             conversation_id=UUID(event_log["conversation_id"]) if event_log.get("conversation_id") else None,
             settings=settings,
             generation_trace_id=request_id,
+            requested_surface=surface,
         )
         return _evaluation_response(request_id, owner_id, event_log_id, initiative_event, [decision], [suggestion] if suggestion else [])
 
@@ -526,8 +585,10 @@ async def evaluate_event(
             initiative_event=initiative_event,
             prefs=prefs,
             profile=profile,
+            settings=settings,
             delivery_surface=delivery_surface,
             generation_trace_id=request_id,
+            requested_surface=surface,
         )
         return _evaluation_response(request_id, owner_id, event_log_id, initiative_event, [decision], [suggestion] if suggestion else [])
 
@@ -663,6 +724,7 @@ async def _evaluate_git_event(
     conversation_id: UUID | None,
     settings: Any,
     generation_trace_id: str,
+    requested_surface: str | None,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     payload = event_log.get("payload_json") or {}
     normalized_subject = _normalized_git_subject(payload)
@@ -759,7 +821,7 @@ async def _evaluate_git_event(
         delivery_surface=delivery_surface,
         generation_trace_id=generation_trace_id,
     )
-    suggestion, _ = await pg.create_proactive_suggestion(
+    suggestion, inserted = await pg.create_proactive_suggestion(
         owner_id=candidate["owner_id"],
         source_event_log_id=candidate["source_event_log_id"],
         source_type=candidate["source_type"],
@@ -788,6 +850,8 @@ async def _evaluate_git_event(
         reason_extra={"scoring": {"query": query, "score": score, "threshold": threshold, "score_details": score_details}},
     )
     logging.info("initiative_git_suggestion_created", extra={"owner_id": owner_id, "event_log_id": event_log["event_log_id"], "suggestion_id": suggestion["suggestion_id"], "decision_id": decision["decision_id"]})
+    if inserted:
+        await _publish_page(settings=settings, suggestion=suggestion, requested_surface=requested_surface)
     return decision, suggestion
 
 
@@ -799,8 +863,10 @@ async def _evaluate_portfolio_event(
     initiative_event: dict[str, Any],
     prefs: dict[str, Any],
     profile: dict[str, Any],
+    settings: Any,
     delivery_surface: str,
     generation_trace_id: str,
+    requested_surface: str | None,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     payload = event_log.get("payload_json") or {}
     normalized_subject = _normalized_portfolio_subject(payload, PORTFOLIO_RULE_KIND)
@@ -862,7 +928,7 @@ async def _evaluate_portfolio_event(
         delivery_surface=delivery_surface,
         generation_trace_id=generation_trace_id,
     )
-    suggestion, _ = await pg.create_proactive_suggestion(
+    suggestion, inserted = await pg.create_proactive_suggestion(
         owner_id=candidate["owner_id"],
         source_event_log_id=candidate["source_event_log_id"],
         source_type=candidate["source_type"],
@@ -891,4 +957,6 @@ async def _evaluate_portfolio_event(
         reason_extra={"scoring": {"observed_drift": drift, "threshold": threshold}},
     )
     logging.info("initiative_portfolio_suggestion_created", extra={"owner_id": owner_id, "event_log_id": event_log["event_log_id"], "suggestion_id": suggestion["suggestion_id"], "decision_id": decision["decision_id"]})
+    if inserted:
+        await _publish_page(settings=settings, suggestion=suggestion, requested_surface=requested_surface)
     return decision, suggestion

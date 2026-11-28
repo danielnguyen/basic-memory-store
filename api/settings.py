@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from pydantic import Field
+import re
+from urllib.parse import urlsplit
+
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,6 +18,28 @@ class Settings(BaseSettings):
 
     # --- Auth ---
     memory_api_key: str = Field(..., alias="MEMORY_API_KEY", description="API key required in x-api-key header")
+
+    # --- Optional CCP paging transport (receiver owns delivery receipts) ---
+    proactive_ntfy_enabled: bool = Field(default=False, alias="PROACTIVE_NTFY_ENABLED")
+    proactive_ntfy_base_url: str = Field(default="", alias="PROACTIVE_NTFY_BASE_URL")
+    proactive_ntfy_topic: str = Field(default="", alias="PROACTIVE_NTFY_TOPIC")
+    proactive_ntfy_owner_id: str = Field(default="", alias="PROACTIVE_NTFY_OWNER_ID")
+    proactive_ntfy_timeout_s: float = Field(default=3.0, alias="PROACTIVE_NTFY_TIMEOUT_S", gt=0, le=10)
+
+    @model_validator(mode="after")
+    def validate_proactive_ntfy(self):
+        if self.proactive_ntfy_enabled:
+            url = urlsplit(self.proactive_ntfy_base_url)
+            if (
+                url.scheme not in {"http", "https"} or not url.hostname
+                or url.username or url.password or url.query or url.fragment
+                or url.path not in {"", "/"}
+                or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", self.proactive_ntfy_topic)
+                or self.proactive_ntfy_topic in {"alert", "alerts", "truenas-alerts"}
+                or not self.proactive_ntfy_owner_id.strip()
+            ):
+                raise ValueError("Enabled CCP paging requires a server origin, dedicated topic and owner")
+        return self
 
     # --- Postgres ---
     pg_dsn: str = Field(
